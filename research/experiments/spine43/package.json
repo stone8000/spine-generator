@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "devDependencies": { "@esotericsoftware/spine-core": "4.3.13" }
+}
