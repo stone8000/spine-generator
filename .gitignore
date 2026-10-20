@@ -1,0 +1,4 @@
+# per-character metrics derived from third-party research packs: keep local
+research/data/
+__pycache__/
+*.pyc
