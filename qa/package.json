@@ -1,0 +1,23 @@
+{
+  "name": "spinegen-qa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QA oracle: official spine-core 4.2 runtime as the judge of generated skeletons (dump + named gates).",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "spinegen-qa": "./run.mjs"
+  },
+  "scripts": {
+    "check": "node run.mjs check",
+    "dump": "node run.mjs dump",
+    "test": "node --test test/qa.test.mjs"
+  },
+  "devDependencies": {
+    "@esotericsoftware/spine-canvaskit": "4.2.120",
+    "@esotericsoftware/spine-core": "4.2.120"
+  }
+}

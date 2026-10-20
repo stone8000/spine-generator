@@ -8,6 +8,26 @@
 - `stone8000/hacksaw-character-motion`：香蕉猴產生器、自己寫的 Spine 播放器，以及 235 隻參考角色的動作包（研究用）
 - `chenyuping1998/wp@c1ecdb9`：照 Iron Jaw（Xposed，三星）做法重做的 Hard Time 骨架產生器
 
+## 進度
+
+| 階段 | 狀態 | 入口 |
+|---|---|---|
+| 研究：量化基準、節拍表、外部最佳做法 | ✅ | `research/FINDINGS.md`、`research/beat_table.json`、`research/SOTA.md` |
+| P1 裁判與輸出骨幹 | ✅ 6 項驗收全過，兩輪反查後修正 | `research/P1_REPORT.md`、`qa/README.md` |
+| P2 讓圖撐得住（猴子現有的圖） | 下一步 | `research/SOTA.md` §7 |
+
+P1 的東西：
+- `qa/`：Node 裁判，精確鎖定官方 `@esotericsoftware/spine-core@4.2.120`（與 `spine-canvaskit@4.2.120`），
+  `node qa/run.mjs check|dump`，實作 L1–L9、G1、G3、M1、P1、P3、C1 閘門。`qa43/` 用 4.3.13 檢查版本相容性。
+- `spinegen/ir.py`（版本無關的中介表示）、`spinegen/spine42_reader.py`、`spinegen/emit/spine42.py`、
+  `spinegen/lbs.py`（numpy 版 Spine 4.2 骨骼與蒙皮，C1 與官方 runtime 差 ≤ 5e-5 px）。
+- `spinegen/oracle_check.py`（C1）、`spinegen/reemit_check.py`（讀進來再輸出，與原檔差 ≤ 1e-5 px）。
+
+```bash
+cd qa && npm ci && npm test        # 55 tests
+python3 -m pytest tests -q         # 106 tests（第三方檔案不存在時自動跳過）
+```
+
 ## 目前的發現
 
 細節見 [`research/FINDINGS.md`](research/FINDINGS.md)，這裡只列重點：

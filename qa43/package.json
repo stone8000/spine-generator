@@ -1,0 +1,15 @@
+{
+  "name": "spinegen-qa43",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Probe: what the official spine-core 4.3 runtime makes of a skeleton (counts, dropped constraints, throws).",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "load": "node load.mjs"
+  },
+  "devDependencies": {
+    "@esotericsoftware/spine-core": "4.3.13"
+  }
+}
