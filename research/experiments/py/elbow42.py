@@ -2,6 +2,7 @@
 
     python research/experiments/py/elbow42.py [--out /tmp/spinegen-elbow42] [--extent 2.0] [--rows 2]
         [--angles 0:150:10] [--both-ways] [--extents 1.0,1.25,1.5,2.0] [--json results.json]
+        [--gates [--gate-step 2] [--sheet DIR]]
 
 WHY
   SOTA §8 open question 1: the half-angle helper bone + piecewise ramp was
@@ -45,6 +46,11 @@ MEASURES (per angle; folds and vertices come from the runtime dump)
 
   A rigid cut-out never folds and keeps its area by construction; its failure
   is the seam (gap / ghost at the joint), which the raster gates G4/G6 measure.
+  --gates runs exactly those: spinegen.budget scans each variant (numpy LBS,
+  which C1 above pins to the runtime, rendered by spinegen.raster and read by
+  spinegen.art_gates G1 G2 G4 G5 G6), so the three variants get the same
+  theta_soft / theta_hard and limiting reason a character's budget.json has;
+  --sheet also writes one contact sheet per variant.
 
 Outputs (skeleton, atlas, PNG, results JSON) go to --out, never into the repo.
 """
@@ -61,7 +67,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, ROOT)
 
-from spinegen import ir as irmod, lbs, mesh, weights  # noqa: E402
+from spinegen import budget as budgetmod, ir as irmod, lbs, mesh, weights  # noqa: E402
 from spinegen.emit import spine42  # noqa: E402
 
 # canvas layout (y down): shoulder, elbow, wrist on one horizontal line
@@ -332,6 +338,32 @@ def parse_angles(spec):
     return [a + i * s for i in range(int(round((b - a) / s)) + 1)]
 
 
+def gate_scan(variant, extent, rows, layers, meshes, step=2.0, max_angle=150.0, sheet_dir=None):
+    """budget.scan of one variant: {"+": entry, "-": entry} (budget.json
+    form) for the elbow, plus the contact sheet path when sheet_dir is set."""
+    rig, _, _ = build(variant, extent, rows, layers, meshes)
+    images = {name: rgba for name, (rgba, _) in layers.items()}
+    jn = [{"name": "elbow", "bone": "fore", "dirs": [1, -1], "band": dict(joint(variant == "helper", extent),
+                                                                          center=tuple(to_world(ELBOW)),
+                                                                          axis=(1.0, 0.0))}]
+    b = budgetmod.scan(rig, images, jn, step=step, max_angle=max_angle)
+    out = {"budget": b["joints"]["elbow"], "seconds": b["meta"]["seconds"]}
+    if sheet_dir:
+        os.makedirs(sheet_dir, exist_ok=True)
+        path = os.path.join(sheet_dir, f"elbow42_{variant}.png")
+        budgetmod.write_sheets(path, rig, images, jn, budget=b, max_angle=max_angle, every=30.0)
+        out["sheet"] = path
+    return out
+
+
+def print_gates(variant, g):
+    for d in ("+", "-"):
+        e = g["budget"][d]
+        ff = ", ".join(f"{k} {v['angle']:g}" for k, v in sorted(e["first_fail"].items(), key=lambda kv: abs(kv[1]["angle"])))
+        print(f"  {variant:7s} {d}  soft {e['soft']:5.0f} ({e['limit_by']})  hard {e['hard']:5.0f} ({e['hard_by']})"
+              f"  first fails: {ff or '-'}")
+
+
 def print_sweep(info, rows):
     print(f"\n{info['variant']} (extent {info['extent']} hw, {info['rows']} rows per half, "
           f"bend {'+' if info['sign'] > 0 else '-'}): verts {info['vertices']} grid {info['grid_vertices']} "
@@ -356,6 +388,9 @@ def main(argv=None):
     ap.add_argument("--extents", help="also tabulate these band extents (comma list) at --at degrees")
     ap.add_argument("--at", type=float, default=120.0)
     ap.add_argument("--json")
+    ap.add_argument("--gates", action="store_true", help="also scan every variant with the raster art gates")
+    ap.add_argument("--gate-step", type=float, default=2.0)
+    ap.add_argument("--sheet", help="with --gates: write one contact sheet per variant into this directory")
     args = ap.parse_args(argv)
     angles = parse_angles(args.angles)
     layers = arm_layers()
@@ -383,6 +418,14 @@ def main(argv=None):
                       f"{info['hard']:4.0f} {info['g2']:3.0f} {info['soft_sum']:8.0f} {info['soft_union']:10.0f} | "
                       f"{ref['area']:14.3f} {ref['fold_at']:7.1f}")
                 results["extents"].append(dict(info, at=r))
+    if args.gates:
+        print(f"\nraster art gates (spinegen.budget, step {args.gate_step:g}, 0..{max(angles):g} deg; "
+              f"extent {args.extent:g} hw)")
+        results["gates"] = {}
+        for v in args.variants.split(","):
+            g = gate_scan(v, args.extent, args.rows, layers, meshes, args.gate_step, max(angles), args.sheet)
+            results["gates"][v] = g
+            print_gates(v, g)
     if args.json:
         with open(args.json, "w") as f:
             json.dump(results, f, indent=1)
