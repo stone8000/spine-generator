@@ -15,8 +15,14 @@ WHY
   request; §4.3). This module turns the eye into gates:
     theta_soft  the last angle with 0 folds, joint-band area >= 0.9, 0 seam
                 gap px, 0 holes, 0 ghost (G1 G2 G4 G5 G6): holds may go here;
-    theta_hard  the last angle with 0 folds and 0 holes (G1 G5): strikes and
-                transits may pass through, never stop.
+    theta_hard  the last angle with 0 folds and 0 holes (G1; G5 holes in the
+                body and G4 seam gaps, the joint's own holes, with G4's
+                >= 4 px component rule): strikes and transits may pass
+                through, never stop. SOTA §4.3 asks 0 folds AND 0 holes, and
+                §5 names G4 "joint holes": a cut-out elbow whose wedge is
+                open is broken in a strike as much as in a hold (the rigid
+                monkey's elbows read hard 150 while 168-1015 px wedges stood
+                open from 60 deg, before G4 counted here).
   "Last" means contiguous from the setup pose: the first failing angle ends
   the range, whatever happens beyond it.
 
@@ -83,6 +89,7 @@ from . import raster
 SCHEMA = "spinegen-budget/1"
 SHEET_EVERY = 10.0
 SOFT_ORDER = ("fold", "hole", "seam", "ghost", "area")  # limit_by priority when several fail at once
+HARD_ORDER = ("fold", "hole", "seam")  # theta_hard: 0 folds, 0 holes (G5 body, G4 joint); hard_by priority
 
 
 # ---------------------------------------------------------------- joints
@@ -185,7 +192,7 @@ class Probe:
             for key in ([name] if name != "ghost" else ["ghost_band", "ghost_paint"]):
                 if not g[key]["pass"]:
                     fails.append(_label(key, g[key], self.jr))
-        hard_fails = [_label(n, g[n], self.jr) for n in ("fold", "hole") if not g[n]["pass"]]
+        hard_fails = [_label(n, g[n], self.jr) for n in HARD_ORDER if not g[n]["pass"]]
         return {"angle": angle, "soft": not fails, "hard": not hard_fails,
                 "soft_by": fails[0] if fails else None, "hard_by": hard_fails[0] if hard_fails else None,
                 "limits": fails, "gates": g, "frame": fr}

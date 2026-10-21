@@ -10,6 +10,7 @@ import pytest
 
 from conftest import third_party
 
+from spinegen import art_gates as ag
 from spinegen import budget, raster, synth_art
 
 SCALE = 0.5
@@ -32,20 +33,42 @@ def test_load_joints_forms():
         budget.load_joints([{"name": "x"}])
 
 
-def test_square_cut_elbow_soft_zero_hard_unlimited():
-    """A rigid cut-out never folds or holes at the elbow (hard = max) but
-    tears at the first step (soft = 0, limited by the seam)."""
+def test_square_cut_elbow_tears_soft_and_hard_zero():
+    """A rigid cut-out never folds or opens a body hole at the elbow, but
+    its seam tears at the first step: soft = hard = 0, both limited by G4.
+    P2 review F2: the seam gap is a joint HOLE (SOTA §5 G4), so theta_hard
+    (0 folds AND 0 holes, §4.3) stops there too; before, hard read the
+    sweep's maximum (60 here, 150 on the rigid monkey) while the wedge
+    stood open."""
     out = _scan(["elbow_l"], mode="rigid", overlap=0, round_ends=False)
     assert out["schema"] == "spinegen-budget/1"
     for d in ("+", "-"):
         e = out["joints"]["elbow_l"][d]
         assert e["soft"] == 0 and e["limit_by"] == "seam@upper_arm_l|forearm_l"
-        assert e["hard"] == 60 and e["hard_by"] is None
+        assert e["hard"] == 0 and e["hard_by"] == "seam@upper_arm_l|forearm_l"
         assert e["first_fail"]["G4_SEAM_GAP"]["angle"] == (4 if d == "+" else -4)
         assert "G1_FOLDS" not in e["first_fail"] and "G5_HOLES" not in e["first_fail"]
     m = out["meta"]["joints"]["elbow_l"]
     assert m["upper_slots"] == ["upper_arm_l"] and m["lower_slots"] == ["forearm_l"]
     assert m["moving_slots"] == ["forearm_l"]
+
+
+def test_hard_limit_keeps_g4s_speck_rule(monkeypatch):
+    """theta_hard counts G4 with the same component rule as soft (G4_MIN_PX):
+    what the rule drops ends neither a hold nor a strike."""
+    ir, images, joints = synth_art.build(scale=SCALE, mode="rigid", overlap=0, round_ends=False)
+    elbow = next(j for j in budget.load_joints(joints) if j["name"] == "elbow_l")
+    p = budget.Probe(ir, images, elbow, 1.0, canvas=budget.scan_canvas(ir, images, joints, 60))
+    assert p.judge(0)["hard"]
+    r = p.judge(4)
+    g = r["gates"]["seam"]
+    assert not g["pass"] and not r["hard"] and r["hard_by"].startswith("seam@")
+    assert g["raw_px"] >= g["value"] >= ag.G4_MIN_PX * SCALE ** 2
+    # the same gap read as specks (every component under the rule): it holds
+    monkeypatch.setattr(ag, "G4_MIN_PX", 10.0 * g["raw_px"] / SCALE ** 2)
+    r = p.judge(4)
+    assert r["gates"]["seam"]["raw_px"] == g["raw_px"] and r["gates"]["seam"]["value"] == 0
+    assert r["hard"] and not any(x.startswith("seam@") for x in r["limits"])
 
 
 def test_ramp_weighted_elbow_is_limited_by_folds():
@@ -89,9 +112,12 @@ def test_trace_keeps_every_gate_value():
     out = _scan(["elbow_l"], step=10.0, max_angle=30.0, mode="rigid", overlap=0, round_ends=False,
                 keep_trace=True)
     tr = out["meta"]["joints"]["elbow_l"]["trace"]
-    assert [t["angle"] for t in tr] == [10, 20, 30, -10, -20, -30]
+    # the open seam is a hard failure: each direction stops at its first step
+    assert [t["angle"] for t in tr] == [10, -10]
     assert set(tr[0]["values"]) == set(budget.GATE_IDS.values())
-    assert tr[0]["values"]["G4_SEAM_GAP"] > 0
+    assert tr[0]["values"]["G4_SEAM_GAP"] > 0 and not tr[0]["hard"]
+    held = _scan(["elbow_l"], step=10.0, max_angle=30.0, mode="joint", keep_trace=True)
+    assert [t["angle"] for t in held["meta"]["joints"]["elbow_l"]["trace"]] == [10, 20, 30, -10, -20, -30]
 
 
 def test_contact_sheet_layout():
