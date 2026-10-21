@@ -31,8 +31,9 @@ from spinegen import weights as wmod  # noqa: E402
 from spinegen.raster import raster_triangles  # noqa: E402
 
 ROOT = (512.0, 1456.0)      # motion kit template: canvas px of the Spine origin (rigTemplate.ROOT_PX)
-OUT_W, OUT_H = 1200, 2000   # render canvas, room for jumps and raised arms
-OX, OY = 600.0, 1800.0      # render px of the Spine origin
+SCALE = 0.5                 # render scale: metrics and sheets at half resolution (full res is ~4x slower)
+OUT_W, OUT_H = int(1200 * SCALE), int(2000 * SCALE)   # render canvas, room for jumps and raised arms
+OX, OY = 600.0 * SCALE, 1800.0 * SCALE                # render px of the Spine origin
 JOINT_DISK = 0.7            # joint-gap disk radius, in limb half-widths
 
 # joint -> (upper bone, helper or None, lower bone); the joint sits at the lower bone's origin
@@ -46,13 +47,18 @@ JOINTS = {
     "waist": ("hip", None, "chest"), "neckBase": ("chest", None, "neck"), "headBase": ("neck", None, "head"),
     "hairRoot": ("head", None, "hairF"),
 }
-# which joints each layer spans. The torso and pelvis do not follow the limbs: the limb layers reach into them
-# and hand their own root ends over to the body instead (template: limbs are painted into the torso/pelvis).
+# which joints each layer spans. The torso and pelvis do not follow the limbs.
+#
+# Shoulders and hips stay RIGID (the limb's root end is 100% on the limb bone), measured on this trial: ramping the
+# upper arm's root into the chest without a helper put vertices between two bones up to ~110 degrees apart in
+# `celebrate`, and linear blend skinning collapsed the whole upper arm into a swollen blob (4 folded triangles,
+# research/trials/README.md). The template already paints the limb roots into the torso/pelvis with round ends,
+# which is what a rigid root needs. Elbows and knees bend with half-angle helpers.
 LAYER_JOINTS = {
-    "arm_front_upper": ["shoulderF", "elbowF"], "arm_front_lower": ["elbowF", "wristF"], "fist_front": ["wristF"],
-    "arm_back_upper": ["shoulderB", "elbowB"], "arm_back_lower": ["elbowB", "wristB"], "fist_back": ["wristB"],
-    "leg_front_upper": ["hipF", "kneeF"], "leg_front_lower": ["kneeF"],
-    "leg_back_upper": ["hipB", "kneeB"], "leg_back_lower": ["kneeB"],
+    "arm_front_upper": ["elbowF"], "arm_front_lower": ["elbowF", "wristF"], "fist_front": ["wristF"],
+    "arm_back_upper": ["elbowB"], "arm_back_lower": ["elbowB", "wristB"], "fist_back": ["wristB"],
+    "leg_front_upper": ["kneeF"], "leg_front_lower": ["kneeF"],
+    "leg_back_upper": ["kneeB"], "leg_back_lower": ["kneeB"],
     "pelvis": ["waist"], "torso": ["waist", "neckBase"], "neck": ["neckBase", "headBase"], "head": ["headBase"],
     "hair_front": ["hairRoot"], "hair_back": [],
 }
@@ -170,29 +176,42 @@ def skin_world(sk, frame_bones):
     return np.stack([(W * x).sum(1), (W * y).sum(1)], 1)
 
 
-def region_quad(att, m):
-    """World corners of a region attachment and their image uvs (bottom-left, top-left, top-right, bottom-right)."""
+class Texture:
+    """A layer image cropped to its ink (as Spine's packer strips whitespace), as float, with its canvas offset."""
+
+    def __init__(self, rgba):
+        ys, xs = np.nonzero(rgba[..., 3] > 0)
+        self.x0, self.y0 = max(0, xs.min() - 2), max(0, ys.min() - 2)
+        self.x1, self.y1 = min(rgba.shape[1], xs.max() + 3), min(rgba.shape[0], ys.max() + 3)
+        self.full = (rgba.shape[1], rgba.shape[0])
+        self.f = rgba[self.y0:self.y1, self.x0:self.x1].astype(np.float32) / 255.0
+
+
+def region_quad(att, m, tex):
+    """World corners of a region attachment, trimmed to the layer's ink, with texel coords into the trimmed image."""
     w, h = att["width"], att["height"]
     r = np.radians(att.get("rotation", 0.0))
     cr, sr = np.cos(r), np.sin(r)
-    loc = np.array([[-w / 2, -h / 2], [-w / 2, h / 2], [w / 2, h / 2], [w / 2, -h / 2]])
+    # image px (x right, y down) of the trimmed rectangle -> region-local (centre origin, y up)
+    corners = np.array([[tex.x0, tex.y1], [tex.x0, tex.y0], [tex.x1, tex.y0], [tex.x1, tex.y1]], float)
+    loc = np.stack([corners[:, 0] - w / 2, h / 2 - corners[:, 1]], 1)
     loc = np.stack([loc[:, 0] * cr - loc[:, 1] * sr + att.get("x", 0.0), loc[:, 0] * sr + loc[:, 1] * cr + att.get("y", 0.0)], 1)
-    uv = np.array([[0, 1], [0, 0], [1, 0], [1, 1]], float)
-    return apply(m, loc), uv, np.array([[0, 1, 2], [0, 2, 3]])
+    texel = corners - np.array([tex.x0, tex.y0])
+    return apply(m, loc), texel, np.array([[0, 1, 2], [0, 2, 3]])
 
 
-def draw(canvas, img, world, uvs, tris):
+def draw(canvas, tex, world, texel, tris):
     H, W = canvas.shape[:2]
-    px = np.stack([world[:, 0] + OX, OY - world[:, 1]], 1)
-    th, tw = img.shape[:2]
-    pix, val, _ = raster_triangles(px, tris, (H, W), attrs=uvs * np.array([tw, th]))
+    px = np.stack([world[:, 0] * SCALE + OX, OY - world[:, 1] * SCALE], 1)
+    th, tw = tex.f.shape[:2]
+    pix, val, _ = raster_triangles(px, tris, (H, W), attrs=texel)
     if len(pix) == 0:
         return
     u = np.clip(val[:, 0] - 0.5, 0, tw - 1.001)
     v = np.clip(val[:, 1] - 0.5, 0, th - 1.001)
     x0, y0 = np.floor(u).astype(int), np.floor(v).astype(int)
     fx, fy = (u - x0)[:, None], (v - y0)[:, None]
-    f = img.astype(np.float32) / 255.0
+    f = tex.f
     col = (f[y0, x0] * (1 - fx) * (1 - fy) + f[y0, x0 + 1] * fx * (1 - fy)
            + f[y0 + 1, x0] * (1 - fx) * fy + f[y0 + 1, x0 + 1] * fx * fy)
     a = col[:, 3:4]
@@ -203,17 +222,22 @@ def draw(canvas, img, world, uvs, tris):
     flat[pix] = np.concatenate([out_c, out_a], 1)
 
 
+TEXTURES = {}
+
+
 def render(rig, images, skinned, frame_bones, mode):
     canvas = np.zeros((OUT_H, OUT_W, 4), np.float32)
     atts = rig["skins"][0]["attachments"]
     for s in rig["slots"]:
         name = s["name"]
+        tex = TEXTURES.get(name) or TEXTURES.setdefault(name, Texture(images[name]))
         if mode == "rigid":
-            world, uvs, tris = region_quad(atts[name][name], frame_bones[s["bone"]])
+            world, texel, tris = region_quad(atts[name][name], frame_bones[s["bone"]], tex)
         else:
             sk = skinned[name]
-            world, uvs, tris = skin_world(sk, frame_bones), sk["uvs"], sk["tris"]
-        draw(canvas, images[name], world, uvs, tris)
+            texel = sk["uvs"] * np.array(tex.full) - np.array([tex.x0, tex.y0])
+            world, tris = skin_world(sk, frame_bones), sk["tris"]
+        draw(canvas, tex, world, texel, tris)
     return canvas
 
 
@@ -237,8 +261,8 @@ def joint_gaps(canvas, frame_bones, rig, radii):
     for j, (_, _, low) in JOINTS.items():
         if low not in frame_bones or j not in radii:
             continue
-        x, y = frame_bones[low][4] + OX, OY - frame_bones[low][5]
-        r = radii[j] * JOINT_DISK
+        x, y = frame_bones[low][4] * SCALE + OX, OY - frame_bones[low][5] * SCALE
+        r = radii[j] * JOINT_DISK * SCALE
         y0, y1 = max(0, int(y - r - 1)), min(OUT_H, int(y + r + 2))
         x0, x1 = max(0, int(x - r - 1)), min(OUT_W, int(x + r + 2))
         yy, xx = np.mgrid[y0:y1, x0:x1]
