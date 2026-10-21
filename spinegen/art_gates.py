@@ -113,7 +113,7 @@ def as_joint(joint):
 def resolve_joint(rest, joint):
     """as_joint plus what can be derived from the rig at rest: the upper
     bone (the lower bone's parent), the center (the lower bone's setup
-    origin), the axis (the lower bone's x axis) and the halfwidth
+    origin), the axis (_limb_axis) and the halfwidth
     (estimate_halfwidth). Raises if a named bone does not exist or the
     halfwidth is not positive."""
     j = as_joint(joint)
@@ -129,8 +129,7 @@ def resolve_joint(rest, joint):
     if j.get("center") is None:
         j["center"] = [m[4], m[5]]
     if j.get("axis") is None:
-        n = math.hypot(m[0], m[2]) or 1.0
-        j["axis"] = [m[0] / n, m[2] / n]
+        j["axis"] = _limb_axis(ev, rest.world, li)
     j["center"] = [float(j["center"][0]), float(j["center"][1])]
     if j.get("halfwidth") is None:
         j["halfwidth"] = estimate_halfwidth(rest, j)
@@ -138,6 +137,22 @@ def resolve_joint(rest, joint):
     if not j["halfwidth"] > 0:
         raise ValueError(f"joint {j['name']}: halfwidth must be > 0 (got {j['halfwidth']})")
     return j
+
+
+def _limb_axis(ev, world, li):
+    """Unit world direction the limb leaves the joint in: the lower bone's
+    x axis when it has a length, else toward its first child's origin (a
+    cut-out rig like the monkey's leaves every bone at length 0 and
+    rotation 0, so its x axis says nothing about the limb), else world x."""
+    m = world[li]
+    if (ev.bones[li].get("length") or 0.0) <= 1e-6:
+        for ci in ev.children[li]:
+            d = np.array([world[ci][4] - m[4], world[ci][5] - m[5]])
+            n = float(np.hypot(*d))
+            if n > 1e-6:
+                return [float(d[0] / n), float(d[1] / n)]
+    n = math.hypot(m[0], m[2])
+    return [m[0] / n, m[2] / n] if n > 1e-9 else [1.0, 0.0]
 
 
 def estimate_halfwidth(rest, j, reach=40.0):
