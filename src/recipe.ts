@@ -181,7 +181,7 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
         if (!k) return undefined;
         const [a, b] = k.bones.map((n: string) => frames.get(n)!);
         const tf = frames.get(t)!;
-        return { root: { x: a.worldX, y: a.worldY }, target: { x: tf.worldX, y: tf.worldY }, reach: a.length + b.length };
+        return { root: { x: a.worldX, y: a.worldY }, mid: { x: b.worldX, y: b.worldY }, target: { x: tf.worldX, y: tf.worldY }, lengths: [a.length, b.length], reach: a.length + b.length };
       },
     };
 

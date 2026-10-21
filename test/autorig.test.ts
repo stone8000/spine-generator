@@ -5,11 +5,13 @@ import { defaultJoints, JOINTS, toSpine } from '../src/rigTemplate.ts';
 import { compileRecipe } from '../src/recipe.ts';
 import { checkSeams } from '../src/seams.ts';
 import { checkSkeleton } from '../src/check.ts';
-import { parseSkeleton } from '../src/spineJson.ts';
+import { parseSkeleton, sampleAnimation } from '../src/spineJson.ts';
 import { estimateSize } from '../src/roles.ts';
 import { CATALOG } from '../src/catalog.ts';
 import { Skeleton, Physics } from '@esotericsoftware/spine-core';
 import { synthLayers } from './fixtures/synthLayers.ts';
+
+const near = (a: number, b: number, tol: number, what: string) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${a.toFixed(3)} vs ${b} (±${tol})`);
 
 test('joint guessing recovers the template joints from the layers (within 25 px)', () => {
   const truth = defaultJoints();
@@ -89,5 +91,40 @@ test('legs drawn almost straight: no character preset snaps the knees (softened 
     const [r] = checkSkeleton(json, { only: [c.name], loops: summary[0].loop ? [c.name] : [] });
     const legs = r.issues.filter((i) => i.severity !== 'info' && /shin|thigh/.test(i.message));
     assert.deepEqual(legs.map((i) => i.message), [], c.id);
+  }
+});
+
+/** World positions of some bones over a whole animation, played in the runtime. */
+function play(json: Record<string, unknown>, anim: string, bones: string[]) {
+  const data = parseSkeleton(json);
+  const s = sampleAnimation(data, anim, { rate: 120, seconds: data.findAnimation(anim)!.duration });
+  return Object.fromEntries(bones.map((b) => [b, s.bones.get(b)!.x.map((x, i) => ({ x, y: s.bones.get(b)!.y[i] }))]));
+}
+
+test('jump on the auto-rig: the feet stay on the ground through the crouch and the landing, so the knees bend', () => {
+  const rig = buildRig(defaultJoints(), [...synthLayers('good').keys()]);
+  const size = estimateSize(rig.json);
+  const { json } = compileRecipe(rig.json, { roles: rig.roles, size, animations: [{ name: 'jump', preset: 'jump' }] });
+  const p = play(json, 'jump', ['root', 'ik-foot-front', 'ik-foot-back', 'hip', 'shinF']);
+  for (const [i, r] of p.root.entries()) {
+    if (r.y >= 0) continue; // airborne: the feet travel with the body
+    for (const f of ['ik-foot-front', 'ik-foot-back']) near(p[f][i].y, p[f][0].y, 0.5, `${f} planted at step ${i}`);
+  }
+  assert.ok(Math.min(...p.root.map((r) => r.y)) < -20 * size, 'the body crouches');
+  // the knee is the shin's origin: it moves forward (bends) while the hip drops
+  const lowest = p.hip.reduce((m, h, i) => (h.y < p.hip[m].y ? i : m), 0);
+  assert.ok(p.shinF[lowest].x - p.shinF[0].x > 5, `knee comes forward ${(p.shinF[lowest].x - p.shinF[0].x).toFixed(1)}`);
+});
+
+test('celebrate on the auto-rig: the front elbow stays down, so the upper arm stays below the jaw and the glove out in front', () => {
+  const rig = buildRig(defaultJoints(), [...synthLayers('good').keys()]);
+  const { json } = compileRecipe(rig.json, { roles: rig.roles, size: estimateSize(rig.json), animations: [{ name: 'cel', preset: 'celebrate' }] });
+  const p = play(json, 'cel', ['upperArmF', 'foreArmF', 'ik-fist-front']);
+  const upper = json.bones.find((b: { name: string }) => b.name === 'upperArmF').length;
+  for (let i = 0; i < p.upperArmF.length; i++) {
+    const s = p.upperArmF[i], e = p.foreArmF[i], f = p['ik-fist-front'][i];
+    assert.ok(e.y < s.y, `step ${i}: the elbow is below the shoulder`);
+    assert.ok(f.y > s.y, `step ${i}: the fist is above the shoulder`);
+    assert.ok(f.x - s.x > upper, `step ${i}: the glove is an upper arm's length in front of the shoulder (${(f.x - s.x).toFixed(0)})`);
   }
 });

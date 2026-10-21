@@ -86,6 +86,8 @@ export function guessRecipe(json: SpineJson, facing: 1 | -1 = 1): { recipe: Reci
     if (sorted[1]) roles.fistBack = sorted[1];
     if (!hands.length) notes.push(`拳頭用的是一般骨骼 ${fists.join('、')}，不是 IK 目標；若手臂是 FK，出拳只會移動手掌。建議改用 IK 目標骨。`);
   }
+  const feet = ikTargets.filter((t) => /foot|feet|leg|ankle|heel|toe/i.test(t));
+  if (feet.length) roles.feet = feet.slice(0, 2);
   const shoulders = names.filter((n) => /shoulder|clavicle|upper.?arm/i.test(n) && NOT_IK(n)).slice(0, 2);
   if (shoulders.length) {
     roles.shoulders = shoulders;

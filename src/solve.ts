@@ -113,13 +113,16 @@ export function solveScreen(
   }
 
   // IK reach guard: a 2-bone IK chain snaps (elbow pops straight or flips) when its target leaves the chain's reach.
-  // For every screen-driven IK target, softly keep the target inside 95 % of the chain length.
-  const ikChains = new Map<string, { root: Bone; reach: number }>();
+  // For every screen-driven IK target, softly keep the target inside 95 % of the chain length. A chain that is already
+  // longer than 85 % in the setup pose (legs standing nearly straight) keeps its setup length: the guard starts there,
+  // instead of pulling a planted foot up off the ground on frame 0.
+  const ikChains = new Map<string, { root: Bone; reach: number; rest: number }>();
   for (const c of json.constraints ?? []) {
     if (c.type !== 'ik' || !Array.isArray(c.bones) || c.bones.length !== 2) continue;
     const chain = c.bones.map(find);
     const reach = chain.reduce((sum: number, b: Bone) => sum + b.data.length * b.getAppliedPose().getWorldScaleX(), 0);
-    if (reach > 0) ikChains.set(c.target, { root: chain[0], reach });
+    const r = chain[0].getAppliedPose(), t = find(c.target).getAppliedPose();
+    if (reach > 0) ikChains.set(c.target, { root: chain[0], reach, rest: Math.hypot(t.worldX - r.worldX, t.worldY - r.worldY) });
   }
   const guardReach = (bone: string, x: number, y: number): [number, number] => {
     const ik = ikGuard ? ikChains.get(bone) : undefined;
@@ -128,10 +131,11 @@ export function solveScreen(
     const dx = x - r.worldX;
     const dy = y - r.worldY;
     const d = Math.hypot(dx, dy);
-    const knee = 0.85 * ik.reach;
-    const room = 0.1 * ik.reach;
+    const knee = Math.max(0.85 * ik.reach, ik.rest);
+    const room = Math.min(0.1 * ik.reach, Math.max(0, 0.99 * ik.reach - knee));
     if (d <= knee) return [x, y];
-    const k = (knee + room * Math.tanh((d - knee) / room)) / d; // smooth: linear below 85 %, never past 95 %
+    if (room <= 0) return [r.worldX + (dx * knee) / d, r.worldY + (dy * knee) / d];
+    const k = (knee + room * Math.tanh((d - knee) / room)) / d; // smooth: linear below 85 % (or the setup length), never past 95 %
     return [r.worldX + dx * k, r.worldY + dy * k];
   };
 

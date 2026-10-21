@@ -94,13 +94,13 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     id: 'jump', confidence: 1, category: 'character', name: 'jump',
-    basis: '擠壓伸展正確，但工具不彎腿：沒有腳 IK 時下蹲會像整個人下沉，需要骨架有腿部 IK 另外處理',
+    basis: '擠壓伸展正確；有腳 IK（feet）時雙腳踩住地面、膝蓋會彎，沒有腳 IK 時下蹲會像整個人下沉',
     params: { height: r(20, 300, 5), crouch: r(5, 60, 1), hair: HAIR },
   },
   {
     id: 'celebrate', confidence: 1, category: 'character', name: 'celebrate',
-    basis: '雙手要是 IK 目標骨才好看（會沿手臂方向舉到手臂長的 85 %）；側面角色手臂舉起時會經過臉前',
-    params: { angle: r(20, 90, 1, '°'), lift: r(20, 250, 5), bounce: r(0, 40, 1), hair: HAIR },
+    basis: '雙手要是 IK 目標骨才好看：手肘朝下、前臂往上揮，側面角色的上臂才不會橫過下巴；頭大手短時拳頭舉不過頭頂',
+    params: { angle: r(20, 90, 1, '°'), elbow: r(-80, 40, 1, '°'), lift: r(20, 250, 5), bounce: r(0, 40, 1), hair: HAIR },
   },
 ];
 

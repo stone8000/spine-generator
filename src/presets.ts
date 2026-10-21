@@ -23,7 +23,7 @@ export interface PresetContext {
   /** Setup-pose world rotation of a bone, degrees. */
   worldRotation(bone: string): number;
   /** When `target` drives a 2-bone IK chain: the chain's root and the target in the setup pose (world), and its reach. */
-  ikChain(target: string): { root: { x: number; y: number }; target: { x: number; y: number }; reach: number } | undefined;
+  ikChain(target: string): { root: { x: number; y: number }; mid: { x: number; y: number }; target: { x: number; y: number }; lengths: [number, number]; reach: number } | undefined;
 }
 
 export interface PresetOutput {
@@ -415,6 +415,8 @@ export const PRESETS: PresetDef[] = [
     roles: [
       { name: 'root', required: true, desc: '整體位移用的骨（通常是 root 或 hip）' },
       { name: 'body', required: false, desc: '做擠壓伸展的骨（通常是 hip 或 body）' },
+      { name: 'feet', required: false, list: true, desc: '雙腳 IK 目標骨：下蹲、落地時踩住地面，膝蓋才會彎' },
+      { name: 'chest', required: false, desc: '胸（有雙腳 IK 時改由胸做擠壓伸展，腿不跟著縮）' },
       HAIR_ROLE,
     ],
     params: [
@@ -429,17 +431,26 @@ export const PRESETS: PresetDef[] = [
       const tC = 0.18, tUp = 0.45, tLand = 0.8, D = 1.2;
       const out = empty(D, false);
       const land = overshoot(-0.35 * cr, 3, 0.45);
-      out.screen.push({
-        bone: c.role('root'),
-        channel: 'y',
-        motion: fn(D, (t) => {
-          if (t < tC) return -cr * EASES.sineInOut(t / tC);
-          if (t < tUp) return -cr + (h + cr) * EASES.cubicOut((t - tC) / (tUp - tC));
-          if (t < tLand) return h * (1 - EASES.quadIn((t - tUp) / (tLand - tUp)));
-          return land(t - tLand);
-        }, [tC, tUp, tLand]),
-      });
-      const body = c.roleOpt('body');
+      const rootY = (t: number) => {
+        if (t < tC) return -cr * EASES.sineInOut(t / tC);
+        if (t < tUp) return -cr + (h + cr) * EASES.cubicOut((t - tC) / (tUp - tC));
+        if (t < tLand) return h * (1 - EASES.quadIn((t - tUp) / (tLand - tUp)));
+        return land(t - tLand);
+      };
+      out.screen.push({ bone: c.role('root'), channel: 'y', motion: fn(D, rootY, [tC, tUp, tLand]) });
+      // Foot IK targets ride with the root, so the crouch and the landing sank the feet into the floor and the legs never
+      // bent. Hold them on the ground while the body is below its rest height; they leave it at the moment the root
+      // passes rest height on the way up, and land at tLand.
+      const feet = c.roleList('feet');
+      if (feet.length) {
+        // root crosses rest height on the way up where cubicOut((t - tC) / (tUp - tC)) = cr / (h + cr)
+        const tOff = tC + (tUp - tC) * (1 - Math.cbrt(1 - cr / (h + cr)));
+        const footY = (t: number) => (t > tOff && t < tLand ? rootY(t) : 0);
+        for (const f of feet) out.screen.push({ bone: f, channel: 'y', motion: fn(D, footY, [tOff, tLand]) });
+      }
+      // with planted feet the legs carry the crouch; squashing the hip would also shrink the thighs under it (they
+      // inherit its scale) and straighten the knees back out, so the upper body squashes instead
+      const body = feet.length ? c.roleOpt('chest') ?? c.roleOpt('body') : c.roleOpt('body');
       if (body) {
         const vertical = pointsVertically(c, body);
         const sq = (t: number) => {
@@ -472,7 +483,8 @@ export const PRESETS: PresetDef[] = [
       HAIR_ROLE,
     ],
     params: [
-      { name: 'angle', default: 65, desc: '雙手舉起的方向：從水平往前算起的角度，伸到手臂長的 85 %（手是 IK 目標骨時）' },
+      { name: 'angle', default: 65, desc: '前臂舉起的角度：從水平往前算起（手是 IK 目標骨時）' },
+      { name: 'elbow', default: -25, desc: '上臂的角度：從水平往前算起，負的是手肘朝下、貼近身體，上臂才不會橫過下巴（手是 IK 目標骨時）' },
       { name: 'lift', default: 120, desc: '雙手抬高（手不是 IK 目標骨時才用）' },
       { name: 'bounce', default: 12, desc: '身體彈跳幅度' },
       HAIR_PARAM,
@@ -483,19 +495,36 @@ export const PRESETS: PresetDef[] = [
       const s = c.size;
       out.screen.push({ bone: c.role('hip'), channel: 'y', motion: wave({ amplitude: c.param('bounce', 12) * s, period: 0.6, peakAt: 0.15, duration: D }) });
       const angle = c.param('angle', 65);
+      const elbowAngle = c.param('elbow', -25);
       c.roleList('fists').forEach((f, i) => {
-        // a fixed lift from a guard ends wherever the art's guard was: in front of the face, or short of a big head.
-        // With an IK chain, raise each fist along its arm instead: `angle` above forward, at 85 % of the reach (the pump
-        // straightens it the rest of the way).
-        let dx = 0, dy = c.param('lift', 120) * s;
+        const peakAt = 0.2 + (i * 2) / 30; // the far fist trails by 2 frames; a peak between key frames makes the runtime's 10-line curve segments jolt
         const chain = c.ikChain(f);
-        if (chain) {
-          const th = ((angle + i * 12) * Math.PI) / 180; // the second fist a little steeper, so the gloves don't stack
-          dx = chain.root.x + Math.cos(th) * 0.85 * chain.reach * c.facing - chain.target.x;
-          dy = chain.root.y + Math.sin(th) * 0.85 * chain.reach - chain.target.y;
+        // A side-on character's front shoulder sits right under the jaw, so any arm raised from the shoulder (even a
+        // straight one at 45°) sweeps the upper arm across the chin and parks the glove in front of the face. Pose the
+        // arm instead: upper arm `elbow` degrees from forward (below horizontal: the elbow stays down by the ribs),
+        // forearm `angle` degrees up, and solve the fist target from that. The IK only lands the elbow there when it bends
+        // to the same side as in the setup pose, so a chain that bends the other way keeps the plain lift.
+        const posed = chain && (() => {
+          const [l1, l2] = chain.lengths;
+          const at = (ua: number, fa: number) => {
+            const u = (ua * Math.PI) / 180, w = (fa * Math.PI) / 180;
+            const ex = chain.root.x + Math.cos(u) * l1 * c.facing, ey = chain.root.y + Math.sin(u) * l1;
+            return { ex, ey, x: ex + Math.cos(w) * l2 * c.facing, y: ey + Math.sin(w) * l2 };
+          };
+          const side = (p: { x: number; y: number }, q: { x: number; y: number }) => Math.sign((q.x - chain.root.x) * (p.y - chain.root.y) - (q.y - chain.root.y) * (p.x - chain.root.x));
+          const p = at(elbowAngle - i * 15, angle - i * 15);
+          return side(chain.mid, chain.target) === side({ x: p.ex, y: p.ey }, p) ? at : undefined;
+        })();
+        if (!chain || !posed) {
+          out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 25 * s, period: 0.6, peakAt, offset: c.param('lift', 120) * s, duration: D }) });
+          return;
         }
-        out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 25 * s, period: 0.6, peakAt: 0.2 + i * 0.05, offset: dy, duration: D }) });
-        if (dx) out.screen.push({ bone: f, channel: 'x', motion: wave({ amplitude: 6 * s, period: 0.6, peakAt: 0.2 + i * 0.05, offset: dx, duration: D }) });
+        // the pump: the forearm swings 10° and the upper arm 5° around the pose, together
+        const fore = wave({ amplitude: 10, period: 0.6, peakAt, offset: angle - i * 15, duration: D });
+        const upper = wave({ amplitude: 5, period: 0.6, peakAt, offset: elbowAngle - i * 15, duration: D });
+        const fist = (t: number) => posed(upper.value(t), fore.value(t));
+        out.screen.push({ bone: f, channel: 'x', motion: fn(D, (t) => fist(t).x - chain.target.x, [], true) });
+        out.screen.push({ bone: f, channel: 'y', motion: fn(D, (t) => fist(t).y - chain.target.y, [], true) });
       });
       const head = c.roleOpt('head');
       if (head) out.screen.push({ bone: head, channel: 'rotate', motion: wave({ amplitude: 3, period: 0.6, peakAt: 0.25, offset: 6 * c.facing, duration: D }) });

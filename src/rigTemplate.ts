@@ -86,6 +86,7 @@ export const PARTS: PartDef[] = [
 export const TEMPLATE_ROLES: Record<string, string | string[]> = {
   root: 'root', hip: 'hip', body: 'hip', chest: 'chest', head: 'head',
   fist: 'ik-fist-front', fistFront: 'ik-fist-front', fistBack: 'ik-fist-back', fists: ['ik-fist-front', 'ik-fist-back'],
+  feet: ['ik-foot-front', 'ik-foot-back'],
   shoulderBack: 'upperArmB', shoulders: ['upperArmF', 'upperArmB'],
 };
 
