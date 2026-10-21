@@ -37,12 +37,21 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            form with offset -child setup angle.
   ik       a two-bone IK per leg (thigh, shin) onto ik_foot_<s> under root;
            the foot bone hangs from that target, so a planted foot cannot
-           slide whatever the hips do. bend direction: the setup leg's own
-           (both directions are solved and the one that reproduces the
-           setup pose wins), the template's per side when the leg is
-           straight. softness: the template's fraction of leg length,
-           capped so the setup pose is unchanged (a nearly straight setup
-           leg leaves almost no room; the report gives the cap).
+           slide whatever the hips do. bend direction: from ANATOMY, the
+           template's "knee" rule ("outward": a crouch moves the knee away
+           from the body's midline, a front view; "facing": along the
+           character's facing, a side view). Both directions are solved in
+           a small test crouch and the one that moves the knee the way the
+           rule says wins (_anatomical_bend). NOT from the setup leg's
+           kink: a source leg kinked a few degrees inward (the monkey's
+           left, -9 deg) would make that knee cave toward the midline in
+           every crouch while the other goes out (P2 review: 56 px). A
+           setup leg kinked against the rule is straightened instead (its
+           knee moved onto the hip-ankle line, _align_knees), since an IK
+           solving the other way would flip it at setup. softness: the
+           template's fraction of leg length, capped so the setup pose is
+           unchanged (a nearly straight setup leg leaves almost no room;
+           the report gives the cap).
   meshes   every layer through mesh.build. In "joint" mode a layer gets a
            band at each joint it crosses (its art comes within one
            halfwidth of the joint) where the template says it bends:
@@ -51,7 +60,13 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            radius of the lower limb's art near the joint (the same rule as
            art_gates.estimate_halfwidth); band half-length = mesh.BAND_EXTENT
            halfwidths, shortened so neighbouring bands on one bone never
-           overlap. In "rigid" mode the same meshes have no bands.
+           overlap. The ankle of a PLANTED foot is one-sided: its band runs
+           from the ankle up the shin (the upper half of the band it would
+           have had), so everything below the ankle is 100% foot and stays
+           on the ground in a crouch; a centred band put up to half of the
+           shin's turn into the boot below the ankle (the monkey's boots
+           moved 10-20 px there). In "rigid" mode the same meshes have no
+           bands.
            The mesh profile (MESH_PROFILES) is "lean" by default.
   modes    per joint, "joint" mode can still keep a joint rigid (no band),
            ramp it without a helper, or ramp it through the helper
@@ -106,7 +121,6 @@ MESH_PROFILES = {"lean": {"min_angle": 0.0, "outline": "adaptive", "row_points":
 SCHEMA_BUDGET_JOINTS = "spinegen-budget-joints/1"
 HW_REACH = 40.0       # px: halfwidth = largest inscribed radius within this of the art nearest the joint
 CROSS = 1.0           # a layer crosses a joint when its art comes within CROSS x halfwidth of it
-STRAIGHT_DEG = 1.0    # a setup leg bent less than this takes the template's bend direction
 SOFT_GUARD = 0.999    # softness stays this fraction under the setup slack (no effect at setup)
 BAKE_FPS = 30         # source feet are sampled at this rate to key the IK targets in a jump
 RECENTER_ROWS = 0.25  # _recenter reads the cross-section at +-this many halfwidths along the limb
@@ -118,8 +132,10 @@ BAKE_TOL = 0.25       # px: a baked key is dropped when its neighbours interpola
 AXIS_SNAP = 10.0      # deg: scale keys swap x/y when a bone now points 90 +- this from its source
 AXIS_MEAN_MAX = 45.0  # deg: a "both" band runs along the mean of its bones only when they are this close
 ACC_FADE = (0.5, 2.0) # accessory weight: 0 inside 0.5 band half-lengths of a joint, full beyond 2.0
-SOLE_ROWS = 2.0      # px: the sole is the foot art this close to its lowest row (template foot_contact)
-SOLE_CLEAR = 0.75    # an ankle band reaches at most this fraction of the way from the ankle to the sole
+KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
+KNEE_TEST = 0.1       # the bend test lowers the hips by this fraction of the leg's length
+KNEE_TOL = 0.5        # px: a setup knee this close to the hip-ankle line counts as straight
+SETUP_TOL = 1e-3      # px: the chosen bend must reproduce the setup leg this closely
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
 
 
@@ -247,12 +263,17 @@ class _Builder:
         self.bones = {}      # name -> {"parent", "head", "tail" (canvas), "len", "role", "limb_parent"}
         self.order = []      # bone names, parents first
         self._art = {}
+        self.straightened = {}  # knee joint -> px moved onto the hip-ankle line (_align_knees)
 
     # ---- orchestration
 
     def run(self):
         self.skeleton()
         if self.recenter and self._recenter():
+            self.bones, self.order = {}, []
+            self.skeleton()
+        self.straightened = self._align_knees()
+        if self.straightened:
             self.bones, self.order = {}, []
             self.skeleton()
         self.ir = irmod.new_rig(self.name)
@@ -375,6 +396,68 @@ class _Builder:
                 self.notes.append(f"joint {jname}: moved {d:+.1f} px across the limb onto the art's centre line "
                                   f"({d / hw:+.2f} halfwidths)")
         return shifts
+
+    def _knee_dir(self, ik):
+        """World unit vector the template's "knee" rule says a crouch moves
+        this leg's knee along, or None when the template fixes
+        bend_positive itself.
+
+        "outward": away from the body's midline, the hips bone's origin (or
+        the legs' mean hip when that sits on this leg's line). Geometric,
+        not by name: a front-view character's left leg is on the image's
+        right, and the template's side names say nothing about that.
+        "facing": +x for joints.json "facing": 1, -x for -1."""
+        rule = ik.get("knee")
+        if rule is None:
+            return None
+        if rule == "outward":
+            thigh = ik["bones"][0]
+            hip = self.cv.to_world(self.bones[thigh]["head"])
+            dx = hip[0] - self.cv.to_world(self.bones[self.bones[thigh]["parent"]]["head"])[0]
+            if abs(dx) < 1e-6:
+                heads = [self.cv.to_world(self.bones[i["bones"][0]]["head"])[0] for i in self.t["ik"]
+                         if i["bones"][0] in self.bones]
+                dx = hip[0] - float(np.mean(heads))
+            if abs(dx) < 1e-6:
+                raise ValueError(f"ik {ik['name']}: knee 'outward' but the leg sits on the body's midline")
+            return np.array([math.copysign(1.0, dx), 0.0])
+        if rule == "facing":
+            f = self.jdoc.get("facing")
+            if f not in (1, -1):
+                raise ValueError(f"ik {ik['name']}: knee 'facing' needs joints.json 'facing': 1 (right) or -1 (left)")
+            return np.array([float(f), 0.0])
+        raise ValueError(f"ik {ik['name']}: knee must be one of {KNEE_RULES}, not {rule!r}")
+
+    def _align_knees(self):
+        """Straighten every setup leg whose knee sits on the wrong side of
+        its hip-ankle line for the template's knee rule: the knee joint is
+        moved onto that line (world px moved are returned per knee joint).
+
+        WHY: a two-bone IK puts the knee on one side of the hip-target line
+        and nowhere else. A setup leg kinked the other way (the monkey's
+        left leg, 9 deg inward, 9 px off the line) cannot be reproduced by
+        the anatomical bend; the IK would flip it to the mirror position at
+        setup. A straight leg is reproduced by either bend, so it is the
+        smallest change that lets the knee follow anatomy. The art does not
+        move, only the pivot."""
+        out = {}
+        for ik in self.t["ik"]:
+            if not all(b in self.bones for b in ik["bones"] + [ik["target"]]):
+                continue
+            want = self._knee_dir(ik)
+            if want is None:
+                continue
+            thigh, shin = ik["bones"]
+            hip, knee, ankle = (self.cv.to_world(self.bones[n]["head"]) for n in (thigh, shin, ik["target"]))
+            n = _knee_normal(hip, ankle, want)
+            off = float((knee - hip) @ n)
+            if off < -KNEE_TOL:
+                j = self.bones[shin]["joint"]
+                self.jxy[j] = self.jxy[j] + self.cv.dir_to_world(-off * n)  # the y flip is its own inverse
+                out[j] = -off
+                self.notes.append(f"joint {j}: moved {-off:.1f} px onto the hip-ankle line (the setup leg was "
+                                  f"kinked against the template's knee rule {ik['knee']!r})")
+        return out
 
     def _role(self, spec):
         j = self.t["joints"].get(spec["joint"] or "", {})
@@ -514,22 +597,23 @@ class _Builder:
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
-            # a planted foot's sole must be 100% foot: the ankle band stops short of it
-            if self.bones[band["lower"]]["parent"] in targets:
-                pts = self._art_points([band["lower"]])
-                if pts.size:
-                    sole = pts[pts[:, 1] >= pts[:, 1].max() - SOLE_ROWS]  # the lowest art rows (canvas y down)
-                    reach = float(((sole - band["center"]) @ band["axis"]).min())
-                    if reach > 0 and SOLE_CLEAR * reach < band["extent"] * band["halfwidth"]:
-                        band["extent"] = SOLE_CLEAR * reach / band["halfwidth"]
-                        self.notes.append(f"joint {jname}: band shortened to {band['extent']:.2f} halfwidths "
-                                          f"to stay clear of the sole")
+            band["pivot"] = band["center"]
+            band["planted"] = self.bones[band["lower"]]["parent"] in targets
         # two bands on one layer must not overlap: they share the distance between them
         for a, ba in bands.items():
             for b, bb in bands.items():
                 if a != b and set(ba["layers"]) & set(bb["layers"]):
                     d = float(np.linalg.norm(ba["center"] - bb["center"]))
                     ba["extent"] = min(ba["extent"], 0.5 * d / ba["halfwidth"])
+        # a planted foot is 100% foot below the ankle (module doc): its band
+        # becomes the shin-side half of the band it would have had, so it
+        # cannot reach the knee's band either
+        for jname, band in bands.items():
+            if band["planted"]:
+                band["extent"] *= 0.5
+                band["center"] = band["pivot"] - band["extent"] * band["halfwidth"] * band["axis"]
+                self.notes.append(f"joint {jname}: planted foot; band from the ankle {2 * band['extent']:.2f} "
+                                  f"halfwidths up the shin, nothing below the ankle")
         for band in bands.values():
             band["lateral"] = self._lateral(band)
         return bands
@@ -586,13 +670,23 @@ class _Builder:
                  "bend_positive": bool(ik.get("bend_positive", True)), "compress": False,
                  "stretch": bool(ik.get("stretch", False)), "uniform": False}
             bend_deg = self._bend(thigh, shin)
-            if abs(bend_deg) >= STRAIGHT_DEG:
-                c["bend_positive"] = self._setup_bend(c, bind)
+            knee_dir = self._knee_dir(ik)
+            rep = {}
+            if knee_dir is not None:
+                c["bend_positive"], rep = self._anatomical_bend(c, knee_dir)
+            err = self._setup_error(c, bind)
+            if err > SETUP_TOL:
+                self.notes.append(f"ik {ik['name']}: bend_positive {c['bend_positive']} moves the setup leg by "
+                                  f"{err:.2f} px (the setup kink opposes it)")
             self.ir["ik"].append(c)
             order += 1
             self.ik_report[ik["name"]] = {"softness": round(soft, 4), "softness_wanted": round(want, 3),
                                           "setup_slack": round(slack, 4), "bend_deg": round(bend_deg, 3),
-                                          "bend_positive": c["bend_positive"], "planted": bool(ik.get("planted"))}
+                                          "bend_positive": c["bend_positive"], "knee": ik.get("knee"),
+                                          "straightened_px": round(self.straightened.get(self.bones[shin]["joint"],
+                                                                                         0.0), 3),
+                                          "setup_error_px": round(err, 6), "planted": bool(ik.get("planted")),
+                                          **rep}
             if soft < want:
                 self.notes.append(f"ik {ik['name']}: softness {want:.1f} px capped to {soft:.2f} px, the setup "
                                   f"leg's slack (more would move the setup foot)")
@@ -617,18 +711,34 @@ class _Builder:
         a, b = self.cv.dir_to_world(a), self.cv.dir_to_world(b)
         return math.degrees(math.atan2(a[0] * b[1] - a[1] * b[0], a @ b))
 
-    def _setup_bend(self, c, bind):
-        """The bend direction that reproduces the setup pose."""
-        best, err = c["bend_positive"], math.inf
+    def _setup_error(self, c, bind):
+        """How far (px, largest world-matrix entry) the IK constraint `c`
+        moves its bones from their setup pose."""
+        rig = dict(self.ir, ik=[c], transform=[], physics=[])
+        w = lbs.Evaluator(rig).world()
+        idx = irmod.bone_index(rig)
+        return float(max(abs(np.asarray(w[idx[n]]) - np.asarray(bind[n])).max() for n in c["bones"]))
+
+    def _anatomical_bend(self, c, knee_dir):
+        """(bend_positive, report): the IK bend whose knee moves along
+        `knee_dir` (world) when the hips drop KNEE_TEST x the leg's length.
+        Each bend is solved in that test crouch (this IK alone, softness 0)
+        and the one whose knee lies on the knee_dir side of the hip-ankle
+        line wins: a direct test of what the rule asks, whatever Spine's
+        sign convention and the leg's orientation."""
+        thigh, shin = c["bones"]
+        b = irmod.by_name(self.ir["bones"])
+        hips = b[thigh]["parent"]
+        depth = KNEE_TEST * (b[thigh]["length"] + b[shin]["length"])
+        side = {}
         for bend in (True, False):
-            trial = dict(c, bend_positive=bend)
-            rig = dict(self.ir, ik=[trial], transform=[], physics=[])
-            w = lbs.Evaluator(rig).world()
-            idx = irmod.bone_index(rig)
-            e = max(abs(np.asarray(w[idx[n]]) - np.asarray(bind[n])).max() for n in c["bones"])
-            if e < err:
-                best, err = bend, e
-        return best
+            rig = dict(self.ir, ik=[dict(c, bend_positive=bend, softness=0.0)], transform=[], physics=[])
+            ev = lbs.Evaluator(rig)
+            w = ev.world(pose={hips: {"y": b[hips]["y"] - depth}})
+            hip, knee, ankle = (np.array(w[ev.index[n]][4:6]) for n in (thigh, shin, c["target"]))
+            side[bend] = float((knee - hip) @ _knee_normal(hip, ankle, knee_dir))
+        bend = side[True] > side[False]
+        return bend, {"knee_test_px": round(max(side.values()), 3), "knee_test_depth": round(depth, 3)}
 
     # ---- meshes and weights
 
@@ -917,7 +1027,7 @@ class _Builder:
         out = []
         for jname, b in self.bands.items():
             out.append({"name": jname, "id": b["budget"], "bone": b["lower"], "dirs": [1, -1],
-                        "band": {"center": self.cv.to_world(b["center"]).tolist(), "upper": b["upper"],
+                        "band": {"center": self.cv.to_world(b.get("pivot", b["center"])).tolist(), "upper": b["upper"],
                                  "helper": b["helper"], "lower": b["lower"], "halfwidth": b["halfwidth"],
                                  "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": b["extent"]}})
         return {"schema": SCHEMA_BUDGET_JOINTS, "template": self.t["name"], "mode": self.mode,
@@ -949,38 +1059,131 @@ def foot_contacts(ir, within=2.0):
     return out
 
 
+def planted_vertices(ir):
+    """{slot: [vertex index]}: the WHOLE planted foot, every vertex of a
+    slot a leg IK target carries (as foot_contacts) that lies at or below
+    its ankle (the target's setup origin). M1 is defined on the sole, but a
+    foot is planted as a whole: a boot whose upper half rides on the shin
+    deforms while its two sole vertices stay put (P2 review)."""
+    ev = lbs.Evaluator(ir)
+    world = ev.world()
+    ankle = {}
+    targets = {c["target"]: c for c in ir["ik"]}
+    for b in ir["bones"]:
+        if b["parent"] in targets:
+            ankle[b["name"]] = world[ev.index[b["parent"]]][5]
+    for t in targets:
+        ankle[t] = world[ev.index[t]][5]
+    out = {}
+    for name in foot_contacts(ir):
+        att = dict(ev.shown())[name]
+        rows = att.get("weights")
+        bones = {n for row in rows for n, *_ in row} if rows else \
+            {next(sl["bone"] for sl in ir["slots"] if sl["name"] == name)}
+        y = max(ankle[b] for b in bones if b in ankle)
+        v = ev.attachment_vertices(world, name, att)
+        out[name] = [int(i) for i in np.flatnonzero(v[:, 1] <= y + 1e-6)]
+    return out
+
+
+def shin_bottoms(ir, rows=10.0):
+    """{slot: [vertex index]}: the bottom `rows` px of every slot whose
+    heaviest bone is a leg IK's lower bone (the calf's hem over the boot):
+    what a crouch should not drag across the foot."""
+    shins = {c["bones"][1] for c in ir["ik"]}
+    ev = lbs.Evaluator(ir)
+    world = ev.world()
+    out = {}
+    for name, att in ev.shown():
+        if att is None or att["type"] not in ("mesh", "region"):
+            continue
+        rows_w = att.get("weights")
+        if rows_w:
+            mass = {}
+            for row in rows_w:
+                for n, x, *_ in row:
+                    mass[n] = mass.get(n, 0.0) + x
+            heavy = max(mass, key=mass.get)
+        else:
+            heavy = next(sl["bone"] for sl in ir["slots"] if sl["name"] == name)
+        if heavy not in shins:
+            continue
+        v = ev.attachment_vertices(world, name, att)
+        out[name] = [int(i) for i in np.flatnonzero(v[:, 1] <= v[:, 1].min() + rows)]
+    return out
+
+
 def crouch(ir, depth, skeleton=None, atlas=None, within=2.0):
     """Lower the hips (the parent of the IK thighs) by `depth` world units
-    and measure how far each sole vertex moves (SOTA §5 M1: <= 1 px).
-    With `skeleton` and `atlas` the official runtime measures it
-    (spinegen.oracle.dump, pose added to setup); otherwise spinegen.lbs.
-    Returns {"depth", "by", "max_slide", "slots": {slot: max px},
-    "hips_drop"}."""
-    hips = {irmod.by_name(ir["bones"])[c["bones"][0]]["parent"] for c in ir["ik"]}
+    and measure what the feet and knees do. With `skeleton` and `atlas` the
+    official runtime measures it (spinegen.oracle.dump, pose added to
+    setup); otherwise spinegen.lbs.
+
+    Returns {"depth", "by", "hips_drop",
+      "max_slide", "slots", "contact_vertices"  the soles (foot_contacts;
+                   SOTA §5 M1: <= 1 px),
+      "foot_slide", "foot_slots", "foot_vertices"  the whole planted foot
+                   below the ankle (planted_vertices), same limit,
+      "shin_bottom_slide", "shin_bottom_slots"  the bottom 10 px of the
+                   shins' art (shin_bottoms; reported, no limit: a shin
+                   turning about the ankle moves its hem),
+      "knees": {ik: {"dx", "dy", "out", "bend_px"}}  the knee's world move,
+                   its component away from the body's midline (+ =
+                   outward) and, after the crouch, how far the knee stands
+                   off the hip-ankle line on the outward side,
+      "knee_symmetry"  smaller / larger bend_px of two legs (the end pose:
+                   a leg bent at setup moves its knee less for the same
+                   drop, so the moves themselves differ)}."""
+    bones = irmod.by_name(ir["bones"])
+    hips = {bones[c["bones"][0]]["parent"] for c in ir["ik"]}
     if len(hips) != 1:
         raise ValueError(f"cannot tell the hips bone from the leg IK chains ({sorted(hips)})")
     hips = hips.pop()
     pose = {hips: {"y": -float(depth)}}
-    contacts = foot_contacts(ir, within)
+    groups = {"sole": foot_contacts(ir, within), "foot": planted_vertices(ir), "shin": shin_bottoms(ir)}
+    slots = sorted({n for g in groups.values() for n in g})
+    knees = [n for c in ir["ik"] for n in (c["bones"][0], c["bones"][1], c["target"])]
     if skeleton is not None:
         from . import oracle
         d0 = oracle.dump(skeleton, atlas)["frames"][0]
         d1 = oracle.dump(skeleton, atlas, pose=pose, pose_mode="add")["frames"][0]
-        verts = [{n: np.asarray(d["slots"][n]["vertices"], float).reshape(-1, 2) for n in contacts} for d in (d0, d1)]
+        verts = [{n: np.asarray(d["slots"][n]["vertices"], float).reshape(-1, 2) for n in slots} for d in (d0, d1)]
         drop = d0["bones"][hips]["y"] - d1["bones"][hips]["y"]
+        pos = [{n: np.array([d["bones"][n]["x"], d["bones"][n]["y"]]) for n in knees + [hips]} for d in (d0, d1)]
         by = "spine-core (qa dump)"
     else:
         ev = lbs.Evaluator(ir)
         idx = ev.index
         w0 = ev.world()
-        b = irmod.by_name(ir["bones"])[hips]
-        w1 = ev.world(pose={hips: {"y": b["y"] - float(depth)}})
-        verts = [{n: ev.attachment_vertices(w, n, dict(ev.shown())[n]) for n in contacts} for w in (w0, w1)]
+        w1 = ev.world(pose={hips: {"y": bones[hips]["y"] - float(depth)}})
+        shown = dict(ev.shown())
+        verts = [{n: ev.attachment_vertices(w, n, shown[n]) for n in slots} for w in (w0, w1)]
         drop = w0[idx[hips]][5] - w1[idx[hips]][5]
+        pos = [{n: np.array(w[idx[n]][4:6]) for n in knees + [hips]} for w in (w0, w1)]
         by = "spinegen.lbs"
-    slide = {n: float(np.linalg.norm(verts[1][n][i] - verts[0][n][i], axis=1).max()) for n, i in contacts.items()}
-    return {"depth": float(depth), "by": by, "hips_drop": float(drop), "contact_vertices":
-            {n: len(i) for n, i in contacts.items()}, "slots": slide, "max_slide": max(slide.values()) if slide else None}
+
+    def slide(group):
+        return {n: float(np.linalg.norm(verts[1][n][i] - verts[0][n][i], axis=1).max()) if i else 0.0
+                for n, i in groups[group].items()}
+
+    out = {"depth": float(depth), "by": by, "hips_drop": float(drop)}
+    for key, group in (("", "sole"), ("foot_", "foot"), ("shin_bottom_", "shin")):
+        sl = slide(group)
+        out[f"{key}slots" if key else "slots"] = sl
+        out[f"{key}slide" if key else "max_slide"] = max(sl.values()) if sl else None
+    out["contact_vertices"] = {n: len(i) for n, i in groups["sole"].items()}
+    out["foot_vertices"] = {n: len(i) for n, i in groups["foot"].items()}
+    out["knees"] = {}
+    for c in ir["ik"]:
+        t, k, a = c["bones"][0], c["bones"][1], c["target"]
+        dx, dy = (pos[1][k] - pos[0][k]).tolist()
+        outward = math.copysign(1.0, pos[0][t][0] - pos[0][hips][0])
+        n = _knee_normal(pos[1][t], pos[1][a], np.array([outward, 0.0]))
+        out["knees"][c["name"]] = {"dx": dx, "dy": dy, "out": dx * outward,
+                                   "bend_px": float((pos[1][k] - pos[1][t]) @ n)}
+    bent = [k["bend_px"] for k in out["knees"].values()]
+    out["knee_symmetry"] = (min(bent) / max(bent) if len(bent) == 2 and max(bent) > 0 else None)
+    return out
 
 
 # ---------------------------------------------------------------- helpers
@@ -995,8 +1198,17 @@ def _weight_joint(b):
             "lateral": b.get("lateral", weights.LATERAL), "exclusive": True}
 
 
+def _knee_normal(hip, ankle, want):
+    """Unit normal of the hip -> ankle line on the `want` side (world)."""
+    d = np.asarray(ankle, float) - np.asarray(hip, float)
+    d = d / (np.linalg.norm(d) or 1.0)
+    n = np.array([-d[1], d[0]])
+    return n if n @ want >= 0 else -n
+
+
 def _round_band(b):
     return {"center": [round(float(v), 3) for v in b["center"]], "axis": [round(float(v), 5) for v in b["axis"]],
+            "pivot": [round(float(v), 3) for v in b.get("pivot", b["center"])], "planted": bool(b.get("planted")),
             "halfwidth": round(b["halfwidth"], 3), "extent": round(b["extent"], 4),
             "lateral": round(b.get("lateral", weights.LATERAL), 3), "upper": b["upper"],
             "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"]}
@@ -1174,7 +1386,14 @@ def main(argv=None):
         res["report"]["crouch"] = c
         _dump(paths["report"], dict(json.load(open(paths["report"])), crouch=c))
         print(f"  crouch {a.crouch:g} H = {c['depth']:.1f} px ({c['by']}): soles slide {c['max_slide']:.4f} px "
-              f"(M1 <= 1 px), {sum(c['contact_vertices'].values())} sole vertices")
+              f"(M1 <= 1 px, {sum(c['contact_vertices'].values())} sole vertices); whole foot below the ankle "
+              f"{c['foot_slide']:.4f} px ({sum(c['foot_vertices'].values())} vertices); shin bottoms "
+              f"{c['shin_bottom_slide']:.2f} px")
+        for n, k in c["knees"].items():
+            print(f"  {n}: knee moves {k['dx']:+.1f}, {k['dy']:+.1f} px ({k['out']:+.1f} px outward); "
+                  f"ends {k['bend_px']:+.1f} px outward of the hip-ankle line")
+        if c["knee_symmetry"] is not None:
+            print(f"  knee symmetry (smaller / larger end offset): {c['knee_symmetry']:.2f}")
 
 
 if __name__ == "__main__":
