@@ -1,0 +1,51 @@
+{
+	"name": "pixi-svelte",
+	"version": "2.1.0",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"license": "MIT",
+	"files": [
+		"dist"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/StakeEngine/web-sdk/tree/main/packages/pixi-svelte"
+	},
+	"scripts": {
+		"format": "prettier --write --ignore-path=../../.prettierignore .",
+		"build": "svelte-package",
+		"publish": "npm publish",
+		"lint": "eslint *.ts*"
+	},
+	"devDependencies": {
+		"@sveltejs/package": "2.3.10",
+		"@sveltejs/vite-plugin-svelte": "5.0.3",
+		"chromatic": "11.26.1",
+		"config-svelte": "workspace:*",
+		"config-ts": "workspace:*",
+		"config-vite": "workspace:*",
+		"eslint": "9.21.0",
+		"eslint-config-custom": "workspace:*",
+		"prettier": "3.5.2",
+		"prettier-plugin-svelte": "3.3.3",
+		"eventemitter3": "5.0.1"
+	},
+	"dependencies": {
+		"@barvynkoa/particle-emitter": "0.0.1",
+		"@esotericsoftware/spine-core": "4.3.13",
+		"@esotericsoftware/spine-pixi-v8": "4.3.13",
+		"@types/webfontloader": "1.6.28",
+		"pixi-filters": "6.1.0",
+		"pixi.js": "8.22.0",
+		"svelte": "5.20.5",
+		"vite": "6.2.0",
+		"webfontloader": "1.6.28"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"svelte": "./dist/index.js"
+		}
+	}
+}

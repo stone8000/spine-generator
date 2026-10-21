@@ -1,0 +1,30 @@
+{
+  "name": "spine-motion-kit",
+  "version": "0.1.0",
+  "description": "Spine 4.3 流暢動作產生器：預設動作、畫面空間重定向、物理烘焙、IK 保護、流暢度檢查、預覽",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "bin": {
+    "spine-motion": "bin/spine-motion.js"
+  },
+  "scripts": {
+    "motion": "node bin/spine-motion.js",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "demo": "node bin/spine-motion.js generate examples/rigs/fighter.json examples/recipes/fighter.recipe.json -o examples/out/fighter.motion.json --check --preview && node bin/spine-motion.js generate examples/rigs/symbol.json examples/recipes/symbol.recipe.json -o examples/out/symbol.motion.json --check --preview",
+    "docs": "node scripts/gen-preset-docs.ts",
+    "studio": "node scripts/build-studio.ts"
+  },
+  "dependencies": {
+    "@esotericsoftware/spine-core": "4.3.13"
+  },
+  "devDependencies": {
+    "@esotericsoftware/spine-player": "4.3.13",
+    "@types/node": "22.20.5",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,99 @@
+diff --git a/packages/components-pixi/package.json b/packages/components-pixi/package.json
+index 47d3048..31b1bea 100644
+--- a/packages/components-pixi/package.json
++++ b/packages/components-pixi/package.json
+@@ -24,7 +24,7 @@
+ 		"@sveltejs/vite-plugin-svelte": "5.0.3"
+ 	},
+ 	"dependencies": {
+-		"pixi.js": "8.8.1",
++		"pixi.js": "8.22.0",
+ 		"lodash": "4.17.16",
+ 		"@types/lodash": "4.17.16",
+ 		"svelte": "5.20.5",
+diff --git a/packages/components-storybook/package.json b/packages/components-storybook/package.json
+index ad3fde8..1bc8593 100644
+--- a/packages/components-storybook/package.json
++++ b/packages/components-storybook/package.json
+@@ -39,7 +39,7 @@
+     "@storybook/sveltekit": "9.0.15",
+     "@sveltejs/adapter-static": "latest",
+     "@sveltejs/vite-plugin-svelte": "5.0.3",
+-    "pixi.js": "8.8.1"
++    "pixi.js": "8.22.0"
+   },
+   "type": "module"
+ }
+diff --git a/packages/pixi-svelte-storybook/package.json b/packages/pixi-svelte-storybook/package.json
+index 4f9aea5..6c87485 100644
+--- a/packages/pixi-svelte-storybook/package.json
++++ b/packages/pixi-svelte-storybook/package.json
+@@ -36,7 +36,7 @@
+     "@storybook/sveltekit": "9.0.15",
+     "@sveltejs/adapter-static": "latest",
+     "@sveltejs/vite-plugin-svelte": "5.0.3",
+-    "pixi.js": "8.8.1"
++    "pixi.js": "8.22.0"
+   },
+   "type": "module"
+ }
+diff --git a/packages/pixi-svelte/package.json b/packages/pixi-svelte/package.json
+index 72b7a57..fe1fe6c 100644
+--- a/packages/pixi-svelte/package.json
++++ b/packages/pixi-svelte/package.json
+@@ -33,11 +33,11 @@
+ 	},
+ 	"dependencies": {
+ 		"@barvynkoa/particle-emitter": "0.0.1",
+-		"@esotericsoftware/spine-core": "4.2.74",
+-		"@esotericsoftware/spine-pixi-v8": "4.2.74",
++		"@esotericsoftware/spine-core": "4.3.13",
++		"@esotericsoftware/spine-pixi-v8": "4.3.13",
+ 		"@types/webfontloader": "1.6.28",
+ 		"pixi-filters": "6.1.0",
+-		"pixi.js": "8.8.1",
++		"pixi.js": "8.22.0",
+ 		"svelte": "5.20.5",
+ 		"vite": "6.2.0",
+ 		"webfontloader": "1.6.28"
+diff --git a/packages/pixi-svelte/src/lib/components/SpineBone.svelte b/packages/pixi-svelte/src/lib/components/SpineBone.svelte
+index 24a86b8..a32a129 100644
+--- a/packages/pixi-svelte/src/lib/components/SpineBone.svelte
++++ b/packages/pixi-svelte/src/lib/components/SpineBone.svelte
+@@ -1,7 +1,8 @@
+ <script lang="ts" module>
+ 	import * as SPINE_PIXI from '@esotericsoftware/spine-pixi-v8';
+ 
+-	export type Props = Partial<SPINE_PIXI.Bone> & {
++	// Spine 4.3: a bone's local transform (x, y, rotation, scaleX, ...) lives on its pose, not on Bone
++	export type Props = Partial<SPINE_PIXI.BonePose> & {
+ 		boneName: Parameters<SPINE_PIXI.Spine['skeleton']['findBone']>[0];
+ 	};
+ </script>
+@@ -13,9 +14,10 @@
+ 	const props: Props = $props();
+ 	const spine = getContextSpine();
+ 	const bone = spine.skeleton.findBone(props.boneName);
++	const pose = bone?.getPose();
+ 
+-	propsSyncEffect({ props, target: bone, ignore: ['boneName', 'y'] });
++	propsSyncEffect({ props, target: pose, ignore: ['boneName', 'y'] });
+ 	$effect(() => {
+-		if (bone && props.y !== undefined) bone.y = -props.y;
++		if (pose && props.y !== undefined) pose.y = -props.y;
+ 	});
+ </script>
+diff --git a/packages/pixi-svelte/src/lib/components/SpineSlot.svelte b/packages/pixi-svelte/src/lib/components/SpineSlot.svelte
+index 934f351..5f5f244 100644
+--- a/packages/pixi-svelte/src/lib/components/SpineSlot.svelte
++++ b/packages/pixi-svelte/src/lib/components/SpineSlot.svelte
+@@ -26,7 +26,8 @@
+ 				const slot = spine.skeleton.findSlot(props.slotName);
+ 
+ 				if (slot) {
+-					show = Boolean(slot?.attachment);
++					// Spine 4.3: attachment moved from Slot to its pose
++					show = Boolean(slot.getAppliedPose().attachment);
+ 				}
+ 			});
+ 		}

@@ -1,0 +1,28 @@
+{
+  "fps": 30,
+  "facing": 1,
+  "roles": { "hip": "hip", "head": "head", "fist": "ik-fist-front" },
+  "animations": [
+    {
+      "name": "idle_custom",
+      "loop": true,
+      "duration": 2,
+      "tracks": [
+        { "role": "hip", "channel": "y", "space": "screen", "type": "wave", "amplitude": 6, "period": 2, "peakAt": 1 },
+        { "role": "head", "channel": "rotate", "space": "screen", "type": "wave", "amplitude": 3, "period": 2, "peakAt": 1.2 },
+        { "bone": "hair1", "channel": "rotate", "type": "wave", "amplitude": 4, "period": 1, "peakAt": 0.1 }
+      ]
+    },
+    {
+      "name": "taunt",
+      "tracks": [
+        { "role": "head", "channel": "rotate", "space": "screen", "type": "poses",
+          "points": [ { "time": 0, "value": 0 }, { "time": 0.3, "value": 12, "ease": "backOut" }, { "time": 0.9, "value": 12 }, { "time": 1.3, "value": 0, "ease": "sineInOut" } ] },
+        { "role": "fist", "channel": "y", "space": "screen", "type": "strike",
+          "anticipation": { "value": -10, "time": 0.2 }, "action": { "value": 20, "time": 0.1 },
+          "overshoot": { "amount": 3, "frequency": 5, "damping": 0.4 }, "hold": 0.6, "recover": { "time": 0.4 } }
+      ],
+      "events": [ { "name": "taunt_peak", "time": 0.3 } ]
+    }
+  ]
+}

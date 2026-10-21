@@ -1,0 +1,6 @@
+neg-control.ts(26,16): error TS2339: Property 'y' does not exist on type 'Bone'.
+neg-control.ts(27,16): error TS2339: Property 'rotation' does not exist on type 'Bone'.
+neg-control.ts(33,46): error TS2339: Property 'attachment' does not exist on type 'Slot'.
+neg-control.ts(38,39): error TS2353: Object literal may only specify known properties, and 'mixBlend' does not exist in type 'Partial<TrackEntry>'.
+neg-control.ts(39,39): error TS2561: Object literal may only specify known properties, but 'holdPrevious' does not exist in type 'Partial<TrackEntry>'. Did you mean to write 'previous'?
+neg-control.ts(54,16): error TS2339: Property 'setToSetupPose' does not exist on type 'Skeleton'.

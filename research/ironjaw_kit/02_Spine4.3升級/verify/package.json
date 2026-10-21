@@ -1,0 +1,16 @@
+{
+  "name": "spine43-api-check",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@esotericsoftware/spine-pixi-v8": "4.3.13",
+    "pixi.js": "8.22.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "fps": 30,
+  "facing": 1,
+  "size": 1,
+  "maxSegment": 0.2,
+  "roles": {
+    "root": "root",
+    "hip": "hip",
+    "body": "hip",
+    "chest": "chest",
+    "head": "head",
+    "hair": ["hair1", "hair2", "hair3"],
+    "fist": "ik-fist-front",
+    "fistFront": "ik-fist-front",
+    "fistBack": "ik-fist-back",
+    "fists": ["ik-fist-front", "ik-fist-back"],
+    "shoulderBack": "upperArmB",
+    "shoulders": ["upperArmF", "upperArmB"]
+  },
+  "animations": [
+    { "name": "idle", "preset": "fighter-idle-bounce", "params": { "hair": "keys" } },
+    { "name": "idle_weave", "preset": "fighter-idle-weave", "params": { "hair": "keys" } },
+    { "name": "idle_breathe", "preset": "breathe" },
+    { "name": "punch", "preset": "punch", "params": { "reach": 30, "windup": 20 } },
+    { "name": "hit", "preset": "hit-react" },
+    { "name": "jump", "preset": "jump", "params": { "height": 120 } },
+    { "name": "celebrate", "preset": "celebrate", "params": { "lift": 90 } }
+  ]
+}

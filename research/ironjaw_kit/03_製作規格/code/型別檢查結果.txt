@@ -1,0 +1,3 @@
+# tsc -p tsconfig.json  (TypeScript 5.9.3; @esotericsoftware/spine-pixi-v8 4.3.13; pixi.js 8.22.0)
+# files: reelMotion.ts fighters.ts spine43-api-check.ts
+PASS: 0 errors

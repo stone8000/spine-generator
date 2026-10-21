@@ -1,0 +1,85 @@
+{
+  "source": {
+    "video": "由 Xposed Studios 提供的 Iron Jaw 老虎机游戏 – Stake.com - Google Chrome 2026-10-20 17-47-40.mp4",
+    "duration_s": 74.37,
+    "resolution": [1920, 1032],
+    "capture_fps": 29.744,
+    "game_canvas_in_capture_px": { "x0": 205, "y0": 205, "x1": 1405, "y1": 880, "height": 675 },
+    "symbol_row_height_px": 98,
+    "timing_precision_s": 0.017
+  },
+  "idle": {
+    "window_s": [18.2, 35.8],
+    "period_s": { "left": 1.992, "right": 1.990 },
+    "sine_fit_r2_range": [0.96, 0.998],
+    "left_bounce": {
+      "chest_dy_amp_px": 9.01, "chest_dx_amp_px": 4.21, "chest_rot_amp_deg": 1.14,
+      "head_dy_amp_px": 10.48, "head_dx_amp_px": 8.78, "head_rot_amp_deg": 4.33,
+      "hair_dx_amp_px": 13.04, "fist_front_dy_amp_px": 15.76, "fist_back_dy_amp_px": 15.40,
+      "fists_phase_difference_deg": 148
+    },
+    "right_weave": {
+      "chest_dx_amp_px": 10.71, "chest_dy_amp_px": 1.77,
+      "head_dx_amp_px": 13.00, "head_dy_amp_px": 8.16, "head_rot_amp_deg": 4.26,
+      "head_dy_vs_dx_phase_deg": 170,
+      "hair_dx_amp_px": 17.32
+    },
+    "left_vs_right_head_dx_lag_s": 0.12,
+    "mesh_strain": {
+      "right_chest_scaleX_peak_to_peak_pct": 7.74,
+      "left_shoulder_shear_peak_to_peak": 0.0499,
+      "left_shoulder_scale_peak_to_peak_pct": 4.3,
+      "head_nonrigid_rms_px": { "left": 1.47, "right": 1.65 }
+    },
+    "hair_residual_after_head_rigid": {
+      "left_outer_tuft_dx_amp_px": 3.29, "phase_vs_head_deg": 181, "r2": 0.99,
+      "interpretation": "weight attenuation, no time lag (not physics)"
+    }
+  },
+  "reaction": {
+    "right_punch": {
+      "trigger_wild_expand_s": 17.080, "first_reaction_frame_s": 17.112, "trigger_delay_frames": 1,
+      "windup_s": 0.27, "strike_smear_s": 0.07, "hold_s": 0.27, "return_s": 0.25, "total_s": 0.95,
+      "duplicate_frames": 0
+    },
+    "left_punch_bonus": { "start_s": 64.819, "smear_frame_s": 64.886, "back_to_guard_s": 65.491, "total_s": 0.65 },
+    "pair_stagger_s": 0.17
+  },
+  "reels": {
+    "all_reels_start_same_frame": true,
+    "windup_px": 16.75, "windup_rows": 0.17, "windup_s": 0.10,
+    "first_reel_land_after_press_s": 0.60,
+    "stop_gap_s": 0.22,
+    "overshoot_px": 10.93, "overshoot_rows": 0.11,
+    "settle_frames": 3,
+    "blur_sharpness_ratio_spinning_vs_rest": 0.17,
+    "autoplay_spin_starts_s": [12.64, 15.53, 18.49, 21.38, 23.37, 25.22, 27.10, 28.78, 30.39, 32.11, 34.16, 35.84],
+    "model": {
+      "file": "03_製作規格/code/reelMotion.ts",
+      "params": { "windUpDistance": 0.17, "windUpTime": 0.1, "accelTime": 0.12, "speed": 22, "firstLandTime": 0.6, "stagger": 0.22, "decelTime": 0.11, "brakePower": 1.75, "overshoot": 0.11, "settleTime": 0.07, "blurSpeed": 6, "minTravel": 5 },
+      "fit_worst_px": 3.3, "fit_rms_px": 1.8, "fit_frames": 15
+    }
+  },
+  "bonus": {
+    "bet": 0.20, "cost": 200.0, "total_win": 951.84,
+    "wheels": [
+      { "appear_s": 57.09, "spin_s": [57.39, 60.31], "duration_s": 2.9, "result": "+5x", "banner_update_s": 61.02, "banner": "6x" },
+      { "appear_s": 61.22, "spin_s": [61.52, 62.63], "duration_s": 1.1, "result": "x3", "banner_update_s": 63.04, "banner": "18x" },
+      { "appear_s": 63.14, "spin_s": [63.34, 64.25], "duration_s": 0.9, "result": "x2", "banner_update_s": 64.45, "banner": "36x" }
+    ],
+    "wild_expand_s": [64.58, 64.72],
+    "multiplier_fly_s": [64.99, 65.26],
+    "extra_x2_s": [65.39, 65.73],
+    "win_lines_s": [66.06, 66.50],
+    "total_to_bar_s": 66.80
+  },
+  "big_win": [
+    { "tier": "HIT ME", "s": [67.04, 67.44], "counter": [12.85, 50.83] },
+    { "tier": "BEATDOWN", "s": [67.55, 68.14], "counter": [251.96, 288.14] },
+    { "tier": "KNOCKOUT", "s": [68.25, 68.70], "counter": [482.45, 506.47] },
+    { "tier": "MAYHEM", "s": [68.82, 69.49], "counter": [719.92, 951.84] }
+  ],
+  "big_win_transition_frames": 4,
+  "big_win_exit_s": [69.49, 69.90],
+  "intro": { "background_s": 5.58, "fighters_fade_s": 6.05, "symbols_drop_s": [6.25, 6.86], "ui_s": [6.93, 7.00] }
+}

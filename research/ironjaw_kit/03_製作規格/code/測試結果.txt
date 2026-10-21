@@ -1,0 +1,39 @@
+# node --test reelMotion.test.ts  (v24.15.0, 2026-10-21 09:50)
+landing
+  frame -5: measured -223.7 px, model -204.4 px
+  frame -4: measured -135.9 px, model -130.7 px
+  frame -3: measured -59.1 px, model -58.4 px
+  frame -2: measured -12.3 px, model -11.9 px
+  frame -1: measured 4.3 px, model 7.4 px
+  frame +0: measured 10.9 px, model 10.8 px
+  frame +1: measured 7.2 px, model 5.7 px
+  frame +2: measured 3.3 px, model 0.0 px
+  frame +3: measured 0.8 px, model 0.0 px
+  frame +4: measured -0.2 px, model 0.0 px
+  frame +5: measured -0.3 px, model 0.0 px
+  frame +6: measured 0.1 px, model 0.0 px
+start
+  frame 0: measured 0.0 px, model 0.0 px
+  frame 1: measured -8.0 px, model -9.3 px
+  frame 2: measured -14.2 px, model -14.9 px
+  frame 3: measured -16.8 px, model -16.7 px
+  frame 4: measured -9.1 px, model -5.8 px
+  frame 5: measured 27.2 px, model 25.7 px
+  frame 6: measured 80.8 px, model 77.9 px
+✔ reels land 0.22 s apart, starting 0.60 s after the press (1.5137ms)
+✔ each reel stops exactly on a whole row (0.5548ms)
+✔ cruise speed is nudged by less than 6 % to land on a row (0.2459ms)
+✔ pull-up reaches -0.17 rows and overshoot reaches +0.11 rows (4.1837ms)
+✔ position and velocity are continuous at every phase boundary (0.5611ms)
+✔ velocity matches the numeric derivative of position (0.2675ms)
+✔ blurred textures only while fast; sharp at rest and during the bounce (0.1516ms)
+✔ model tracks the measured landing within 6 px for the last 3 frames before and 4 after the peak (0.9505ms)
+✔ model tracks the measured pull-up and launch within 6 px (0.3107ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 295.1853

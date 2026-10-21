@@ -1,0 +1,38 @@
+{
+	"name": "components-pixi",
+	"version": "0.0.0",
+	"private": true,
+	"main": "./index.ts",
+	"types": "./index.ts",
+	"license": "MIT",
+	"scripts": {
+		"format": "prettier --write --ignore-path=../../.prettierignore .",
+		"lint": "eslint \"src\"",
+		"storybook": "PUBLIC_CHROMATIC=true storybook dev -p 5001 public"
+	},
+	"type": "module",
+	"devDependencies": {
+		"eslint": "9.21.0",
+		"eslint-config-custom": "workspace:*",
+		"config-ts": "workspace:*",
+		"config-vite": "workspace:*",
+		"config-svelte": "workspace:*",
+		"config-lingui": "workspace:*",
+		"config-storybook": "workspace:*",
+		"chromatic": "11.26.1",
+		"@storybook/addon-svelte-csf": "5.0.5",
+		"@sveltejs/vite-plugin-svelte": "5.0.3"
+	},
+	"dependencies": {
+		"pixi.js": "8.22.0",
+		"lodash": "4.17.16",
+		"@types/lodash": "4.17.16",
+		"svelte": "5.20.5",
+		"vite": "6.2.0",
+		"@sveltejs/kit": "2.17.3",
+		"pixi-svelte": "workspace:*",
+		"utils-shared": "workspace:*",
+		"state-shared": "workspace:*",
+		"constants-shared": "workspace:*"
+	}
+}

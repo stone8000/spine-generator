@@ -1,0 +1,9 @@
+{
+ "skeleton": { "spine": "4.3.26", "x": -60, "y": -60, "width": 120, "height": 120, "fps": 30 },
+ "bones": [
+  { "name": "root" },
+  { "name": "symbol", "parent": "root", "length": 40, "rotation": 90, "color": "6fcf97ff" },
+  { "name": "title", "parent": "root", "y": 160, "length": 60, "color": "bb6bd9ff" }
+ ],
+ "animations": {}
+}
