@@ -14,7 +14,7 @@
 |---|---|---|
 | 研究：量化基準、節拍表、外部最佳做法 | ✅ | `research/FINDINGS.md`、`research/beat_table.json`、`research/SOTA.md` |
 | P1 裁判與輸出骨幹 | ✅ 6 項驗收全過，兩輪反查後修正 | `research/P1_REPORT.md`、`qa/README.md` |
-| P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②③④ 通過，⑤ 部分通過，① 未過（剛性掃描比 README 手量嚴） | `research/P2_REPORT.md` |
+| P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②④ 通過，⑤ 部分通過，①③ 未過（① 剛性掃描比 README 手量嚴；③ G2 加上單一三角形規則後肘只有 58–78°）。審查 F1–F6 已修：膝蓋依解剖往外彎、整隻腳釘地、θ_hard 含 G4、畫布與掃描範圍無關、G6b 兩側判斷 | `research/P2_REPORT.md` |
 
 P1 的東西：
 - `qa/`：Node 裁判，精確鎖定官方 `@esotericsoftware/spine-core@4.2.120`（與 `spine-canvaskit@4.2.120`），
@@ -29,10 +29,11 @@ P2 的東西：
   `spinegen/atlas.py`、`templates/biped_mascot.json`。
 - `spinegen/raster.py`、`spinegen/art_gates.py`（G1 G2 G4 G5 G6）、`spinegen/budget.py`（逐關節 θ_soft／θ_hard，
   加上 artreq 項目與對照表）。
+- `research/p2_sheets.py`（rigid／joint 對照表）、`research/p2_crouch_view.py`（蹲下的對照圖）：P2_REPORT 看圖用。
 
 ```bash
 cd qa && npm ci && npm test        # 55 tests
-python3 -m pytest tests -q         # 215 tests（第三方檔案不存在時自動跳過）
+python3 -m pytest tests -q         # 223 tests（第三方檔案不存在時自動跳過）
 ```
 
 ## 目前的發現
