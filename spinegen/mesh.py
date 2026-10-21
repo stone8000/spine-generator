@@ -83,7 +83,16 @@ THE LEAN OPTIONS (what spinegen.rigbuild uses by default)
     band_slivers=deg    optional: medial-axis points next to the thin
                         triangles near a band (_medial_points).
   The monkey's lean joint rig: 582 vertices (0.48x the grid), B2 0.98, 0
-  folds over all its animations in spine-core, elbows 98-110 deg.
+  folds over all its animations in spine-core, elbows 98-110 deg on the
+  band's summed area but 58-78 deg with G2's per-triangle range [0.3, 3]
+  (P2 review F3): the first triangle out of range is a long fan from the
+  crook's outline vertex into the sleeve. That is close to what ANY mesh
+  can do there: a piecewise-linear helper ramp of half-length 2 halfwidths
+  squeezes art 1.6 halfwidths off the axis to 0.27 of its area at 90 deg
+  in the continuum (0.35 at 80). Measured levers (P2_REPORT): interior
+  row points 76-90 deg at 0.69x the grid, band_slivers=10 58-90 at 0.56x,
+  4 rows 68-88, a 3-halfwidth band 62-96 (it bends the hand), the helper
+  taking 40% of the turn 56-88.
 
 COORDINATES
   Layer pixels are image space: x right, y down, pixel (i, j) covers
