@@ -209,6 +209,35 @@ def test_g6b_shard_carried_by_the_occluder_is_not_a_ghost():
     assert [c["owner"] for c in ag.duplicates(ghost.rest, "torso", "forearm_l")["components"].values()] == ["under"]
 
 
+def test_g6b_ghost_in_a_same_coloured_body_is_not_carried():
+    """P2 review F5, the counter-example: the arm baked into a torso of the
+    SAME colours with no outline (synth_art skin=True). The copy meets the
+    torso's visible paint seamlessly (seam_de 5.2 < DUP_DE), which alone
+    made it "carried" and let the ghost pass G6b. It continues the arm's
+    own paint better (0.0), so it is the torso's: G6b fails."""
+    p = _probe("elbow_l", mode="rigid", ghost=True, skin=True)
+    (c,) = ag.duplicates(p.rest, "torso", "forearm_l")["components"].values()
+    assert c["seam_de"] < ag.DUP_DE and c["seam_px"] >= ag.SEAM_MIN_PX * SCALE  # the old rule's trap
+    assert c["seam_o_de"] < c["seam_de"] and c["owner"] == "under"
+    for a in (20, -20):
+        r = ag.ghost_paint(p.rest, p.frame(a))
+        assert not r["pass"] and r["value"] > 0.9 and r["worst"] == "torso|forearm_l" and not r["carried"], a
+    ir, images, joints, canvas = _rig(mode="rigid", ghost=True, skin=True)
+    b = budget.scan(ir, images, [joints["elbow_l"]], step=10.0, max_angle=20.0, canvas=canvas)
+    assert b["joints"]["elbow_l"]["+"]["limit_by"] == "ghost@torso|forearm_l" and b["artreq"] == []
+
+
+def test_g6b_shard_in_a_same_coloured_body_is_still_carried():
+    """The mirror case in the same palette: torso paint cut into the
+    forearm. It continues the torso (0.0) better than the forearm's own
+    paint (5.2): carried, not a limit."""
+    p = _probe("elbow_l", mode="rigid", shard=True, skin=True)
+    (c,) = ag.duplicates(p.rest, "torso", "forearm_l")["components"].values()
+    assert c["owner"] == "occluder" and c["seam_o_de"] - c["seam_de"] >= ag.SEAM_MARGIN
+    r = ag.ghost_paint(p.rest, p.frame(20))
+    assert r["pass"] and [(x["slot"], x["occluder"]) for x in r["carried"]] == [("torso", "forearm_l")]
+
+
 def test_ncc():
     rng = np.random.default_rng(1)
     x = rng.uniform(0, 1, (200, 3))

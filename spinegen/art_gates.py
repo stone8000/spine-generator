@@ -63,9 +63,13 @@ WHERE THE DEFINITIONS COME FROM
   (the hand carries the copy away, and it shows only where it lands on
   something else). When a pair correlates, duplicates() finds the copy at
   rest (the occluder's paint matches the paint under it, CIELAB distance
-  < 10) and gives it an owner: a copy that continues the underlay's
-  visible paint seamlessly across the occluder's edge is CARRIED by the
-  occluder (that is why it is invisible at rest).
+  < 10) and gives it an owner by reading the seam on BOTH sides: a copy is
+  CARRIED by the occluder only if it continues the underlay's visible paint
+  across the occluder's edge (that is why it is invisible at rest) AND
+  continues it better, by at least SEAM_MARGIN, than it continues the
+  occluder's own paint around it (a shard is foreign to the layer that
+  holds it). One side alone is not evidence: in a same-coloured body with
+  no outline a ghost meets the underlay seamlessly too (P2 review F5).
   A carried pair leaves the G6(b) judgement and is reported as "carried"
   (budget.json turns it into an art request: clean the shard out of that
   layer), so G6(b) limits a joint only by a duplicate that is visible
@@ -119,6 +123,8 @@ NCC_ERODE = 2.0        # G6(b) correlates only revealed pixels this far (px, sca
 DUP_DE = 10.0          # G6(b) duplicates(): CIELAB distance under which two layers' paint is "the same"
 SEAM_REACH = 3.0       # G6(b) duplicates(): px (scale 1) across the occluder's edge where a copy's owner is read
 SEAM_MIN_PX = 8.0      # G6(b) duplicates(): px of contact with visible underlay paint needed to call a copy carried
+SEAM_MARGIN = 2.5      # G6(b) duplicates(): CIELAB, ~1 just-noticeable difference (2.3): the underlay side must
+                       # continue the copy at least this much better than the occluder's own paint does
 DUP_MIN_PX = 16.0      # G6(b) duplicates(): smallest duplicate component, px (scale 1)
 
 
@@ -1011,24 +1017,37 @@ def duplicates(rest, under, occluder):
     A DUPLICATE pixel is one the occluder covers at rest while `under`
     draws beneath it (alpha >= 0.5) with nearly the same colour (CIELAB
     distance < DUP_DE); duplicate pixels are grouped into 8-connected
-    components of >= DUP_MIN_PX px. A component's OWNER is read off the
-    occluder's edge, where the copy meets the underlay's own visible paint:
-    a shard of the underlay cut into the occluder continues that paint
-    SEAMLESSLY across the edge (that is why it cannot be seen at rest), so
-    the median colour distance between the visible underlay pixels within
-    SEAM_REACH px of the copy and their nearest copy pixel is < DUP_DE, over
-    at least SEAM_MIN_PX px of contact: owner "occluder" (a shard of
-    trousers cut into the hand image). A copy of the occluder left in the
-    underlay instead meets the underlay's paint at the occluder's outline,
-    which is an edge in the art (an outline stroke, another colour): owner
-    "under" (the arm left in the torso). Two layers sharing one palette (a
-    striped sleeve over a striped shirt) agree pixel by pixel by chance but
-    do not continue each other across the edge, so they also read "under",
-    which G6b keeps judging: a doubt never hides a ghost.
+    components of >= DUP_MIN_PX px. A component's OWNER is read off its
+    seams with both layers' visible paint, each the median colour distance
+    between the paint within SEAM_REACH px of the copy and its nearest copy
+    pixel (_seam_de):
+      seam_de    with the UNDERLAY's visible paint (across the occluder's
+                 edge);
+      seam_o_de  with the OCCLUDER's own paint (its drawn pixels that are
+                 no duplicate: across the copy's boundary inside it).
+    A shard of the underlay cut into the occluder (trousers in the hand
+    image) continues the underlay seamlessly and breaks against the hand's
+    own paint; a copy of the occluder left in the underlay (the arm in the
+    torso) IS the occluder's paint where it shows, so it continues the
+    occluder and meets the underlay at the occluder's outline. Owner
+    "occluder" (carried) when seam_de < DUP_DE over >= SEAM_MIN_PX px of
+    contact AND seam_o_de - seam_de >= SEAM_MARGIN. A copy that touches no
+    paint of the occluder's own is an island in its image: carried when
+    the occluder has own paint elsewhere (an island cut out with the hand),
+    not when the copy is all the occluder shows (a patch layer, or a whole
+    occluder baked into the underlay: a ghost). Everything else is owner
+    "under", which G6b keeps judging: a doubt never hides a ghost.
+    WHY both sides (P2 review F5): reading only the underlay's side called
+    a real ghost carried whenever the occluder and the underlay share a
+    colour and the art has no outline (skin on skin: seam_de 5.2 < 10),
+    and the ghost passed G6b. Two layers with one palette (a striped
+    sleeve over a striped shirt) now go by which side the copy continues
+    better; the monkey's sleeve carries a torso stripe that continues the
+    torso (0.5) better than the sleeve (5.2).
 
     Returns {"labels": (H*W,) int32 component id (0 none), "carried": (H*W,)
     bool pixels of occluder-owned components, "components": {id: {"px",
-    "owner", "seam_de", "seam_px"}}}."""
+    "owner", "seam_de", "seam_px", "seam_o_de", "seam_o_px", "why"}}}."""
     import cv2
     cache = rest.cache.setdefault("duplicates", {})
     key = (under, occluder)
@@ -1059,7 +1078,10 @@ def duplicates(rest, under, occluder):
     nl, lab, st, _ = cv2.connectedComponentsWithStats(dup.reshape(H, W), connectivity=8)
     lab = lab.reshape(-1)
     under_vis = (top == rank[under]).reshape(H, W)
+    occ_own = ((top == rank[occluder]) & (dup == 0)).reshape(H, W)   # the occluder's own paint
+    own_total = int(occ_own.sum())
     reach = max(2.0, SEAM_REACH * c.scale)
+    need = SEAM_MIN_PX * c.scale
     pad = int(math.ceil(reach)) + 2
     for i in range(1, nl):
         if st[i, cv2.CC_STAT_AREA] < DUP_MIN_PX * c.scale ** 2:
@@ -1069,12 +1091,24 @@ def duplicates(rest, under, occluder):
         comp = lab.reshape(H, W)[i0:i1, j0:j1] == i
         box_lab = _lab(_straight(img.reshape(H, W, 4)[i0:i1, j0:j1].reshape(-1, 4))).reshape(i1 - i0, j1 - j0, 3)
         de, n_seam = _seam_de(comp, under_vis[i0:i1, j0:j1], box_lab, reach)
-        owner = "occluder" if n_seam >= SEAM_MIN_PX * c.scale and de < DUP_DE else "under"
+        de_o, n_o = _seam_de(comp, occ_own[i0:i1, j0:j1], box_lab, reach)
+        if n_seam < need or de >= DUP_DE:
+            owner, why = "under", "does not continue the underlay's paint"
+        elif n_o >= need:
+            better = de_o - de >= SEAM_MARGIN
+            owner = "occluder" if better else "under"
+            why = ("continues the underlay, breaks against the occluder's own paint" if better else
+                   "continues the occluder's own paint as well as the underlay's (no evidence: judged)")
+        elif own_total >= DUP_MIN_PX * c.scale ** 2:
+            owner, why = "occluder", "an island in the occluder's image, apart from its own paint"
+        else:
+            owner, why = "under", "the copy is all the occluder shows (no evidence: judged)"
         full = lab == i
         labels[full] = i
         if owner == "occluder":
             carried[full] = True
-        comps[i] = {"px": int(comp.sum()), "owner": owner, "seam_de": de, "seam_px": n_seam}
+        comps[i] = {"px": int(comp.sum()), "owner": owner, "seam_de": de, "seam_px": n_seam,
+                    "seam_o_de": de_o, "seam_o_px": n_o, "why": why}
     cache[key] = {"labels": labels, "carried": carried, "components": comps}
     return cache[key]
 
