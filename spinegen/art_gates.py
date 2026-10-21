@@ -63,8 +63,9 @@ WHERE THE DEFINITIONS COME FROM
   (the hand carries the copy away, and it shows only where it lands on
   something else). When a pair correlates, duplicates() finds the copy at
   rest (the occluder's paint matches the paint under it, CIELAB distance
-  < 10) and gives it an owner from the paint around it: a copy that looks
-  like the underlay's own visible paint nearby is CARRIED by the occluder.
+  < 10) and gives it an owner: a copy that continues the underlay's
+  visible paint seamlessly across the occluder's edge is CARRIED by the
+  occluder (that is why it is invisible at rest).
   A carried pair leaves the G6(b) judgement and is reported as "carried"
   (budget.json turns it into an art request: clean the shard out of that
   layer), so G6(b) limits a joint only by a duplicate that is visible
@@ -112,7 +113,8 @@ GHOST_MAX_NCC = 0.3    # G6(b)
 NCC_MIN_PX = 64.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1; see ghost_paint)
 NCC_ERODE = 2.0        # G6(b) correlates only revealed pixels this far (px, scale 1) inside the revealed patch
 DUP_DE = 10.0          # G6(b) duplicates(): CIELAB distance under which two layers' paint is "the same"
-DUP_CONTEXT = 10.0     # G6(b) duplicates(): px (scale 1) of paint around a duplicate that decide its owner
+SEAM_REACH = 3.0       # G6(b) duplicates(): px (scale 1) across the occluder's edge where a copy's owner is read
+SEAM_MIN_PX = 8.0      # G6(b) duplicates(): px of contact with visible underlay paint needed to call a copy carried
 DUP_MIN_PX = 16.0      # G6(b) duplicates(): smallest duplicate component, px (scale 1)
 
 
@@ -943,19 +945,22 @@ def _straight(premult):
     return premult[:, :3] / np.maximum(a, 1e-6)
 
 
-def _nearest_de(x, ref, n=400, m=2000):
-    """Median over (a sample of) x of the colour distance to the nearest
-    colour in (a sample of) ref: "does x look like ref's paint"; inf when
-    ref is empty."""
-    if len(ref) == 0 or len(x) == 0:
-        return math.inf
-    rng = np.random.default_rng(0)
-    if len(x) > n:
-        x = x[rng.choice(len(x), n, replace=False)]
-    if len(ref) > m:
-        ref = ref[rng.choice(len(ref), m, replace=False)]
-    d = np.sqrt(((x[:, None, :] - ref[None, :, :]) ** 2).sum(-1)).min(1)
-    return float(np.median(d))
+def _seam_de(comp, under_vis, lab, reach):
+    """How the copy meets the underlay's visible paint across the
+    occluder's edge: for every visible-underlay pixel within `reach` px of
+    the component, the colour distance to the nearest component pixel
+    (both (h, w) masks of one box; lab (h, w, 3) CIELAB of the rest frame).
+    Returns (median distance, number of such pixels); (inf, 0) if the copy
+    never meets visible underlay paint."""
+    from scipy import ndimage
+    dist, (iy, ix) = ndimage.distance_transform_edt(~comp, return_indices=True)
+    near = under_vis & (dist <= reach)
+    n = int(near.sum())
+    if not n:
+        return math.inf, 0
+    a = lab[near]
+    b = lab[iy[near], ix[near]]
+    return float(np.median(np.linalg.norm(a - b, axis=1))), n
 
 
 def duplicates(rest, under, occluder):
@@ -965,17 +970,24 @@ def duplicates(rest, under, occluder):
     A DUPLICATE pixel is one the occluder covers at rest while `under`
     draws beneath it (alpha >= 0.5) with nearly the same colour (CIELAB
     distance < DUP_DE); duplicate pixels are grouped into 8-connected
-    components of >= DUP_MIN_PX px. A component's OWNER is decided from the
-    paint around it (within DUP_CONTEXT px): if the duplicate looks like
-    the visible paint of `under` nearby (median nearest-colour distance <=
-    DUP_DE) and more like it than like the occluder's own paint nearby, the
-    occluder carries a piece of the underlay (owner "occluder": a shard of
-    trousers cut into the hand image); otherwise the underlay carries a copy
-    of the occluder (owner "under": the classic arm left in the torso).
+    components of >= DUP_MIN_PX px. A component's OWNER is read off the
+    occluder's edge, where the copy meets the underlay's own visible paint:
+    a shard of the underlay cut into the occluder continues that paint
+    SEAMLESSLY across the edge (that is why it cannot be seen at rest), so
+    the median colour distance between the visible underlay pixels within
+    SEAM_REACH px of the copy and their nearest copy pixel is < DUP_DE, over
+    at least SEAM_MIN_PX px of contact: owner "occluder" (a shard of
+    trousers cut into the hand image). A copy of the occluder left in the
+    underlay instead meets the underlay's paint at the occluder's outline,
+    which is an edge in the art (an outline stroke, another colour): owner
+    "under" (the arm left in the torso). Two layers sharing one palette (a
+    striped sleeve over a striped shirt) agree pixel by pixel by chance but
+    do not continue each other across the edge, so they also read "under",
+    which G6b keeps judging: a doubt never hides a ghost.
 
     Returns {"labels": (H*W,) int32 component id (0 none), "carried": (H*W,)
     bool pixels of occluder-owned components, "components": {id: {"px",
-    "owner", "de_under", "de_occluder"}}}."""
+    "owner", "seam_de", "seam_px"}}}."""
     import cv2
     cache = rest.cache.setdefault("duplicates", {})
     key = (under, occluder)
@@ -1005,22 +1017,23 @@ def duplicates(rest, under, occluder):
         dup[ov[de < DUP_DE]] = 1
     nl, lab, st, _ = cv2.connectedComponentsWithStats(dup.reshape(H, W), connectivity=8)
     lab = lab.reshape(-1)
-    near_k = _disk_kernel(DUP_CONTEXT * c.scale)
-    dup_grown = cv2.dilate(dup.reshape(H, W), np.ones((3, 3), np.uint8)).reshape(-1) > 0
+    under_vis = (top == rank[under]).reshape(H, W)
+    reach = max(2.0, SEAM_REACH * c.scale)
+    pad = int(math.ceil(reach)) + 2
     for i in range(1, nl):
         if st[i, cv2.CC_STAT_AREA] < DUP_MIN_PX * c.scale ** 2:
             continue
-        comp = (lab == i)
-        ring = (cv2.dilate(comp.reshape(H, W).astype(np.uint8), near_k).reshape(-1) > 0) & ~dup_grown
-        x = _lab(_straight(img[comp]))
-        under_own = _lab(_straight(img[ring & (top == rank[under])]))
-        occ_own = _lab(_straight(img[ring & (top == rank[occluder])]))
-        du, do = _nearest_de(x, under_own), _nearest_de(x, occ_own)
-        owner = "occluder" if du <= DUP_DE and du < do else "under"
-        labels[comp] = i
+        x0, y0, bw, bh = st[i, cv2.CC_STAT_LEFT], st[i, cv2.CC_STAT_TOP], st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+        i0, i1, j0, j1 = max(0, y0 - pad), min(H, y0 + bh + pad), max(0, x0 - pad), min(W, x0 + bw + pad)
+        comp = lab.reshape(H, W)[i0:i1, j0:j1] == i
+        box_lab = _lab(_straight(img.reshape(H, W, 4)[i0:i1, j0:j1].reshape(-1, 4))).reshape(i1 - i0, j1 - j0, 3)
+        de, n_seam = _seam_de(comp, under_vis[i0:i1, j0:j1], box_lab, reach)
+        owner = "occluder" if n_seam >= SEAM_MIN_PX * c.scale and de < DUP_DE else "under"
+        full = lab == i
+        labels[full] = i
         if owner == "occluder":
-            carried[comp] = True
-        comps[i] = {"px": int(comp.sum()), "owner": owner, "de_under": du, "de_occluder": do}
+            carried[full] = True
+        comps[i] = {"px": int(comp.sum()), "owner": owner, "seam_de": de, "seam_px": n_seam}
     cache[key] = {"labels": labels, "carried": carried, "components": comps}
     return cache[key]
 

@@ -181,7 +181,7 @@ class Probe:
         hard_fails = [_label(n, g[n], self.jr) for n in ("fold", "hole") if not g[n]["pass"]]
         return {"angle": angle, "soft": not fails, "hard": not hard_fails,
                 "soft_by": fails[0] if fails else None, "hard_by": hard_fails[0] if hard_fails else None,
-                "limits": fails, "gates": g}
+                "limits": fails, "gates": g, "frame": fr}
 
 
 def _label(gate, res, jr):
@@ -214,9 +214,10 @@ def sweep(probe, sign, step, max_angle, trace=None, carried=None):
     never failed before the sweep stopped). Per-gate first failures are what
     a disagreement with a hand measurement is argued from.
     `carried` (a dict) collects the duplicates G6(b) found carried by an
-    occluder (art_gates.ghost_paint), keyed (under, occluder): {"seen",
-    "visible_from" (first angle the shard shows on >= NCC_MIN_PX px, or
-    None), "max_visible_px", "components"}."""
+    occluder (art_gates.ghost_paint), keyed (under, occluder): {"seen"
+    (first angle G6(b) met it), "visible_from" (first angle from then on
+    where the shard shows on >= NCC_MIN_PX px, or None), "max_visible_px",
+    "components"}."""
     prev = 0.0
     soft = hard = None
     soft_res = hard_res = None
@@ -225,11 +226,16 @@ def sweep(probe, sign, step, max_angle, trace=None, carried=None):
     for a in _angles(step, max_angle):
         res = probe.judge(sign * a)
         if carried is not None:
-            for it in res["gates"]["ghost_paint"].get("carried", []):
-                c = carried.setdefault((it["slot"], it["occluder"]), {"seen": sign * a, "visible_from": None,
-                                                                        "max_visible_px": 0, "components": set()})
+            now = {(it["slot"], it["occluder"]): it for it in res["gates"]["ghost_paint"].get("carried", [])}
+            for key, it in now.items():
+                c = carried.setdefault(key, {"seen": sign * a, "visible_from": None, "max_visible_px": 0,
+                                             "components": set()})
                 c["components"].update(it["components"])
-                vis = it.get("visible_px", 0)
+            for key, c in carried.items():
+                # once a copy is known to travel with its layer, watch it at
+                # every later angle, revealed with a high NCC or not
+                vis = now[key]["visible_px"] if key in now else \
+                    ag.carried_visible(probe.rest, res["frame"], key[0], key[1], sorted(c["components"]))
                 c["max_visible_px"] = max(c["max_visible_px"], vis)
                 if vis >= need and c["visible_from"] is None:
                     c["visible_from"] = sign * a
