@@ -63,6 +63,25 @@ def test_g2_band_area():
     assert ag.band_area_ratio(p.rest, p.rest, p.joint)["value"] == pytest.approx(1.0)
 
 
+def test_g2_one_sided_band_is_read_where_it_deforms():
+    """A planted ankle's band runs up the shin from the pivot (rigbuild):
+    the joint gives band_center apart from its center. The window follows
+    band_center, so it holds triangles on that side only."""
+    p = _probe("elbow_l", mode="joint")
+    jr = p.jr
+    ax = np.asarray(jr.j["axis"], float)
+    ext = float(jr.j.get("extent") or ag.BAND_EXTENT) * jr.hw
+    c = np.asarray(jr.j["center"], float)
+    up = ag.joint_rest(p.rest, dict(p.joint, band=dict(p.joint["band"], band_center=(c - ext * ax).tolist())))
+    both = {s: set(k.tolist()) for s, k in ag.band_triangles(p.rest, jr)}
+    upper = {s: set(k.tolist()) for s, k in ag.band_triangles(p.rest, up)}
+    for s, k in upper.items():
+        g = p.rest.geoms[s]
+        along = (g.xy[g.tris[sorted(k)]].mean(1) - c) @ ax
+        assert (along <= 1e-6).all(), s  # nothing past the pivot
+    assert sum(map(len, upper.values())) != sum(map(len, both.values()))
+
+
 # ---------------------------------------------------------------- G4
 
 def test_g4_square_cut_elbow_tears_at_once():

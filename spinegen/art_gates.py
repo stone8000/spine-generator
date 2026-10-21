@@ -125,7 +125,8 @@ def as_joint(joint):
     lower, halfwidth[, axis, extent, name, slots]} or the budget form
     {name, bone, dirs, band: {...}}. Coordinates are WORLD (y up)."""
     band = dict(joint.get("band") or {})
-    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "other_limbs"):
+    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "other_limbs",
+              "band_center"):
         if k not in band and k in joint:
             band[k] = joint[k]
     band["name"] = joint.get("name") or band.get("name") or f"{band.get('upper')}-{band.get('lower')}"
@@ -535,7 +536,14 @@ def folds(frame, slots=None, rest=None):
 
 def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
     """[(slot, triangle indices)] of the part meshes whose setup centroid is
-    inside the joint band (axis-aligned with the joint's axis)."""
+    inside the joint band (axis-aligned with the joint's axis).
+
+    The band is centred on j["band_center"] when the joint gives one, else
+    on the joint: a one-sided band (a planted ankle, whose band runs up
+    the shin from the pivot so the boot stays 100% foot) bends about the
+    pivot but deforms only on one side, and a window centred on the pivot
+    would count half rigid boot, whose area never changes, and read the
+    band too lenient."""
     j = jr.j
     ext = float(j.get("extent") or extent) * jr.hw
     lat = lateral * jr.hw
@@ -547,7 +555,7 @@ def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
         g = rest.geoms[s]
         if g.att["type"] not in ("mesh", "linkedmesh"):
             continue
-        cen = g.xy[g.tris].mean(1) - np.asarray(j["center"])
+        cen = g.xy[g.tris].mean(1) - np.asarray(j.get("band_center") or j["center"], float)
         a, b = cen @ ax, cen @ nrm
         k = np.nonzero((np.abs(a) <= ext) & (np.abs(b) <= lat))[0]
         if len(k):

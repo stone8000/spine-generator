@@ -101,7 +101,7 @@ def load_joints(path_or_obj):
     for e in obj:
         e = dict(e)
         band = dict(e.get("band") or {})
-        for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots"):
+        for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "band_center"):
             if k in e and k not in band:
                 band[k] = e[k]
         if "center" not in band and "world" in e:

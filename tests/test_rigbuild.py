@@ -130,9 +130,14 @@ def test_skeleton_constraints_and_order(built):
     assert sorted(ik_orders + [c["order"] for c in ir["transform"]]) == list(range(len(ik_orders) + 4))
     for c in ir["ik"]:
         assert c["target"].startswith("ik_foot_") and c["mix"] == 1.0 and not c["stretch"]
-    # the template's bend directions apply to a straight setup leg
+    # the knee direction comes from the template's rule ("outward", a front
+    # view), mirrored per side: opposite Spine bends for mirror legs
     rep = built["joint"]["report"]["ik"]
-    assert rep["leg_ik_l"]["bend_positive"] is True and rep["leg_ik_r"]["bend_positive"] is False
+    assert rep["leg_ik_l"]["knee"] == "outward"
+    assert rep["leg_ik_l"]["knee_dir"] == [-1.0, 0.0] and rep["leg_ik_r"]["knee_dir"] == [1.0, 0.0]
+    assert rep["leg_ik_l"]["bend_positive"] != rep["leg_ik_r"]["bend_positive"]
+    for r in rep.values():
+        assert r["setup_error_px"] <= 1e-3 and r["straightened_px"] == 0.0 and r["knee_test_px"] > 0
     assert rep["leg_ik_l"]["softness"] <= rep["leg_ik_l"]["setup_slack"] + 1e-9
 
 
@@ -257,8 +262,98 @@ def test_crouch_keeps_the_soles_planted(built):
     knee1 = _rot(w1["shin_l"]) - _rot(w1["thigh_l"])
     assert abs(knee1 - knee0) > 20
     assert lbs.Evaluator(ir).folds(pose={"hips": {"y": b["hips"]["y"] - c["depth"]}})["folds"] == 0
+    # both knees go outward, mirror-symmetric; the WHOLE foot stays put
+    assert c["knees_ok"] and c["knee_bend_diff_deg"] <= 1e-6
+    assert c["foot_slide"] <= 1e-6 and min(c["foot_vertices"].values()) > 2
     # the rigid comparison rig has the same skeleton, so the same planted soles
     assert rigbuild.crouch(built["rigid"]["ir"], 0.05 * ir["H"])["max_slide"] <= 1e-6
+
+
+def _knees_and_foot(ir, depth):
+    """World x move of each knee and the largest move of any foot vertex
+    below its ankle when the hips drop `depth` (lbs; independent of
+    rigbuild.crouch's own bookkeeping)."""
+    b = irmod.by_name(ir["bones"])
+    w0, w1 = _world(ir), _world(ir, {"hips": {"y": b["hips"]["y"] - depth}})
+    knees = {s: w1[f"shin_{s}"][4] - w0[f"shin_{s}"][4] for s in "lr"}
+    ev = lbs.Evaluator(ir)
+    a0, a1 = ev.world(), ev.world(pose={"hips": {"y": b["hips"]["y"] - depth}})
+    foot = 0.0
+    for s in "lr":
+        att = dict(ev.shown())[f"foot_{s}"]
+        v0, v1 = ev.attachment_vertices(a0, f"foot_{s}", att), ev.attachment_vertices(a1, f"foot_{s}", att)
+        below = v0[:, 1] <= w0[f"ik_foot_{s}"][5] + 1e-6
+        foot = max(foot, float(np.linalg.norm(v1[below] - v0[below], axis=1).max()))
+    return knees, foot
+
+
+@pytest.fixture(scope="module")
+def kinked(layers_dir):
+    """The synthetic legs with both setup knees kinked 10 px toward +x:
+    the left leg inward, the right one outward (the monkey's case: -9 and
+    -19.5 deg kinks of the same sign). Kept where they are (no
+    recentering) so only the kink differs."""
+    with open(os.path.join(layers_dir, "joints.json")) as f:
+        jd = json.load(f)
+    for s in "lr":
+        jd["joints"][f"knee_{s}"]["xy"][0] += 10.0
+    return {"joints": jd, "res": rigbuild.build(layers_dir, joints=jd, mode="joint", recenter=False)}
+
+
+def test_knees_bend_outward_whatever_the_setup_kink(kinked, tmp_path):
+    """P2 review F1: the bend came from the setup kink, so a leg kinked a
+    few degrees inward caved toward the midline in every crouch (the
+    monkey's left knee: 56 px inward, the right 51 px outward). The knee
+    rule decides now; the inward-kinked leg is straightened at setup."""
+    res = kinked["res"]
+    ir, rep = res["ir"], res["report"]["ik"]
+    assert rep["leg_ik_l"]["straightened_px"] == pytest.approx(10.0, abs=1e-6)
+    assert rep["leg_ik_r"]["straightened_px"] == 0.0  # kinked the right way: kept
+    assert all(r["setup_error_px"] <= 1e-3 for r in rep.values())
+    knees, foot = _knees_and_foot(ir, 0.05 * ir["H"])
+    assert knees["l"] < -5.0 and knees["r"] > 5.0, knees  # both outward (l is at -x)
+    assert foot <= 1e-6
+    c = rigbuild.crouch(ir, 0.05 * ir["H"])
+    assert c["knees_ok"] and c["knee_bend_diff_deg"] <= rigbuild.KNEE_SYM_DEG, c["knees"]
+    # the setup pose is still the source's: the straightened knee moved the
+    # pivot, not the art
+    bones = irmod.by_name(ir["bones"])
+    w = _world(ir)
+    assert w["shin_l"][4] == pytest.approx(kinked["joints"]["joints"]["knee_l"]["xy"][0] - 181.0 - 10.0, abs=1e-6)
+    assert bones["shin_l"]["length"] > 0
+    # the official runtime agrees
+    from spinegen import oracle
+    ok, why = oracle.available()
+    if not ok:
+        pytest.skip(f"runtime oracle unavailable: {why}")
+    paths = rigbuild.write(str(tmp_path / "kinked"), res)
+    dirs = {n: r["knee_dir"] for n, r in rep.items()}
+    rc = rigbuild.crouch(ir, 0.05 * ir["H"], paths["skeleton"], paths["atlas"], knee_dirs=dirs)
+    assert rc["by"].startswith("spine-core") and rc["knees_ok"], rc["knees"]
+    assert rc["foot_slide"] <= 1.0 and rc["max_slide"] <= 1.0
+
+
+def test_knee_rule_facing(layers_dir):
+    """A side-view template ("knee": "facing") bends both knees along the
+    character's facing, here -x (joints.json "facing": -1)."""
+    from spinegen import template as tmpl
+    t = tmpl.load("biped_mascot")
+    for ik in t["ik"]:
+        ik["knee"] = "facing"
+    with open(os.path.join(layers_dir, "joints.json")) as f:
+        jd = json.load(f)
+    with pytest.raises(ValueError, match="facing"):
+        rigbuild.build(layers_dir, joints=jd, template=t, source=None)
+    jd["facing"] = -1
+    res = rigbuild.build(layers_dir, joints=jd, template=t, source=None)
+    ir = res["ir"]
+    assert all(r["knee_dir"] == [-1.0, 0.0] for r in res["report"]["ik"].values())
+    knees, _ = _knees_and_foot(ir, 0.05 * ir["H"])
+    assert knees["l"] < -5.0 and knees["r"] < -5.0, knees
+    dirs = {n: r["knee_dir"] for n, r in res["report"]["ik"].items()}
+    assert rigbuild.crouch(ir, 0.05 * ir["H"], knee_dirs=dirs)["knees_ok"]
+    # judged by the front-view rule instead, the right knee goes the wrong way
+    assert not rigbuild.crouch(ir, 0.05 * ir["H"])["knees_ok"]
 
 
 # ---------------------------------------------------------------- motion
@@ -328,7 +423,7 @@ def test_cli_writes_a_rig_the_runtime_accepts(layers_dir, tmp_path):
     for f in ("rig.json", "motion.json", "synth.json", "synth.atlas", "synth.png", "joints.json", "build_report.json"):
         assert (out / f).exists(), f
     rep = json.load(open(out / "build_report.json"))
-    assert rep["crouch"]["max_slide"] <= 1.0
+    assert rep["crouch"]["max_slide"] <= 1.0 and rep["crouch"]["foot_slide"] <= 1.0 and rep["crouch"]["knees_ok"]
     joints = json.load(open(out / "joints.json"))
     assert joints["schema"] == "spinegen-budget-joints/1"
     names = {j["name"] for j in joints["joints"]}
@@ -348,7 +443,8 @@ def test_cli_writes_a_rig_the_runtime_accepts(layers_dir, tmp_path):
         assert gates[gid]["pass"], (gid, gates[gid])
     rig = irmod.load(str(out / "rig.json"))
     c = rigbuild.crouch(rig, 0.05 * rig["H"], str(out / "synth.json"), str(out / "synth.atlas"))
-    assert c["by"].startswith("spine-core") and c["max_slide"] <= 1.0
+    assert c["by"].startswith("spine-core") and c["max_slide"] <= 1.0 and c["foot_slide"] <= 1.0
+    assert c["knees_ok"], c["knees"]
 
 
 @pytest.mark.parametrize("mode", rigbuild.MODES)
@@ -362,7 +458,8 @@ def test_monkey_rebuild(mode, tmp_path):
     ir = res["ir"]
     assert len(ir["animations"]) == 9 and len(ir["physics"]) == 7 and len(ir["ik"]) == 2
     assert {c["bone"] for c in ir["physics"]} >= {"cuffL", "pantR", "banana"}
-    assert rigbuild.crouch(ir, 0.05 * ir["H"])["max_slide"] <= 1.0
+    c = rigbuild.crouch(ir, 0.05 * ir["H"])
+    assert c["max_slide"] <= 1.0 and c["foot_slide"] <= 1.0 and c["knees_ok"], c["knees"]
     ok, why = oracle.available()
     if not ok:
         pytest.skip(f"runtime oracle unavailable: {why}")

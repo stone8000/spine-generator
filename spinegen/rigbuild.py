@@ -6,7 +6,8 @@
 
 writes rig.json + motion.json (IR), <name>.json (Spine 4.2, spinegen.emit.spine42),
 <name>.atlas + <name>.png (spinegen.atlas.pack), joints.json (the budget scanner's
-joints, world coordinates) and build_report.json.
+joints, world coordinates) and build_report.json; then a crouch check in the
+official runtime (crouch(): knees by the template's rule, planted feet <= 1 px).
 
 WHY (SOTA §7 P2: make the art hold big angles)
   The monkey bends like a paper doll: each part is a rigid card on one bone,
@@ -136,6 +137,9 @@ KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
 KNEE_TEST = 0.1       # the bend test lowers the hips by this fraction of the leg's length
 KNEE_TOL = 0.5        # px: a setup knee this close to the hip-ankle line counts as straight
 SETUP_TOL = 1e-3      # px: the chosen bend must reproduce the setup leg this closely
+KNEE_SYM_DEG = 10.0   # crouch(): two legs' end bends agree this closely (mirror symmetry)
+SHIN_ROWS = 10.0      # px: crouch() reports the slide of the bottom this many px of the shin's art
+M1_PX = 1.0           # px: SOTA §5 M1, the most a planted foot vertex may move (the CLI's crouch check)
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
 
 
@@ -406,8 +410,10 @@ class _Builder:
         the legs' mean hip when that sits on this leg's line). Geometric,
         not by name: a front-view character's left leg is on the image's
         right, and the template's side names say nothing about that.
-        "facing": +x for joints.json "facing": 1, -x for -1."""
-        rule = ik.get("knee")
+        "facing": +x for joints.json "facing": 1, -x for -1.
+        No rule and no bend_positive: "outward" (the setup kink is never
+        the rule, see the module doc)."""
+        rule = ik.get("knee", None if "bend_positive" in ik else "outward")
         if rule is None:
             return None
         if rule == "outward":
@@ -683,6 +689,7 @@ class _Builder:
             self.ik_report[ik["name"]] = {"softness": round(soft, 4), "softness_wanted": round(want, 3),
                                           "setup_slack": round(slack, 4), "bend_deg": round(bend_deg, 3),
                                           "bend_positive": c["bend_positive"], "knee": ik.get("knee"),
+                                          "knee_dir": None if knee_dir is None else knee_dir.tolist(),
                                           "straightened_px": round(self.straightened.get(self.bones[shin]["joint"],
                                                                                          0.0), 3),
                                           "setup_error_px": round(err, 6), "planted": bool(ik.get("planted")),
@@ -1026,10 +1033,14 @@ class _Builder:
     def budget_joints(self):
         out = []
         for jname, b in self.bands.items():
-            out.append({"name": jname, "id": b["budget"], "bone": b["lower"], "dirs": [1, -1],
-                        "band": {"center": self.cv.to_world(b.get("pivot", b["center"])).tolist(), "upper": b["upper"],
-                                 "helper": b["helper"], "lower": b["lower"], "halfwidth": b["halfwidth"],
-                                 "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": b["extent"]}})
+            # center = the joint the bone turns about; a one-sided (planted)
+            # band also names where it deforms (art_gates.band_triangles)
+            band = {"center": self.cv.to_world(b.get("pivot", b["center"])).tolist(), "upper": b["upper"],
+                    "helper": b["helper"], "lower": b["lower"], "halfwidth": b["halfwidth"],
+                    "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": b["extent"]}
+            if b.get("planted"):
+                band["band_center"] = self.cv.to_world(b["center"]).tolist()
+            out.append({"name": jname, "id": b["budget"], "bone": b["lower"], "dirs": [1, -1], "band": band})
         return {"schema": SCHEMA_BUDGET_JOINTS, "template": self.t["name"], "mode": self.mode,
                 "note": "world coordinates (y up); '+' = counter-clockwise local rotation", "joints": out}
 
@@ -1086,54 +1097,59 @@ def planted_vertices(ir):
     return out
 
 
-def shin_bottoms(ir, rows=10.0):
-    """{slot: [vertex index]}: the bottom `rows` px of every slot whose
-    heaviest bone is a leg IK's lower bone (the calf's hem over the boot):
-    what a crouch should not drag across the foot."""
+def shin_bottoms(ir, rows=SHIN_ROWS):
+    """{slot: [vertex index]}: the bottom `rows` px of every slot on a leg
+    IK's lower bone (the calf's hem over the boot): what a crouch should
+    not drag across the foot.
+
+    By the SLOT's bone, not the heaviest influence: once the hem below the
+    ankle is 100% foot (the planted ankle band), a short calf can carry
+    more foot weight than shin weight in total and would drop out of the
+    measurement exactly when it matters (the monkey's right calf: 23.5
+    foot, 20.5 shin)."""
     shins = {c["bones"][1] for c in ir["ik"]}
+    slot_bone = {sl["name"]: sl["bone"] for sl in ir["slots"]}
     ev = lbs.Evaluator(ir)
     world = ev.world()
     out = {}
     for name, att in ev.shown():
-        if att is None or att["type"] not in ("mesh", "region"):
-            continue
-        rows_w = att.get("weights")
-        if rows_w:
-            mass = {}
-            for row in rows_w:
-                for n, x, *_ in row:
-                    mass[n] = mass.get(n, 0.0) + x
-            heavy = max(mass, key=mass.get)
-        else:
-            heavy = next(sl["bone"] for sl in ir["slots"] if sl["name"] == name)
-        if heavy not in shins:
+        if att is None or att["type"] not in ("mesh", "region") or slot_bone.get(name) not in shins:
             continue
         v = ev.attachment_vertices(world, name, att)
         out[name] = [int(i) for i in np.flatnonzero(v[:, 1] <= v[:, 1].min() + rows)]
     return out
 
 
-def crouch(ir, depth, skeleton=None, atlas=None, within=2.0):
+def crouch(ir, depth, skeleton=None, atlas=None, within=2.0, knee_dirs=None):
     """Lower the hips (the parent of the IK thighs) by `depth` world units
     and measure what the feet and knees do. With `skeleton` and `atlas` the
     official runtime measures it (spinegen.oracle.dump, pose added to
     setup); otherwise spinegen.lbs.
+
+    knee_dirs  {ik name: world (x, y)}: the way each knee must move (the
+               build report's ik.<name>.knee_dir, from the template's knee
+               rule); default: away from the body's midline (the hips
+               bone's x), the front-view "outward" rule.
 
     Returns {"depth", "by", "hips_drop",
       "max_slide", "slots", "contact_vertices"  the soles (foot_contacts;
                    SOTA §5 M1: <= 1 px),
       "foot_slide", "foot_slots", "foot_vertices"  the whole planted foot
                    below the ankle (planted_vertices), same limit,
-      "shin_bottom_slide", "shin_bottom_slots"  the bottom 10 px of the
-                   shins' art (shin_bottoms; reported, no limit: a shin
-                   turning about the ankle moves its hem),
-      "knees": {ik: {"dx", "dy", "out", "bend_px"}}  the knee's world move,
-                   its component away from the body's midline (+ =
-                   outward) and, after the crouch, how far the knee stands
-                   off the hip-ankle line on the outward side,
-      "knee_symmetry"  smaller / larger bend_px of two legs (the end pose:
-                   a leg bent at setup moves its knee less for the same
-                   drop, so the moves themselves differ)}."""
+      "shin_bottom_slide", "shin_bottom_slots"  the bottom SHIN_ROWS px of
+                   the shins' art (shin_bottoms; reported: the hem the
+                   reviewer saw drag 24 / 13 px over the monkey's boots),
+      "knees": {ik: {"dx", "dy", "dir", "along", "end_px", "bend_deg",
+                   "setup_bend_deg"}}  the knee's world move, its component
+                   along the expected direction (+ = the right way), how
+                   far the knee ends off the hip-ankle line on that side,
+                   and the leg's bend (angle between thigh and shin) after
+                   the crouch and at setup,
+      "knee_bend_diff_deg"  |bend_deg| difference of two legs: mirror
+                   symmetry is read on the END pose, because a leg already
+                   bent at setup moves its knee less for the same drop,
+      "knees_ok"   every knee moved along its direction and ends on that
+                   side, and two legs' bends agree within KNEE_SYM_DEG}."""
     bones = irmod.by_name(ir["bones"])
     hips = {bones[c["bones"][0]]["parent"] for c in ir["ik"]}
     if len(hips) != 1:
@@ -1176,14 +1192,28 @@ def crouch(ir, depth, skeleton=None, atlas=None, within=2.0):
     out["knees"] = {}
     for c in ir["ik"]:
         t, k, a = c["bones"][0], c["bones"][1], c["target"]
-        dx, dy = (pos[1][k] - pos[0][k]).tolist()
-        outward = math.copysign(1.0, pos[0][t][0] - pos[0][hips][0])
-        n = _knee_normal(pos[1][t], pos[1][a], np.array([outward, 0.0]))
-        out["knees"][c["name"]] = {"dx": dx, "dy": dy, "out": dx * outward,
-                                   "bend_px": float((pos[1][k] - pos[1][t]) @ n)}
-    bent = [k["bend_px"] for k in out["knees"].values()]
-    out["knee_symmetry"] = (min(bent) / max(bent) if len(bent) == 2 and max(bent) > 0 else None)
+        move = pos[1][k] - pos[0][k]
+        want = (knee_dirs or {}).get(c["name"])
+        want = np.asarray(want, float) if want is not None else \
+            np.array([math.copysign(1.0, pos[0][t][0] - pos[0][hips][0]), 0.0])
+        want = want / (np.linalg.norm(want) or 1.0)
+        n = _knee_normal(pos[1][t], pos[1][a], want)
+        out["knees"][c["name"]] = {"dx": float(move[0]), "dy": float(move[1]), "dir": want.tolist(),
+                                   "along": float(move @ want), "end_px": float((pos[1][k] - pos[1][t]) @ n),
+                                   "bend_deg": _leg_bend(pos[1][t], pos[1][k], pos[1][a]),
+                                   "setup_bend_deg": _leg_bend(pos[0][t], pos[0][k], pos[0][a])}
+    kn = list(out["knees"].values())
+    out["knee_bend_diff_deg"] = abs(kn[0]["bend_deg"] - kn[1]["bend_deg"]) if len(kn) == 2 else None
+    out["knees_ok"] = bool(kn) and all(x["along"] > 0 and x["end_px"] > 0 for x in kn) and \
+        (out["knee_bend_diff_deg"] is None or out["knee_bend_diff_deg"] <= KNEE_SYM_DEG)
     return out
+
+
+def _leg_bend(hip, knee, ankle):
+    """Unsigned angle (deg) between the thigh (hip -> knee) and the shin
+    (knee -> ankle): 0 for a straight leg."""
+    a, b = np.asarray(knee) - np.asarray(hip), np.asarray(ankle) - np.asarray(knee)
+    return float(abs(math.degrees(math.atan2(a[0] * b[1] - a[1] * b[0], a @ b))))
 
 
 # ---------------------------------------------------------------- helpers
@@ -1348,8 +1378,9 @@ def main(argv=None):
     ap.add_argument("--name", default=None, help="output basename (default: the source rig's name)")
     ap.add_argument("--no-source", action="store_true", help="ignore the source rig (no physics / animations)")
     ap.add_argument("--crouch", type=float, default=0.05,
-                    help="measure the soles' slide with the hips lowered by this fraction of H (0: skip); "
-                         "uses the runtime oracle when it is installed")
+                    help="crouch check with the hips lowered by this fraction of H (0: skip): both knees move "
+                         "by the template's knee rule and the planted feet stay within 1 px (M1), else exit "
+                         "non-zero; uses the runtime oracle when it is installed")
     ap.add_argument("--mesh", choices=sorted(MESH_PROFILES), default="lean", help="mesh profile (MESH_PROFILES)")
     ap.add_argument("--joint-modes", default=None,
                     help="JSON {joint: rigid|ramp|helper}, or a RIGID budget.json to choose them from (with --need)")
@@ -1382,18 +1413,31 @@ def main(argv=None):
     if a.crouch > 0 and ir["ik"]:
         from . import oracle
         ok, _ = oracle.available()
-        c = crouch(ir, a.crouch * ir["H"], *((paths["skeleton"], paths["atlas"]) if ok else (None, None)))
+        dirs = {n: r["knee_dir"] for n, r in res["report"]["ik"].items() if r.get("knee_dir") is not None}
+        c = crouch(ir, a.crouch * ir["H"], *((paths["skeleton"], paths["atlas"]) if ok else (None, None)),
+                   knee_dirs=dirs)
         res["report"]["crouch"] = c
         _dump(paths["report"], dict(json.load(open(paths["report"])), crouch=c))
-        print(f"  crouch {a.crouch:g} H = {c['depth']:.1f} px ({c['by']}): soles slide {c['max_slide']:.4f} px "
+
+        def px(v, f=".4f"):
+            return "n/a" if v is None else format(v, f)
+        print(f"  crouch {a.crouch:g} H = {c['depth']:.1f} px ({c['by']}): soles slide {px(c['max_slide'])} px "
               f"(M1 <= 1 px, {sum(c['contact_vertices'].values())} sole vertices); whole foot below the ankle "
-              f"{c['foot_slide']:.4f} px ({sum(c['foot_vertices'].values())} vertices); shin bottoms "
-              f"{c['shin_bottom_slide']:.2f} px")
+              f"{px(c['foot_slide'])} px ({sum(c['foot_vertices'].values())} vertices); shin bottoms "
+              f"{px(c['shin_bottom_slide'], '.2f')} px")
         for n, k in c["knees"].items():
-            print(f"  {n}: knee moves {k['dx']:+.1f}, {k['dy']:+.1f} px ({k['out']:+.1f} px outward); "
-                  f"ends {k['bend_px']:+.1f} px outward of the hip-ankle line")
-        if c["knee_symmetry"] is not None:
-            print(f"  knee symmetry (smaller / larger end offset): {c['knee_symmetry']:.2f}")
+            print(f"  {n}: knee moves {k['dx']:+.1f}, {k['dy']:+.1f} px ({k['along']:+.1f} px the expected way); "
+                  f"ends {k['end_px']:+.1f} px off the hip-ankle line, bent {k['setup_bend_deg']:.1f} -> "
+                  f"{k['bend_deg']:.1f} deg")
+        print(f"  knees {'ok' if c['knees_ok'] else 'WRONG'} (end bends differ by "
+              f"{px(c['knee_bend_diff_deg'], '.1f')} deg, <= {KNEE_SYM_DEG:g})")
+        # fail by name (SOTA §3.1): a rig whose knees cave in or whose feet
+        # skate is not a rig to animate, whatever else it passes
+        bad = [k for k, v in (("knees", not c["knees_ok"]),
+                              ("M1 soles", (c["max_slide"] or 0.0) > M1_PX),
+                              ("M1 whole foot", (c["foot_slide"] or 0.0) > M1_PX)) if v]
+        if bad:
+            raise SystemExit(f"crouch check failed: {', '.join(bad)} (rig written to {a.out} for inspection)")
 
 
 if __name__ == "__main__":
