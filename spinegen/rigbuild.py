@@ -1,7 +1,8 @@
 """Layers + joints + a template -> an IR rig that bends at its joints.
 
     python -m spinegen.rigbuild <layers dir> --template biped_mascot --mode joint|rigid -o <outdir>
-        [--joints joints.json] [--name monkey] [--no-source]
+        [--joints joints.json] [--name monkey] [--no-source] [--mesh lean|refined]
+        [--joint-modes modes.json | --joint-modes rigid_budget.json --need 90]
 
 writes rig.json + motion.json (IR), <name>.json (Spine 4.2, spinegen.emit.spine42),
 <name>.atlas + <name>.png (spinegen.atlas.pack), joints.json (the budget scanner's
@@ -51,6 +52,12 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            art_gates.estimate_halfwidth); band half-length = mesh.BAND_EXTENT
            halfwidths, shortened so neighbouring bands on one bone never
            overlap. In "rigid" mode the same meshes have no bands.
+           The mesh profile (MESH_PROFILES) is "lean" by default.
+  modes    per joint, "joint" mode can still keep a joint rigid (no band),
+           ramp it without a helper, or ramp it through the helper
+           (`joint_modes`; default: helper where the template has one).
+           choose_joint_modes() picks them from a measured rigid budget:
+           rigid where the cut-out already holds what the motion needs.
   weights  "joint": weights.compute (bone heat + the joint ramps); then the
            source's own accessory weights (a sleeve hem on a cuff bone) are
            carried over by interpolating the source mesh, faded out over the
@@ -87,12 +94,24 @@ from . import lbs, mesh, playback, weights
 from . import template as tmpl
 
 MODES = ("joint", "rigid")
+JOINT_MODES = ("rigid", "ramp", "helper")
+# mesh.build options per profile (spinegen.mesh, "THE LEAN OPTIONS"). "lean":
+# constrained CDT, no min-angle refinement, band rows as constrained edges
+# with only their outline points (cutting every span of the outline they
+# cross), the one-sided covering outline. On the monkey: 582 vertices
+# (0.48x the 22 px grid) against 2264 (1.87x) "refined", B2 0.98, 0 folds
+# over every animation in spine-core, elbows 96-108 deg (P2_REPORT).
+MESH_PROFILES = {"lean": {"min_angle": 0.0, "outline": "adaptive", "row_points": "ends", "edges": "constrain"},
+                 "refined": {}}
 SCHEMA_BUDGET_JOINTS = "spinegen-budget-joints/1"
 HW_REACH = 40.0       # px: halfwidth = largest inscribed radius within this of the art nearest the joint
 CROSS = 1.0           # a layer crosses a joint when its art comes within CROSS x halfwidth of it
 STRAIGHT_DEG = 1.0    # a setup leg bent less than this takes the template's bend direction
 SOFT_GUARD = 0.999    # softness stays this fraction under the setup slack (no effect at setup)
 BAKE_FPS = 30         # source feet are sampled at this rate to key the IK targets in a jump
+RECENTER_ROWS = 0.25  # _recenter reads the cross-section at +-this many halfwidths along the limb
+RECENTER_MIN = 2.0    # px: a smaller offset from the centre line is left alone
+RECENTER_MAX = 0.6    # halfwidths: the largest move (a joint is not moved off its limb)
 LIFT_MIN = 0.5        # px: a source foot that never rises more than this keeps its target planted
 LIFT_FULL = 8.0       # px of lift over which a lifted target starts following the source foot's x
 BAKE_TOL = 0.25       # px: a baked key is dropped when its neighbours interpolate it this closely
@@ -127,7 +146,8 @@ class Canvas:
 
 # ---------------------------------------------------------------- public
 
-def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source="auto", name=None):
+def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source="auto", name=None,
+          joint_modes=None, mesh_profile="lean", recenter=True):
     """Build the rig. Returns {"ir", "images", "joints" (budget form),
     "report"}.
 
@@ -135,9 +155,17 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     joints      joints.json path or dict (default: <layers_dir>/joints.json)
     source      "auto": the source IR named by layers.json (physics,
                 animations, accessory weights), None: none, or an IR dict
+    joint_modes {joint: "rigid" | "ramp" | "helper"} per-joint override of
+                how a joint bends in "joint" mode (choose_joint_modes() picks
+                them from a measured budget); default: the template's
+    mesh_profile "lean" (default) or "refined", see MESH_PROFILES
+    recenter    move elbows and knees onto the art's centre line (default;
+                _Builder._recenter says why)
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    if mesh_profile not in MESH_PROFILES:
+        raise ValueError(f"mesh_profile must be one of {sorted(MESH_PROFILES)}")
     doc, imgs = ingest_spine.load_layers(layers_dir)
     if joints is None:
         joints = os.path.join(layers_dir, "joints.json")
@@ -147,7 +175,40 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     t = tmpl.load(template) if isinstance(template, str) else template
     if source == "auto":
         source = _load_source(layers_dir, doc)
-    return _Builder(doc, imgs, joints, t, mode, source, name).run()
+    b = _Builder(doc, imgs, joints, t, mode, source, name)
+    b.joint_modes = dict(joint_modes or {})
+    b.mesh_kw = dict(MESH_PROFILES[mesh_profile])
+    b.mesh_profile = mesh_profile
+    b.recenter = recenter
+    return b.run()
+
+
+def choose_joint_modes(budget, need, template="biped_mascot"):
+    """Per-joint bending mode from a RIGID budget (budget.json of the
+    cut-out, e.g. a rigbuild --mode rigid scan): a joint whose cut-out
+    already holds `need` degrees both ways (theta_soft) stays rigid; any
+    other bends with a ramp, through a half-angle helper where the template
+    has one. `need` is degrees, or {joint: degrees} (missing joints: 90).
+
+    WHY: one mode everywhere is wrong both ways. On cut-out art with round,
+    overlapping ends a rigid joint already holds and a band only adds
+    vertices and risk; a limb root ramped into the torso WITHOUT a helper
+    collapsed the upper arm past 100 deg in a separate trial. The budget
+    measures which case a joint is in. Returns ({joint: mode}, {joint:
+    reason})."""
+    t = tmpl.load(template) if isinstance(template, str) else template
+    modes, why = {}, {}
+    for jname, dirs in budget.get("joints", {}).items():
+        want = need.get(jname, 90.0) if isinstance(need, dict) else float(need)
+        soft = min(e["soft"] for e in dirs.values())
+        spec = t["joints"].get(jname, {})
+        if soft >= want:
+            modes[jname], why[jname] = "rigid", f"cut-out holds {soft:g} >= {want:g} deg"
+        else:
+            modes[jname] = "helper" if spec.get("helper") else "ramp"
+            by = min(dirs.values(), key=lambda e: e["soft"])["limit_by"]
+            why[jname] = f"cut-out holds {soft:g} < {want:g} deg ({by})"
+    return modes, why
 
 
 def write(outdir, res):
@@ -180,6 +241,9 @@ class _Builder:
         self.name = name or (src["name"] if src else os.path.basename(os.path.normpath(doc.get("name", "rig"))))
         self.notes = []
         self.spec = {b["name"]: b for b in t["bones"]}
+        self.joint_modes = {}  # joint -> "rigid" | "ramp" | "helper" (build() sets it)
+        self.recenter = True     # elbows and knees onto the art's centre line (_recenter; build() sets it)
+        self.mesh_kw, self.mesh_profile = dict(MESH_PROFILES["lean"]), "lean"
         self.bones = {}      # name -> {"parent", "head", "tail" (canvas), "len", "role", "limb_parent"}
         self.order = []      # bone names, parents first
         self._art = {}
@@ -188,6 +252,9 @@ class _Builder:
 
     def run(self):
         self.skeleton()
+        if self.recenter and self._recenter():
+            self.bones, self.order = {}, []
+            self.skeleton()
         self.ir = irmod.new_rig(self.name)
         self.ir["bones"] = self.ir_bones()
         self.bands = self.joint_bands()
@@ -201,6 +268,7 @@ class _Builder:
             raise AssertionError("rigbuild produced an invalid IR:\n  " + "\n  ".join(errs[:20]))
         images = {L["name"]: self.imgs[L["name"]] for L in self.layers}
         report = {"schema": "spinegen-rigbuild/1", "name": self.name, "mode": self.mode,
+                  "mesh_profile": self.mesh_profile, "joint_modes": {j: b["kind"] for j, b in self.bands.items()},
                   "template": self.t["name"], "layers": stats, "ik": self.ik_report,
                   "bands": {j: _round_band(b) for j, b in self.bands.items()},
                   "totals": _totals(stats), "notes": self.notes}
@@ -260,6 +328,53 @@ class _Builder:
                                        "tail": head + d * float(acc["len"]), "joint": None, "kind": "accessory",
                                        "role": "accessory", "limb_parent": parent}
             self.order.append(acc["name"])
+
+    def _recenter(self):
+        """Move each elbow and knee (a "both" joint with a helper) across
+        the limb onto the middle of the art's cross-section there. Returns
+        the shifts made.
+
+        WHY: a joint band bends evenly only about a pivot on the limb's
+        centre line. A pivot off to one side compresses that side more in
+        one direction and stretches it in the other: the monkey's source
+        elbow_r sits 0.48 halfwidths (20 px) off centre, and its band kept
+        less than 0.9 of its area from 52 deg one way while it GREW the
+        other way; on the centre line the same rig held to 108 deg. A
+        cut-out does not care where its pivot is (the seam hides it), so
+        source rigs often have it off centre."""
+        shifts = {}
+        n0 = len(self.notes)
+        bands = self.joint_bands()  # provisional (its notes come again with the final bands)
+        del self.notes[n0:]
+        for jname, band in bands.items():
+            spec = self.t["joints"].get(jname, {})
+            if spec.get("band") != "both" or not spec.get("helper") or not band["layers"]:
+                continue
+            c, a, hw = band["center"], band["axis"], band["halfwidth"]
+            n = np.array([-a[1], a[0]])
+            mids = []
+            for s0 in np.linspace(-RECENTER_ROWS, RECENTER_ROWS, 5) * hw:
+                lo, hi = math.inf, -math.inf
+                for L in self.layers:
+                    if L["name"] not in band["layers"]:
+                        continue
+                    ii, jj = np.nonzero(self._layer_mask(L))
+                    P = np.stack([L["x"] + jj + 0.5, L["y"] + ii + 0.5], 1) - c
+                    k = np.abs(P @ a - s0) < 1.0
+                    if k.any():
+                        lat = P[k] @ n
+                        lo, hi = min(lo, lat.min()), max(hi, lat.max())
+                if math.isfinite(lo):
+                    mids.append(0.5 * (lo + hi))
+            if not mids:
+                continue
+            d = float(np.clip(np.median(mids), -RECENTER_MAX * hw, RECENTER_MAX * hw))
+            if abs(d) >= RECENTER_MIN:
+                self.jxy[jname] = self.jxy[jname] + d * n
+                shifts[jname] = d
+                self.notes.append(f"joint {jname}: moved {d:+.1f} px across the limb onto the art's centre line "
+                                  f"({d / hw:+.2f} halfwidths)")
+        return shifts
 
     def _role(self, spec):
         j = self.t["joints"].get(spec["joint"] or "", {})
@@ -385,9 +500,17 @@ class _Builder:
                 self.notes.append(f"joint {jname}: no art to measure a halfwidth; no band")
                 continue
             helper = spec.get("helper") if spec.get("helper") in self.bones else None
+            kind = "rigid" if self.mode == "rigid" else self.joint_modes.get(jname, "helper" if helper else "ramp")
+            if kind not in JOINT_MODES:
+                raise ValueError(f"joint {jname}: mode must be one of {JOINT_MODES}, not {kind!r}")
+            if kind == "helper" and helper is None:
+                self.notes.append(f"joint {jname}: no helper in the template; ramp without one")
+                kind = "ramp"
+            if kind != "helper":
+                helper = None
             bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "extent": mesh.BAND_EXTENT,
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
-                            "budget": spec.get("budget")}
+                            "kind": kind, "budget": spec.get("budget")}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
@@ -513,8 +636,8 @@ class _Builder:
         out, stats = {}, []
         for L in self.layers:
             alpha = self.imgs[L["name"]][..., 3]
-            bands = [b for b in self.bands.values() if L["name"] in b["layers"]] if self.mode == "joint" else []
-            m = mesh.build(alpha, (L["x"], L["y"]), bands=[_mesh_band(b) for b in bands])
+            bands = [b for b in self.bands.values() if L["name"] in b["layers"] and b["kind"] != "rigid"]
+            m = mesh.build(alpha, (L["x"], L["y"]), bands=[_mesh_band(b) for b in bands], **self.mesh_kw)
             if self.mode == "rigid" or not bands:
                 w = [[(L["role"], 1.0)] for _ in range(len(m["verts"]))]
             else:
@@ -1015,9 +1138,27 @@ def main(argv=None):
     ap.add_argument("--crouch", type=float, default=0.05,
                     help="measure the soles' slide with the hips lowered by this fraction of H (0: skip); "
                          "uses the runtime oracle when it is installed")
+    ap.add_argument("--mesh", choices=sorted(MESH_PROFILES), default="lean", help="mesh profile (MESH_PROFILES)")
+    ap.add_argument("--joint-modes", default=None,
+                    help="JSON {joint: rigid|ramp|helper}, or a RIGID budget.json to choose them from (with --need)")
+    ap.add_argument("--need", type=float, default=90.0,
+                    help="degrees a joint must hold (both ways) to stay rigid when choosing from a budget")
+    ap.add_argument("--keep-joints", action="store_true",
+                    help="keep elbows and knees where the joints file puts them (no recentering)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args(argv)
-    res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name)
+    modes = None
+    if a.joint_modes:
+        with open(a.joint_modes) as f:
+            jm = json.load(f)
+        if jm.get("schema") == "spinegen-budget/1":
+            modes, why = choose_joint_modes(jm, a.need, a.template)
+            for j in sorted(modes):
+                print(f"  joint {j}: {modes[j]} ({why[j]})")
+        else:
+            modes = jm
+    res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name, modes, a.mesh,
+                not a.keep_joints)
     paths = write(a.out, res)
     tot = res["report"]["totals"]
     ir = res["ir"]

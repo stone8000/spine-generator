@@ -197,6 +197,93 @@ def test_band_through_a_hole_and_explicit_offsets():
     assert all(len(r) >= 2 for r in rows)
 
 
+# ---------------------------------------------------------------- the lean profile (rigbuild's default)
+
+LEAN = {"min_angle": 0.0, "outline": "adaptive", "row_points": "ends", "edges": "constrain"}
+
+
+def furry(alpha, period=6, depth=4):
+    """`alpha` with a sawtooth of notches cut into its top and bottom edges
+    (a jagged, furry outline at the scale of a few px)."""
+    a = alpha.copy()
+    h, w = a.shape
+    for j in range(w):
+        cut = int(round(depth * abs((j % period) - period / 2) / (period / 2)))
+        col = np.nonzero(a[:, j] > 8)[0]
+        if len(col) > 2 * depth + 4:
+            a[col[0]:col[0] + cut, j] = 0
+            a[col[-1] - cut + 1:col[-1] + 1, j] = 0
+    return a
+
+
+def test_lean_rows_are_edges_with_only_their_ends():
+    alpha, p0, p1 = arm()
+    m = mesh.build(alpha, (0, 0), bands=[elbow_band(p0, p1)], **LEAN)
+    edges = {tuple(sorted(e)) for t in m["tris"].tolist() for e in ((t[0], t[1]), (t[1], t[2]), (t[0], t[2]))}
+    for row in m["band_rows"][0]:
+        assert len(row) == 2 and row[0] < m["hull"] and row[1] < m["hull"]
+        assert tuple(sorted(row)) in edges                     # the row is one edge of the mesh
+    # no Steiner point anywhere: every vertex is an outline vertex
+    assert m["stats"]["vertices"] == m["hull"]
+    st = m["stats"]
+    assert st["missed_solid"] == 0.0 and st["missed_art"] < 0.002
+    ref = mesh.build(alpha, (0, 0), bands=[elbow_band(p0, p1)])["stats"]
+    assert st["vertices"] < 0.6 * ref["vertices"]
+
+
+def test_adaptive_outline_covers_a_furry_edge_with_fewer_vertices():
+    """The one-sided simplification may stand off the art (covering the
+    notches of a furry edge) but never cut into it more than eps."""
+    alpha = furry(arm()[0], depth=3)
+    ex = mesh.build(alpha, (0, 0), min_angle=0.0, edges="constrain")["stats"]
+    ad = mesh.build(alpha, (0, 0), min_angle=0.0, edges="constrain", outline="adaptive")["stats"]
+    assert ad["hull"] < 0.7 * ex["hull"]
+    assert ad["missed_solid"] <= ex["missed_solid"] + 1e-9 and ad["missed_art"] <= ex["missed_art"] + 1e-9
+    assert ad["overdraw"] > ex["overdraw"]                    # the price: transparent notches drawn
+    # a clean edge keeps eps: the slack only buys anything where there are notches
+    clean = mesh.build(arm()[0], (0, 0), min_angle=0.0, edges="constrain", outline="adaptive")["stats"]
+    assert clean["missed_solid"] == 0.0 and clean["overdraw"] < 0.06
+
+
+def test_lean_rows_cut_every_lobe_they_cross():
+    """A band row also cuts the outline's other spans along its line (a lobe
+    beside the limb): no triangle near the band reaches across a row."""
+    alpha, p0, p1 = arm()
+    lobe = capsule((250, 60), (125, 4), 3, (140, 4), 3)       # a tuft above the arm, at the elbow
+    alpha = np.maximum(alpha, lobe)
+    band = elbow_band(p0, p1)
+    m = mesh.build(alpha, (0, 0), bands=[band], **LEAN)
+    c, a = np.asarray(band["center"]), np.asarray(band["axis"])
+    offs = mesh.row_offsets(mesh.BAND_ROWS) * mesh.BAND_EXTENT * band["halfwidth"]
+    s = (m["verts"] - c) @ a
+    for t in m["tris"]:
+        lo, hi = s[t].min(), s[t].max()
+        assert not any(lo < o - 0.05 and hi > o + 0.05 for o in offs)   # never across a row line
+
+
+def test_band_slivers_adds_medial_points_only_near_the_band():
+    alpha, p0, p1 = arm()
+    alpha = furry(alpha, depth=3)
+    band = elbow_band(p0, p1)
+    plain = mesh.build(alpha, (0, 0), bands=[band], **LEAN)
+    m = mesh.build(alpha, (0, 0), bands=[band], band_slivers=15.0, **LEAN)
+    inner = m["verts"][m["hull"]:]
+    assert len(inner) > 0 and m["stats"]["vertices"] > plain["stats"]["vertices"]
+    c, a = np.asarray(band["center"]), np.asarray(band["axis"])
+    reach = (mesh.BAND_EXTENT + mesh.BAND_SLIVER_MARGIN) * band["halfwidth"] + 1e-6
+    assert (np.abs((inner - c) @ a) <= reach).all()
+    assert m["stats"]["missed_solid"] <= plain["stats"]["missed_solid"] + 1e-9
+
+
+def test_slack_follows_the_limb_width():
+    alpha = arm()[0]
+    m, _ = mesh._art_mask(alpha)
+    sl = mesh.outline_slack(m, 1.75)
+    assert sl.min() >= 1.75 and sl.max() <= mesh.SLACK_MAX
+    thin = mesh._art_mask(capsule((60, 20), (6, 10), 3, (54, 10), 3))[0]
+    assert mesh.outline_slack(thin, 1.75).max() == pytest.approx(1.75)   # a 6 px finger keeps eps
+
+
 def test_band_outside_the_layer_adds_nothing():
     alpha, p0, p1 = arm()
     plain = mesh.build(alpha, (0, 0))

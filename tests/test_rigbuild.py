@@ -189,6 +189,60 @@ def test_joint_elbow_holds_where_rigid_tears(built, angle):
     assert f["folds"] == 0
 
 
+def test_lean_mesh_profile_is_cheaper_and_bends_the_same(built, layers_dir):
+    """The default "lean" profile against the "refined" one: fewer than 60%
+    of the vertices, the same B2, and the elbow still holds 120 deg."""
+    ref = rigbuild.build(layers_dir, mode="joint", mesh_profile="refined")
+    lean = built["joint"]
+    assert lean["report"]["mesh_profile"] == "lean" and ref["report"]["mesh_profile"] == "refined"
+    v_lean, v_ref = lean["report"]["totals"]["vertices"], ref["report"]["totals"]["vertices"]
+    assert v_lean < 0.6 * v_ref
+    assert lean["report"]["totals"]["b2"] >= 0.9
+    ir = lean["ir"]
+    b = irmod.by_name(ir["bones"])["forearm_l"]
+    for a in (120.0, -120.0):
+        assert lbs.Evaluator(ir).folds(pose={"forearm_l": {"rotation": b["rotation"] + a}})["folds"] == 0
+
+
+def test_off_centre_elbow_is_moved_onto_the_limb(layers_dir):
+    """A joints file that puts the elbow 12 px off the arm's centre line:
+    the builder moves it back (and says so); --keep-joints keeps it."""
+    with open(os.path.join(layers_dir, "joints.json")) as f:
+        jd = json.load(f)
+    x, y = jd["joints"]["elbow_l"]["xy"]
+    jd["joints"]["elbow_l"]["xy"] = [x + 12.0, y]          # the arm hangs straight down: x is across it
+    res = rigbuild.build(layers_dir, jd, mode="joint")
+    c = res["report"]["bands"]["elbow_l"]["center"]
+    assert abs(c[0] - x) <= 2.0
+    assert any(n.startswith("joint elbow_l: moved") for n in res["report"]["notes"])
+    kept = rigbuild.build(layers_dir, jd, mode="joint", recenter=False)
+    assert kept["report"]["bands"]["elbow_l"]["center"][0] == pytest.approx(x + 12.0)
+    # on the untouched synthetic character every joint is on its centre line already
+    assert not any(" moved " in n for n in rigbuild.build(layers_dir, mode="joint")["report"]["notes"])
+
+
+def test_joint_modes_override_and_choice(layers_dir):
+    res = rigbuild.build(layers_dir, mode="joint", joint_modes={"elbow_l": "rigid", "knee_l": "ramp"})
+    modes = res["report"]["joint_modes"]
+    assert modes["elbow_l"] == "rigid" and modes["knee_l"] == "ramp" and modes["elbow_r"] == "helper"
+    bands = res["report"]["bands"]
+    assert bands["knee_l"]["helper"] is None and bands["elbow_r"]["helper"] == "elbow_mid_r"
+    # a rigid elbow: the forearm stays 100% forearm, and the budget still gets the joint
+    att = next(a for _, s, _, a in irmod.iter_attachments(res["ir"]) if s == "forearm_l")
+    assert all(len(row) == 1 for row in att["weights"])
+    assert "elbow_l" in {j["name"] for j in res["joints"]["joints"]}
+    with pytest.raises(ValueError):
+        rigbuild.build(layers_dir, mode="joint", joint_modes={"elbow_l": "bendy"})
+    # chosen from a rigid budget: rigid where the cut-out already holds what is needed
+    budget = {"schema": "spinegen-budget/1", "joints": {
+        "elbow_l": {"+": {"soft": 100.0, "limit_by": None}, "-": {"soft": 95.0, "limit_by": None}},
+        "elbow_r": {"+": {"soft": 22.0, "limit_by": "seam@a|b"}, "-": {"soft": 120.0, "limit_by": None}},
+        "shoulder_l": {"+": {"soft": 26.0, "limit_by": "area@shoulder_l_band"}, "-": {"soft": 40.0, "limit_by": None}}}}
+    chosen, why = rigbuild.choose_joint_modes(budget, {"elbow_l": 90.0, "elbow_r": 90.0, "shoulder_l": 150.0})
+    assert chosen == {"elbow_l": "rigid", "elbow_r": "helper", "shoulder_l": "ramp"}
+    assert "seam@a|b" in why["elbow_r"]
+
+
 # ---------------------------------------------------------------- feet
 
 def test_crouch_keeps_the_soles_planted(built):

@@ -1,6 +1,7 @@
 """Layer alpha -> a Spine mesh that hugs the art and can bend at its joints.
 
-    build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None)
+    build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None,
+          outline="exact", row_points="interior", edges="conform", band_slivers=0)
         -> {"verts", "uvs", "tris", "hull", ...}
     grid_equivalent_vertex_count(alpha, cell=22) -> int
 
@@ -54,6 +55,36 @@ PIPELINE
   6. vertices reordered hull first, in outline order (the editor's hull rule,
      L8 MESH), then hole rims, then interior vertices.
 
+THE LEAN OPTIONS (what spinegen.rigbuild uses by default)
+  Measured on the monkey (P2_REPORT): its traced outlines are only ~430
+  vertices for 13 layers; the 2264-vertex meshes (1.87x the 22 px grid)
+  came from the conforming CDT and the 28 deg refinement splitting outline
+  edges and filling the inside, and from points along the band rows. None
+  of that is needed to bend:
+    edges="constrain"   outline and row edges are kept whole (constrained
+                        CDT): no Steiner points;
+    min_angle=0         no refinement: thin triangles are harmless where all
+                        their vertices ride one bone;
+    row_points="ends"   a row keeps only its two outline points and becomes
+                        a constrained edge. Weights are constant along a row,
+                        so the row deforms as one blended transform and
+                        points along it add nothing; as an edge it keeps every
+                        triangle near the band between two neighbouring rows.
+                        It also cuts every OTHER span of the outline on its
+                        line (a lobe, a tuft, a flared hem): without that a
+                        thin triangle along a lobe spanned the band's end,
+                        its vertices on different parts of the ramp, and
+                        turned over at 72-80 deg on the monkey's hands;
+    outline="adaptive"  the one-sided simplification (_dp_covering): the
+                        outline may stand off the art by up to SLACK_HW x the
+                        local halfwidth (it covers the notches of a furry
+                        edge with transparent texels) but never cuts more than
+                        eps into it, so coverage stays what it was;
+    band_slivers=deg    optional: medial-axis points next to the thin
+                        triangles near a band (_medial_points).
+  The monkey's lean joint rig: 582 vertices (0.48x the grid), B2 0.98, 0
+  folds over all its animations in spine-core, elbows 96-108 deg.
+
 COORDINATES
   Layer pixels are image space: x right, y down, pixel (i, j) covers
   [j, j+1) x [i, i+1). `origin` is the canvas position of alpha[0, 0]'s
@@ -80,6 +111,12 @@ MIN_EDGE = 1.0         # px: refinement never makes edges shorter than this
 MAX_STEINER = 20000    # refinement budget per layer (a safety cap, never reached in practice)
 PAD = 2                # px of empty border added before tracing, so art touching the edge still closes
 SPLICE_BULGE = 0.02    # px a band row's end point is pushed off its outline edge, at most (see _splice)
+SLIVER_ROUNDS = 4      # band_slivers: rounds of medial points (each round re-triangulates)
+SLIVER_SPACING = 0.25  # band_slivers: medial points keep this many halfwidths apart (and from vertices)
+BAND_SLIVER_MARGIN = 1.0  # band_slivers: halfwidths past a band's end that still count as "near" it
+SLACK_HW = 0.1         # outline="adaptive": outward slack = this x the local limb halfwidth (outline_slack)
+SLACK_REACH = 25       # px around an outline point in which the local halfwidth is taken
+SLACK_MAX = 6.0        # px: the slack never exceeds this
 CLEAR = 2.0 * MIN_EDGE # px: a row point this close to an outline vertex snaps to it; interior row
                        # points keep this far from the outline and from each other (closer ones make
                        # edges the refiner may not split, i.e. slivers it cannot repair)
@@ -87,7 +124,8 @@ CLEAR = 2.0 * MIN_EDGE # px: a row point this close to an outline vertex snaps t
 
 # ---------------------------------------------------------------- public
 
-def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None):
+def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None, outline="exact", row_points="interior",
+          edges="conform", band_slivers=0.0):
     """Triangulate one layer's alpha (see the module docstring).
 
     alpha     (H, W) uint8 layer alpha
@@ -99,9 +137,22 @@ def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None):
                 the half-length; overrides rows)}] in canvas coordinates; rows of
               vertices perpendicular to `axis` go at row_offsets(rows) * extent *
               halfwidth from the center, each from outline to outline
-    eps       approxPolyDP tolerance in px
-    min_angle refinement target in degrees (CDT smallest-angle criterion)
+    eps       approxPolyDP tolerance in px (with outline="adaptive", the floor)
+    min_angle refinement target in degrees (CDT smallest-angle criterion; 0: none)
     max_area  optional largest triangle area in px^2
+    outline   "exact": trace the art at `eps`; "adaptive": coarser where the
+              outline is jagged for its width (adaptive_outline())
+    row_points "interior": each band row also gets points across the limb;
+              "ends": only its two outline points, the row itself a
+              constrained edge (the same deformation for a third of the
+              vertices, see the module doc)
+    edges     "conform": outline (and row) edges are split until they are
+              Delaunay edges (conforming CDT); "constrain": they are kept
+              whole (constrained CDT, no Steiner points on them)
+    band_slivers  degrees: without global refinement, triangles near a band
+              (within its length + BAND_SLIVER_MARGIN halfwidths) with a
+              smaller angle get an interior point on the art's medial axis
+              next to them (_medial_points); 0: off
 
     Returns {"verts": (N, 2) canvas, "uvs": (N, 2), "tris": (M, 3) int,
     "hull": int (verts[:hull] is the outer outline, in order), "holes": int,
@@ -117,13 +168,33 @@ def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None):
     h, w = alpha.shape
     origin = np.asarray(origin, float).reshape(2)
     mask, art_stats = _art_mask(alpha)
-    outer, holes = _outlines(mask, eps, (w, h))
+    if outline not in ("exact", "adaptive"):
+        raise ValueError(f"outline must be 'exact' or 'adaptive', not {outline!r}")
+    if row_points not in ("interior", "ends"):
+        raise ValueError(f"row_points must be 'interior' or 'ends', not {row_points!r}")
+    slack = outline_slack(mask, eps) if outline == "adaptive" else None
+    outer, holes = _outlines(mask, eps, (w, h), slack)
     loops = [outer] + holes
     bands = list(bands)
-    loops, interior, row_points = _band_points(loops, bands, origin)
-    tv, tt, refine = _triangulate(loops, interior, min_angle, max_area)
+    if row_points == "ends":
+        loops, interior, row_pts, side = _band_points(loops, bands, origin, ends_only=True)
+        row_edges = [(r[0], r[1]) for b in row_pts for r in b if len(r) >= 2] + side
+    else:
+        loops, interior, row_pts = _band_points(loops, bands, origin)
+        row_edges = []
+    if edges not in ("conform", "constrain"):
+        raise ValueError(f"edges must be 'conform' or 'constrain', not {edges!r}")
+    tv, tt, refine = _triangulate(loops, interior, min_angle, max_area, row_edges, edges == "constrain")
+    if band_slivers and bands:
+        dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+        for _ in range(SLIVER_ROUNDS):
+            extra = _medial_points(tv, tt, bands, origin, dt, band_slivers, interior, loops)
+            if not len(extra):
+                break
+            interior = np.vstack([interior, extra])
+            tv, tt, refine = _triangulate(loops, interior, min_angle, max_area, row_edges, edges == "constrain")
     tv, tt, hull, nholes = _hull_first(tv, tt)
-    rows = _locate(tv, row_points)
+    rows = _locate(tv, row_pts)
     out = {
         "verts": tv + origin,
         "uvs": tv / np.array([w, h], float),
@@ -289,31 +360,101 @@ def _one_piece(m):
 
 # ---------------------------------------------------------------- 3: outlines
 
-def _outlines(mask, eps, size):
-    """(outer polygon, [hole polygons]) in layer coordinates, simplified."""
+def _outlines(mask, eps, size, slack=None):
+    """(outer polygon, [hole polygons]) in layer coordinates, simplified;
+    `slack` (the padded mask's shape, px) switches to the one-sided
+    simplification (_dp_covering)."""
     contours, hier = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
     hier = hier[0]
     outer_ids = [i for i in range(len(contours)) if hier[i][3] < 0]
     oi = max(outer_ids, key=lambda i: cv2.contourArea(contours[i]))
-    outer = _simplify(contours[oi], eps, size, [])
+    outer = _simplify(contours[oi], eps, size, [], slack, hole=False)
     holes = []
     for i in range(len(contours)):
         if hier[i][3] != oi or cv2.contourArea(contours[i]) < MIN_HOLE:
             continue
-        hole = _simplify(contours[i], eps, size, [outer] + holes)
+        hole = _simplify(contours[i], eps, size, [outer] + holes, slack, hole=True)
         if hole is not None and len(hole) >= 3:
             holes.append(hole)
     return outer, holes
 
 
-def _simplify(contour, eps, size, others):
-    """approxPolyDP until the polygon is simple and clear of `others`.
+def outline_slack(mask, eps):
+    """Per-pixel outward slack for the one-sided simplification: how far
+    (px) a simplified outline may stand OFF the art at a point, from the
+    width of the limb there. SLACK_HW x the largest inscribed radius within
+    SLACK_REACH px, clamped to [eps, SLACK_MAX]: a wide limb lets its outline
+    skip the notches of a jagged (furry) edge, a finger or a thin tail keeps
+    eps. Covering never needs more than that: the texture, not the mesh,
+    draws the silhouette."""
+    dt = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
+    k = 2 * int(SLACK_REACH) + 1
+    near = cv2.dilate(dt, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return np.clip(SLACK_HW * near, eps, max(eps, SLACK_MAX))
+
+
+def _dp_covering(c, eps, slack, art_left):
+    """Douglas-Peucker with a one-sided tolerance on a closed contour (n, 2):
+    a chord may pass at most `eps` px on the art's side of a contour point
+    (cutting art off, as approxPolyDP allows), but up to slack[k] px on the
+    other side (covering transparent pixels: a notch of a jagged edge, the
+    hollow between two tufts). `art_left`: the art lies to the left of the
+    contour's direction. Returns the kept indices, in order."""
+    n = len(c)
+    if n < 4:
+        return np.arange(n)
+    # split the loop at its two mutually farthest points (approx.)
+    a = 0
+    b = int(np.argmax(((c - c[0]) ** 2).sum(1)))
+    keep = np.zeros(n, bool)
+    keep[[a, b]] = True
+    stack = [(a, b), (b, n)]
+    sign = 1.0 if art_left else -1.0
+    while stack:
+        i, j = stack.pop()
+        if j - i < 2:
+            continue
+        p0, p1 = c[i], c[j % n]
+        d = p1 - p0
+        L = math.hypot(d[0], d[1])
+        mid = c[i + 1:j]
+        if L < 1e-9:
+            dev = np.linalg.norm(mid - p0, axis=1)
+            over = dev - eps
+        else:
+            side = sign * (d[0] * (mid[:, 1] - p0[1]) - d[1] * (mid[:, 0] - p0[0])) / L
+            # side > 0: the point is on the art side of the chord (the chord
+            # passes outside it: covered, slack allowed); side < 0: the chord
+            # cuts it off (eps allowed)
+            over = np.where(side >= 0, side - slack[i + 1:j], -side - eps)
+        k = int(np.argmax(over))
+        if over[k] > 0:
+            m = i + 1 + k
+            keep[m] = True
+            stack += [(i, m), (m, j)]
+    return np.nonzero(keep)[0]
+
+
+def _simplify(contour, eps, size, others, slack=None, hole=False):
+    """approxPolyDP (or _dp_covering with a slack map) until the polygon is
+    simple and clear of `others`.
 
     Returns (k, 2) float layer coordinates (pixel centres, clamped to the
     image), or None for a hole that cannot be kept apart from the outline."""
     e = float(eps)
+    c = contour[:, 0, :].astype(float)
+    sl = None
+    if slack is not None:
+        sl = slack[contour[:, 0, 1], contour[:, 0, 0]].astype(float)
+        area2 = float((c[:, 0] * np.roll(c[:, 1], -1) - np.roll(c[:, 0], -1) * c[:, 1]).sum())
+        # image axes (y down): positive shoelace area = clockwise on screen =
+        # interior on the left of the walking direction in (x, y) algebra
+        art_left = (area2 > 0) != hole
     while True:
-        p = cv2.approxPolyDP(contour, e, True)[:, 0, :].astype(float) - PAD + 0.5
+        if sl is None:
+            p = cv2.approxPolyDP(contour, e, True)[:, 0, :].astype(float) - PAD + 0.5
+        else:
+            p = c[_dp_covering(c, e, sl, art_left)] - PAD + 0.5
         p[:, 0] = np.clip(p[:, 0], 0, size[0])
         p[:, 1] = np.clip(p[:, 1], 0, size[1])
         p = _dedupe(p)
@@ -325,6 +466,8 @@ def _simplify(contour, eps, size, others):
                 return None  # a hole squeezed against the outline: fill it
             raise ValueError("cannot trace a simple outline for this layer")
         e /= 2
+        if sl is not None:
+            sl = np.maximum(sl / 2, e)
 
 
 def _dedupe(p):
@@ -382,7 +525,7 @@ def inside(poly, pts):
 
 # ---------------------------------------------------------------- 4: joint bands
 
-def _band_points(loops, bands, origin):
+def _band_points(loops, bands, origin, ends_only=False):
     """Splice row/outline crossings into the loops; interior row points.
 
     Returns (loops, interior points (k, 2), rows) where rows lists, per band
@@ -391,7 +534,7 @@ def _band_points(loops, bands, origin):
     actually landed (pushed out by the splice bulge, or the outline vertex
     they snapped to), then its interior points."""
     inserts = [[] for _ in loops]  # per loop: (edge index, u, point, insert id)
-    interior, rows = [], []
+    interior, rows, side = [], [], []
     for band in bands:
         c = np.asarray(band["center"], float) - origin
         a = np.asarray(band["axis"], float)
@@ -406,20 +549,27 @@ def _band_points(loops, bands, origin):
         gap = max(2.0 * ext / max(len(offs) - 1, 1), 0.5 * hw)  # spacing along a row ~ spacing between rows
         band_rows = []
         for s in offs:
-            band_rows.append(_row(loops, c + s * a, nrm, gap, inserts, interior))
+            band_rows.append(_row(loops, c + s * a, nrm, math.inf if ends_only else gap, inserts, interior,
+                                  side if ends_only else None))
         rows.append(band_rows)
     landed = {}
     out = [_splice(lp, ins, li > 0, landed) for li, (lp, ins) in enumerate(zip(loops, inserts))]
     rows = [[[landed[p] if isinstance(p, int) else p for p in row] for row in band] for band in rows]
     interior = np.array(interior, float).reshape(-1, 2)
     interior = _clear_points(interior, out)
+    if ends_only:
+        return out, interior, rows, [(landed[i], landed[j]) for i, j in side]
     return out, interior, rows
 
 
-def _row(loops, p0, nrm, gap, inserts, interior):
+def _row(loops, p0, nrm, gap, inserts, interior, side=None):
     """One row across the limb through p0 along nrm. Its two outline
     crossings are queued for splicing (returned as insert ids), its interior
-    points appended to `interior` (returned as points)."""
+    points appended to `interior` (returned as points). With `side` (a
+    list), the row line's OTHER inside spans (a lobe of the outline the
+    limb's own span does not reach: a thumb, a tuft, a flared hem) are
+    queued too and appended to `side` as (id, id) pairs: they become
+    constrained edges, so no triangle near a band reaches across a row."""
     hits = []  # (t, loop, edge, u)
     for li, lp in enumerate(loops):
         e = _edges(lp)
@@ -439,6 +589,16 @@ def _row(loops, p0, nrm, gap, inserts, interior):
     spans = [(hits[i], hits[i + 1]) for i in range(0, len(hits) - 1, 2)]
     lo, hi = min(spans, key=lambda sp: 0 if sp[0][0] <= 0 <= sp[1][0] else min(abs(sp[0][0]), abs(sp[1][0])))
     t0, t1 = lo[0], hi[0]
+    if side is not None:
+        for sp in spans:
+            if sp == (lo, hi) or sp[1][0] - sp[0][0] < 2.0:
+                continue
+            ids = []
+            for t, li, k, u in sp:
+                ident = sum(len(x) for x in inserts)
+                inserts[li].append((k, u, p0 + t * nrm, ident))
+                ids.append(ident)
+            side.append(tuple(ids))
     if t1 - t0 < 2.0:
         return []
     pts = []
@@ -446,7 +606,7 @@ def _row(loops, p0, nrm, gap, inserts, interior):
         ident = sum(len(x) for x in inserts)
         inserts[li].append((k, u, p0 + t * nrm, ident))
         pts.append(ident)
-    m = max(1, int(round((t1 - t0) / gap)))
+    m = max(1, int(round((t1 - t0) / gap))) if math.isfinite(gap) else 1
     for j in range(1, m):
         p = p0 + (t0 + (t1 - t0) * j / m) * nrm
         interior.append(p)
@@ -529,18 +689,92 @@ def _dist_to_edges(pts, e):
     return np.linalg.norm(p - (a + t[..., None] * ab), axis=-1).min(1)
 
 
+def _medial_points(tv, tt, bands, origin, dt, min_deg, interior, loops):
+    """Interior points for the thin triangles near the bands of a mesh
+    built without refinement (layer coordinates).
+
+    WHY: an outline that wanders through a band (a furry lobe, a hand's
+    thumb) is triangulated as a fan of thin triangles between outline
+    vertices. Their vertices sit at different points of the weight ramp,
+    and LBS bends a straight chain of them into a curve, so a sliver turns
+    over (G1) long before the band itself folds: the lean monkey's elbows
+    folded at 72-80 deg that way. A point on the medial axis next to the
+    sliver (the art pixel farthest from the outline within half a
+    halfwidth: the middle of the lobe) gives the outline vertices something
+    across the lobe to connect to instead. Points keep CLEAR from the
+    outline and SLIVER_SPACING halfwidths from each other and from the
+    interior points already there."""
+    if not len(tt):
+        return np.zeros((0, 2))
+    ang = min_angles(tv, tt)
+    cent = tv[tt].mean(1)
+    near = np.zeros(len(tt), bool)
+    hws, zones = [], []
+    for b in bands:
+        c = np.asarray(b["center"], float) - origin
+        a = np.asarray(b["axis"], float)
+        a = a / np.linalg.norm(a)
+        hw = float(b["halfwidth"])
+        reach = (float(b.get("extent", BAND_EXTENT)) + BAND_SLIVER_MARGIN) * hw
+        s = (tv[tt] - c) @ a
+        hit = (np.abs(s) <= reach).any(1)
+        near |= hit
+        hws.append(hw)
+        zones.append((c, a, reach))
+    hw = float(np.median(hws))
+    bad = np.nonzero(near & (ang < min_deg))[0]
+    if not len(bad):
+        return np.zeros((0, 2))
+    H, W = dt.shape
+    r = max(2, int(round(0.5 * hw)))
+    taken = [p for p in np.asarray(interior, float).reshape(-1, 2)]
+    out = []
+    space = SLIVER_SPACING * hw
+    for t in bad[np.argsort(ang[bad])]:
+        x, y = cent[t] + PAD - 0.5          # layer -> padded mask pixel
+        i0, i1 = max(0, int(y) - r), min(H, int(y) + r + 1)
+        j0, j1 = max(0, int(x) - r), min(W, int(x) + r + 1)
+        win = dt[i0:i1, j0:j1]
+        if not win.size or win.max() <= CLEAR + 1:
+            continue
+        k = np.unravel_index(int(np.argmax(win)), win.shape)
+        p = np.array([j0 + k[1] + 0.5, i0 + k[0] + 0.5]) - PAD
+        if not any(abs((p - c) @ a) <= reach for c, a, reach in zones):
+            continue
+        if any(np.linalg.norm(p - q) < space for q in taken + out):
+            continue
+        if np.linalg.norm(tv - p, axis=1).min() < space:
+            continue
+        out.append(p)
+    pts = np.array(out, float).reshape(-1, 2)
+    return _clear_points(pts, loops) if len(pts) else pts
+
+
 # ---------------------------------------------------------------- 5: CDT
 
-def _triangulate(loops, interior, min_angle, max_area):
+def _triangulate(loops, interior, min_angle, max_area, extra_edges=(), constrain=False):
+    """CDT of the loops (+ interior points) with the loop edges and
+    `extra_edges` (pairs of points that are loop vertices: band rows) as
+    edges: conforming (edges split until Delaunay) or, with constrain,
+    constrained (edges kept whole: no Steiner points)."""
     pts = np.vstack(loops + [interior])
     edges, base = [], 0
     for lp in loops:
         n = len(lp)
         edges += [(base + i, base + (i + 1) % n) for i in range(n)]
         base += n
+    if len(extra_edges):
+        where = {tuple(p): i for i, p in enumerate(pts[:base].tolist())}
+        for a, b in extra_edges:
+            ia, ib = where.get(tuple(np.asarray(a, float).tolist())), where.get(tuple(np.asarray(b, float).tolist()))
+            if ia is not None and ib is not None and ia != ib:
+                edges.append((ia, ib))
     t = cdt.Triangulation(cdt.VertexInsertionOrder.AUTO, cdt.IntersectingConstraintEdges.TRY_RESOLVE, 0.0)
     t.insert_vertices([cdt.V2d(float(x), float(y)) for x, y in pts])
-    t.conform_to_edges([cdt.Edge(a, b) for a, b in edges])
+    if constrain:
+        t.insert_edges([cdt.Edge(a, b) for a, b in edges])
+    else:
+        t.conform_to_edges([cdt.Edge(a, b) for a, b in edges])
     erase = t.collect_outer_triangles_and_holes()
     unrefined = {}
     if max_area:
