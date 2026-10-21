@@ -1,0 +1,57 @@
+{
+ "schema": "spinegen-template/1",
+ "name": "biped_mascot",
+ "doc": [
+  "A front- or three-quarter-view standing mascot: hips, one torso bone, optional neck, head, optional clavicles, two arms (shoulder, elbow, wrist) and two legs (hip, knee, ankle).",
+  "{s} expands to each side in 'sides'. Side 'l' is the side whose source names carry an 'l'/'left' token; its outward arm swing is a negative local rotation when the arm hangs down on the left of the image (budget '+' = counter-clockwise, y up).",
+  "Bones: 'joint' names the joint at the bone's origin, 'tail' the joint it points at (no tail: the rig builder aims the bone at its own art, or keeps the parent's direction). 'parent' lists candidates, first one present wins.",
+  "Joint 'band': which layers bend there. 'both' = layers of the bone above and below the joint get the same ramp (elbows, knees, wrists, ankles: the two pieces must deform alike or the seam opens). 'lower' = only layers of the bone below the joint (a sleeve bends at the shoulder, the torso does not follow the arm). 'none' = rigid (a cartoon head does not bend at the neck).",
+  "Helpers: a half-angle bone at the joint (SOTA 2 weights): the IR kind 'half_angle', which the Spine 4.2 emitter expands to a local rotate-only transform constraint with every other mix 0, ordered after IK.",
+  "IK: two-bone leg IK onto a target under root; the foot hangs from that target so a planted foot cannot slide (SOTA 5 M1). softness is a fraction of leg length, capped so the setup pose is unchanged; bend_positive is the default for a straight setup leg (a bent setup leg keeps its own bend).",
+  "match: token sets tried against source bone names (split at '_', '-', digits and camelCase; lower-cased); a source bone takes the first role in match_order with a set it contains. Unmatched source bones are carried over as accessories under their mapped parent."
+ ],
+ "sides": {
+  "l": {"tokens": ["l", "left"], "outward": -1},
+  "r": {"tokens": ["r", "right"], "outward": 1}
+ },
+ "bones": [
+  {"name": "root", "parent": null, "joint": "root", "match": [["root"]]},
+  {"name": "hips", "parent": ["root"], "joint": "pelvis", "tail": "waist", "match": [["hips"], ["hip"], ["pelvis"]]},
+  {"name": "torso", "parent": ["hips"], "joint": "waist", "tail": ["neck", "head"], "match": [["torso"], ["chest"], ["spine"], ["body"], ["waist"]]},
+  {"name": "neck", "parent": ["torso"], "joint": "neck", "tail": "head", "optional": true, "match": [["neck"]]},
+  {"name": "head", "parent": ["neck", "torso"], "joint": "head", "tail": null, "match": [["head"]]},
+  {"name": "clav_{s}", "parent": ["torso"], "joint": "clav_{s}", "tail": "shoulder_{s}", "optional": true, "match": [["clav"], ["clavicle"], ["collar"]]},
+  {"name": "upperarm_{s}", "parent": ["clav_{s}", "torso"], "joint": "shoulder_{s}", "tail": "elbow_{s}", "match": [["upper", "arm"], ["upperarm"], ["shoulder"], ["arm"]]},
+  {"name": "forearm_{s}", "parent": ["upperarm_{s}"], "joint": "elbow_{s}", "tail": "wrist_{s}", "match": [["forearm"], ["fore"], ["lower", "arm"], ["elbow"]]},
+  {"name": "hand_{s}", "parent": ["forearm_{s}"], "joint": "wrist_{s}", "tail": null, "optional": true, "match": [["hand"], ["wrist"]]},
+  {"name": "thigh_{s}", "parent": ["hips"], "joint": "hip_{s}", "tail": "knee_{s}", "match": [["thigh"], ["upper", "leg"], ["upperleg"], ["leg"]]},
+  {"name": "shin_{s}", "parent": ["thigh_{s}"], "joint": "knee_{s}", "tail": "ankle_{s}", "match": [["shin"], ["calf"], ["lower", "leg"], ["knee"]]},
+  {"name": "ik_foot_{s}", "parent": ["root"], "joint": "ankle_{s}", "tail": null, "kind": "ik_target"},
+  {"name": "foot_{s}", "parent": ["ik_foot_{s}"], "joint": "ankle_{s}", "tail": null, "optional": true, "match": [["foot"], ["ankle"]]}
+ ],
+ "match_order": ["root", "hand_{s}", "forearm_{s}", "upperarm_{s}", "clav_{s}", "foot_{s}", "shin_{s}", "thigh_{s}",
+                 "head", "neck", "torso", "hips"],
+ "joints": {
+  "root": {"band": "none"},
+  "pelvis": {"band": "none"},
+  "waist": {"band": "none"},
+  "neck": {"band": "none"},
+  "head": {"band": "none"},
+  "clav_{s}": {"band": "lower", "budget": "arm_{s}.clav"},
+  "shoulder_{s}": {"band": "lower", "budget": "arm_{s}.shoulder"},
+  "elbow_{s}": {"band": "both", "helper": "elbow_mid_{s}", "budget": "arm_{s}.elbow"},
+  "wrist_{s}": {"band": "both", "budget": "arm_{s}.wrist"},
+  "hip_{s}": {"band": "lower", "budget": "leg_{s}.hip"},
+  "knee_{s}": {"band": "both", "helper": "knee_mid_{s}", "budget": "leg_{s}.knee"},
+  "ankle_{s}": {"band": "both", "budget": "leg_{s}.ankle"}
+ },
+ "helpers": [
+  {"name": "elbow_mid_{s}", "kind": "half_angle", "of": "forearm_{s}", "parent": "upperarm_{s}", "joint": "elbow_{s}", "mix": 0.5},
+  {"name": "knee_mid_{s}", "kind": "half_angle", "of": "shin_{s}", "parent": "thigh_{s}", "joint": "knee_{s}", "mix": 0.5}
+ ],
+ "ik": [
+  {"name": "leg_ik_{s}", "bones": ["thigh_{s}", "shin_{s}"], "target": "ik_foot_{s}", "softness": 0.1,
+   "bend_positive": {"l": true, "r": false}, "stretch": false, "planted": true}
+ ],
+ "foot_contact": {"bone": "foot_{s}", "within_px": 2.0}
+}
