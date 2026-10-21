@@ -112,6 +112,13 @@ def load_joints(path_or_obj):
         band.setdefault("lower", bone)
         out.append({"name": e.get("name") or bone, "bone": bone, "dirs": list(e.get("dirs", [1, -1])),
                     "band": band})
+    # every joint knows where the other limbs start (art_gates.joint_parts:
+    # a hand hanging by the thigh is no part of the hip)
+    lowers = [j["band"]["lower"] for j in out]
+    for j in out:
+        others = [b for b in lowers if b != j["band"]["lower"]]
+        if others:
+            j["band"].setdefault("other_limbs", others)
     return out
 
 

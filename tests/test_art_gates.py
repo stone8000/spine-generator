@@ -198,6 +198,23 @@ def test_joint_parts_and_derived_band():
     assert q.jr.hw == pytest.approx(0.9 * 40 * SCALE, abs=2.0)
 
 
+def test_hip_parts_leave_the_hanging_hand_out():
+    """The hand hangs next to the thigh, inside the hip's joint disk, and
+    on the hip's upper side of the tree (hips -> torso -> arm). Joints
+    loaded together know the other limbs, so the hip's parts are the torso
+    and the leg only (before: a hand moving past the thigh read as a hip
+    seam)."""
+    ir, images, joints = synth_art.build(mode="rigid", scale=SCALE, arms=2, legs=2)
+    rest = raster.Renderer(ir, images).frame()
+    J = {j["name"]: j for j in budget.load_joints(joints)}
+    up, lo = ag.joint_parts(rest, ag.resolve_joint(rest, J["hip_l"]))
+    assert up == ["torso"] and set(lo) == {"thigh_l", "calf_l"}
+    alone = dict(J["hip_l"], band={k: v for k, v in J["hip_l"]["band"].items() if k != "other_limbs"})
+    assert "forearm_l" in ag.joint_parts(rest, ag.resolve_joint(rest, alone))[0]
+    # the elbow still has its upper arm (the arm's own chain is not "another limb")
+    assert ag.joint_parts(rest, ag.resolve_joint(rest, J["elbow_l"]))[0] == ["upper_arm_l"]
+
+
 def test_evaluate_bundles_every_gate():
     p = _probe("elbow_l", mode="rigid", overlap=0, round_ends=False)
     out = ag.evaluate(p.rest, p.frame(10), [p.joint])

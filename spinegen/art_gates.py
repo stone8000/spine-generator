@@ -125,7 +125,7 @@ def as_joint(joint):
     lower, halfwidth[, axis, extent, name, slots]} or the budget form
     {name, bone, dirs, band: {...}}. Coordinates are WORLD (y up)."""
     band = dict(joint.get("band") or {})
-    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots"):
+    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "other_limbs"):
         if k not in band and k in joint:
             band[k] = joint[k]
     band["name"] = joint.get("name") or band.get("name") or f"{band.get('upper')}-{band.get('lower')}"
@@ -234,7 +234,10 @@ def joint_parts(rest, j):
     the lower bone's subtree; the upper side the upper bone's subtree minus
     that (the upper bone, its helper and cuff bones, ...). Upper-side slots
     count only if their art reaches into the joint disk at rest, so the
-    head is not part of a shoulder because it hangs off the torso.
+    head is not part of a shoulder because it hangs off the torso, and
+    slots on OTHER limbs (`j["other_limbs"]`: the root bones of the other
+    joints' lower sides, which budget.scan fills in) never count: a hand
+    hanging next to the thigh is not part of the hip.
     `j["slots"] = {"upper": [...], "lower": [...]}` overrides."""
     if j.get("slots"):
         names = set(rest.geoms)
@@ -242,6 +245,9 @@ def joint_parts(rest, j):
     ev = rest.renderer.ev
     low = _subtree(ev, j["lower"])
     up = _subtree(ev, j["upper"]) - low
+    for b in j.get("other_limbs") or ():
+        if b in ev.index and ev.index[j["lower"]] not in _subtree(ev, b):
+            up -= _subtree(ev, b)
     upper = []
     disk = _disk_mask(rest.canvas, j["center"], DISK * j["halfwidth"])
     for s in rest.slots:

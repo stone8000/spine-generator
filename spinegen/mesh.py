@@ -83,7 +83,7 @@ THE LEAN OPTIONS (what spinegen.rigbuild uses by default)
     band_slivers=deg    optional: medial-axis points next to the thin
                         triangles near a band (_medial_points).
   The monkey's lean joint rig: 582 vertices (0.48x the grid), B2 0.98, 0
-  folds over all its animations in spine-core, elbows 96-108 deg.
+  folds over all its animations in spine-core, elbows 98-110 deg.
 
 COORDINATES
   Layer pixels are image space: x right, y down, pixel (i, j) covers

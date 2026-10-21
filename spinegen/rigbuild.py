@@ -100,7 +100,7 @@ JOINT_MODES = ("rigid", "ramp", "helper")
 # with only their outline points (cutting every span of the outline they
 # cross), the one-sided covering outline. On the monkey: 582 vertices
 # (0.48x the 22 px grid) against 2264 (1.87x) "refined", B2 0.98, 0 folds
-# over every animation in spine-core, elbows 96-108 deg (P2_REPORT).
+# over every animation in spine-core, elbows 98-110 deg (P2_REPORT).
 MESH_PROFILES = {"lean": {"min_angle": 0.0, "outline": "adaptive", "row_points": "ends", "edges": "constrain"},
                  "refined": {}}
 SCHEMA_BUDGET_JOINTS = "spinegen-budget-joints/1"
