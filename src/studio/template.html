@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spine 動作工作室</title>
+<style>
+/* Layout: three working columns — pick list | live stage | fine-tune — like an animation tool, single dark theme on purpose. */
+:root {
+  --bg: #121419; --panel: #1a1d24; --panel-2: #22262f; --ink: #e8eaef; --muted: #8e96a4; --rule: #2d323d;
+  --accent: #f0565d; --accent-ink: #ffffff; --gold: #f2c94c; --ok: #3ccf8e; --warn: #f2a33c; --err: #f0565d;
+  --trail: #4ea1ff; --bone: #d3d8e1;
+  --f-ui: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+  --f-num: Consolas, "Cascadia Mono", ui-monospace, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--f-ui); }
+button, select, input { font: inherit; color: var(--ink); }
+button { cursor: pointer; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 12px; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+select, input[type=text], input[type=number] { background: var(--panel-2); border: 1px solid var(--rule); border-radius: 6px; padding: 5px 8px; min-width: 0; }
+
+.app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); border-bottom: 1px solid var(--rule); background: var(--panel); }
+header h1 { margin: 0; font-size: 16px; letter-spacing: .02em; }
+header h1 b { color: var(--accent); }
+.status { color: var(--muted); font-size: 13px; }
+.status.err { color: var(--err); }
+.spacer { flex: 1; }
+.file-btn { position: relative; overflow: hidden; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+.main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 340px; min-height: 0; }
+.col { min-height: 0; overflow: auto; padding: 12px 14px; }
+.col + .col { border-left: 1px solid var(--rule); }
+.col h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 4px 0 10px; font-weight: 700; }
+
+/* pick list */
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.chip { border-radius: 999px; padding: 3px 10px; font-size: 13px; }
+.chip[aria-pressed=true] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.list { display: flex; flex-direction: column; gap: 6px; }
+.item { text-align: left; display: grid; gap: 3px; padding: 9px 10px; background: var(--panel); border-radius: 8px; width: 100%; }
+.item[aria-selected=true] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.item .top { display: flex; align-items: center; gap: 6px; }
+.item .stars { color: var(--gold); font-size: 12px; letter-spacing: 1px; min-width: 40px; }
+.item .name { font-weight: 700; flex: 1; min-width: 0; }
+.item .kind { font-size: 11px; color: var(--muted); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; }
+.item .basis { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.item .missing { font-size: 12px; color: var(--warn); }
+.legend { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.6; }
+
+/* stage */
+.stage { display: grid; grid-template-rows: auto minmax(200px, 1fr) auto 120px; gap: 8px; padding: 12px 14px; min-height: 0; }
+.stage-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.stage-head .title { font-size: 18px; font-weight: 700; }
+.stage-head .sub { color: var(--muted); font-size: 13px; }
+canvas { width: 100%; height: 100%; display: block; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; }
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.transport input[type=range] { flex: 1 1 200px; accent-color: var(--accent); }
+.time { font-family: var(--f-num); font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 150px; }
+.transport label { color: var(--muted); display: inline-flex; gap: 5px; align-items: center; font-size: 13px; }
+.empty { display: grid; place-items: center; text-align: center; color: var(--muted); border: 1px dashed var(--rule); border-radius: 8px; padding: 24px; }
+
+/* tune */
+.section { display: grid; gap: 8px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--rule); }
+.field { display: grid; gap: 3px; }
+.field .lbl { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.field .lbl span:first-child { color: var(--ink); }
+.field .val { font-family: var(--f-num); color: var(--gold); font-variant-numeric: tabular-nums; }
+.field .hint { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.field input[type=range] { width: 100%; accent-color: var(--accent); }
+.row { display: flex; gap: 6px; align-items: center; }
+.row > * { min-width: 0; }
+.reset { padding: 0 6px; font-size: 12px; line-height: 20px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 4px 12px; }
+.seg button[aria-pressed=true] { background: var(--ink); color: var(--bg); }
+.bad { border-color: var(--err) !important; }
+
+.score { display: flex; align-items: center; gap: 12px; }
+.score .num { font-family: var(--f-num); font-size: 30px; font-weight: 700; line-height: 1; }
+.score .num.good { color: var(--ok); } .score .num.mid { color: var(--warn); } .score .num.low { color: var(--err); }
+.counts { font-size: 13px; color: var(--muted); }
+.issues { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; max-height: 160px; overflow: auto; }
+.issues .error { color: var(--err); } .issues .warn { color: var(--warn); }
+.error-box { color: var(--err); font-size: 13px; background: #2a1517; border: 1px solid #4a2226; border-radius: 6px; padding: 8px 10px; }
+
+.queue { display: grid; gap: 6px; }
+.q { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 6px 8px; }
+.q .n { font-weight: 700; } .q .p { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q button { padding: 0 8px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.layers { display: grid; gap: 3px; font-size: 13px; }
+.layers .ok { color: var(--ok); } .layers .miss { color: var(--err); } .layers .opt { color: var(--muted); }
+.seams { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 13px; }
+.seams li { display: flex; gap: 8px; align-items: center; justify-content: space-between; background: #2a1517; border: 1px solid #4a2226; border-radius: 6px; padding: 6px 8px; color: var(--ink); }
+.seams li button { padding: 2px 8px; font-size: 12px; }
+.seam-ok { color: var(--ok); font-size: 13px; }
+canvas.editing { cursor: crosshair; touch-action: none; }
+.toast { position: fixed; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 6px; font-weight: 700; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+
+@media (max-width: 1100px) {
+  /* stacked: the page scrolls as a whole instead of squeezing three panes into one screen */
+  html, body, .app { height: auto; }
+  .app { display: block; }
+  .main { grid-template-columns: 1fr; }
+  .col { overflow: visible; }
+  .col + .col { border-left: 0; border-top: 1px solid var(--rule); }
+  .stage { min-height: 560px; grid-template-rows: auto 360px auto 120px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1><b>Spine</b> 動作工作室</h1>
+    <span class="status" id="status">先開啟一個 Spine 4.3 匯出的骨架 JSON，或試試範例</span>
+    <span class="spacer"></span>
+    <label class="file-btn"><button type="button" tabindex="-1">開啟骨架 JSON</button><input type="file" id="file" accept=".json,application/json" aria-label="開啟骨架 JSON"></label>
+    <label class="file-btn"><button type="button" tabindex="-1" class="primary">從圖層建立角色</button><input type="file" id="layers" accept="image/png" multiple aria-label="選擇圖層 PNG（可多選）"></label>
+    <button type="button" id="ex-layers">範例：圖層角色</button>
+    <button type="button" id="ex-layers-bad">範例：有問題的圖層</button>
+    <button type="button" id="ex-fighter">範例：骨架</button>
+    <button type="button" id="ex-symbol">範例：符號</button>
+  </header>
+  <div class="main">
+    <aside class="col" aria-label="動作清單">
+      <h2>1 · 挑動作</h2>
+      <div class="filters" role="group" aria-label="分類">
+        <button type="button" class="chip" data-cat="all" aria-pressed="true">全部</button>
+        <button type="button" class="chip" data-cat="character" aria-pressed="false">角色</button>
+        <button type="button" class="chip" data-cat="symbol" aria-pressed="false">符號與標題</button>
+        <button type="button" class="chip" id="adv" aria-pressed="false">顯示進階 ★</button>
+      </div>
+      <div class="list" id="list" role="listbox" aria-label="動作"></div>
+      <p class="legend">★★★ 有 Iron Jaw 實測數據，並在 Spine 4.3 runtime 驗證<br>★★ 動畫常規，驗證過流暢<br>★ 要看骨架怎麼做（例如腿部、手臂 IK）</p>
+    </aside>
+    <section class="stage" aria-label="預覽">
+      <div class="stage-head"><span class="title" id="stage-title">—</span><span class="sub" id="stage-sub"></span></div>
+      <canvas id="view" aria-label="動作預覽"></canvas>
+      <div class="transport">
+        <button type="button" id="play">暫停</button>
+        <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="時間軸">
+        <span class="time" id="time">—</span>
+        <label><input type="checkbox" id="onion"> 洋蔥皮</label>
+        <label><input type="checkbox" id="trail" checked> 軌跡</label>
+        <label><input type="checkbox" id="bones-on" checked> 骨骼</label>
+        <label>觀察 <select id="watch" aria-label="觀察骨骼"></select></label>
+      </div>
+      <canvas id="graph" aria-label="觀察骨骼的高度與角度曲線"></canvas>
+    </section>
+    <aside class="col" aria-label="微調">
+      <h2>2 · 微調</h2>
+      <div id="tune"><p class="empty">左邊挑一個動作</p></div>
+      <h2>3 · 匯出</h2>
+      <div class="section">
+        <div class="queue" id="queue"><span class="counts">還沒有加入任何動作</span></div>
+        <div class="actions">
+          <button type="button" class="primary" id="dl-json" disabled>下載動畫 JSON</button>
+          <button type="button" id="dl-recipe" disabled>下載配方</button>
+          <button type="button" id="copy-json" disabled>複製 JSON</button>
+        </div>
+        <span class="field"><span class="hint">動畫 JSON 可用 Spine 4.3 編輯器 Import Data 匯入繼續修，也能直接給遊戲載入。配方可用命令列工具重新產生。</span></span>
+      </div>
+    </aside>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>window.__EXAMPLES__ = /*__EXAMPLES__*/null; window.__LAYERS__ = /*__LAYERS__*/null;</script>
+<script>/*__APP__*/</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+ "skeleton": { "spine": "4.3.26", "x": -150, "y": 0, "width": 320, "height": 640, "fps": 30 },
+ "bones": [
+  { "name": "root" },
+  { "name": "hip", "parent": "root", "y": 300, "rotation": 90, "length": 60, "color": "f2c94cff" },
+  { "name": "chest", "parent": "hip", "x": 60, "length": 120 },
+  { "name": "neck", "parent": "chest", "x": 120, "length": 30 },
+  { "name": "head", "parent": "neck", "x": 30, "rotation": -10, "length": 90 },
+  { "name": "hair1", "parent": "head", "x": 75, "y": 18, "rotation": 150, "length": 32 },
+  { "name": "hair2", "parent": "hair1", "x": 32, "rotation": 12, "length": 30 },
+  { "name": "hair3", "parent": "hair2", "x": 30, "rotation": 10, "length": 26 },
+  { "name": "upperArmF", "parent": "chest", "x": 110, "y": -25, "rotation": -150, "length": 70 },
+  { "name": "foreArmF", "parent": "upperArmF", "x": 70, "rotation": 100, "length": 65 },
+  { "name": "upperArmB", "parent": "chest", "x": 105, "y": 20, "rotation": -150, "length": 70 },
+  { "name": "foreArmB", "parent": "upperArmB", "x": 70, "rotation": 110, "length": 65 },
+  { "name": "thighF", "parent": "root", "x": 15, "y": 300, "rotation": -82, "length": 150 },
+  { "name": "shinF", "parent": "thighF", "x": 150, "rotation": -12, "length": 150 },
+  { "name": "thighB", "parent": "root", "x": -15, "y": 300, "rotation": -98, "length": 150 },
+  { "name": "shinB", "parent": "thighB", "x": 150, "rotation": 8, "length": 150 },
+  { "name": "ik-fist-front", "parent": "root", "x": 110, "y": 451, "color": "ff3f00ff" },
+  { "name": "ik-fist-back", "parent": "root", "x": 57, "y": 454, "color": "ff3f00ff" }
+ ],
+ "constraints": [
+  { "name": "arm-front", "type": "ik", "bones": [ "upperArmF", "foreArmF" ], "target": "ik-fist-front", "bendPositive": false },
+  { "name": "arm-back", "type": "ik", "bones": [ "upperArmB", "foreArmB" ], "target": "ik-fist-back", "bendPositive": false }
+ ],
+ "animations": {}
+}

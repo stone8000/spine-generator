@@ -1,0 +1,12 @@
+{
+  "fps": 30,
+  "roles": { "symbol": "symbol", "title": "title" },
+  "animations": [
+    { "name": "idle", "preset": "symbol-idle", "params": { "symbolSize": 98 } },
+    { "name": "land", "preset": "symbol-land", "params": { "symbolSize": 98 } },
+    { "name": "win", "preset": "symbol-win" },
+    { "name": "win_loop", "preset": "symbol-win-loop" },
+    { "name": "tease", "preset": "tease-shake", "params": { "duration": 1.5 } },
+    { "name": "title_slam", "preset": "text-slam" }
+  ]
+}
