@@ -15,9 +15,26 @@ WHY THIS AND NOT A GRID (SOTA §2 網格, [E2])
 
   The price is that a straight limb gets almost no vertices along its length,
   so it cannot bend smoothly: a joint needs rows of vertices across the limb
-  inside the joint band (SOTA: 2-3 rows, band 1.0-1.5x the local half-width).
-  `bands` inserts those rows as constrained points BEFORE refinement, so the
-  quality pass triangulates around them instead of ignoring them.
+  inside the joint band. `bands` inserts those rows as constrained points
+  BEFORE refinement, so the quality pass triangulates around them instead of
+  ignoring them. Where the rows go is row_offsets(); how long the band is,
+  BAND_EXTENT.
+
+THE BAND IS LONGER THAN SOTA §2 SAYS (measured, E12)
+  SOTA §2 gives a band of 1.0-1.5x the local half-width h. [E1], the numpy
+  experiment that SOTA cites, actually ramped over +-40 px on a limb with
+  h = 20, i.e. +-2h. In the official runtime (elbow42.py, spine-core
+  4.2.120, two-layer synthetic arm, half-angle helper, rows=3) the elbow's
+  inner side folds first at 120 deg with e = 1.25h, at 140 deg with 1.5h,
+  and not before 150 deg with 2h; G2's single-triangle ratio >= 0.3 holds to
+  80 / 90 / 110 deg. That matches the continuum limit of a linear ramp, whose
+  inner side folds at 4 atan(e / 2h) with the helper (128 / 147 / 180 deg).
+  The band's area at 120 deg barely depends on e (0.89-0.90 of the
+  silhouette; continuum 1 - (1 - cos 60)/6 = 0.917 for any e). So
+  BAND_EXTENT is 2.0: same area, much more fold margin. A caller that needs
+  a shorter band (a short forearm, a band that would reach the next joint)
+  passes "extent"; the joint given to weights.compute and to the G2 gate
+  must carry the same "extent".
 
 PIPELINE
   1. art mask: alpha > ALPHA_MIN (Hard Time's threshold), grown by DILATE px
@@ -30,7 +47,8 @@ PIPELINE
      a hole that still collides with the outline is filled instead (filling
      a hole draws transparent texels: it looks the same);
   4. joint-band rows: points where each row crosses the outline are spliced
-     into the outline, interior points are added along the row;
+     into the outline (pushed SPLICE_BULGE off it, see _splice), interior
+     points are added along the row;
   5. PythonCDT: conforming CDT of the outline, refinement to `min_angle`
      (and `max_area`), outer triangles and holes erased;
   6. vertices reordered hull first, in outline order (the editor's hull rule,
@@ -53,12 +71,18 @@ from . import meshtopo
 
 ALPHA_MIN = 8          # alpha > 8 is art (Hard Time grid_mesh, E2)
 DILATE = 1             # px the mask grows before tracing (E2: 1 px, <= 0.7% opaque missed)
-MIN_ISLAND = 30        # px^2: smaller separate specks are dropped (E2 used the same cut)
+MIN_ISLAND = 30        # px^2 after the DILATE growth: smaller separate specks are dropped (E2: same cut)
 MIN_HOLE = 30          # px^2: smaller holes are filled
-BAND_EXTENT = 1.25     # a joint band reaches +-BAND_EXTENT * halfwidth along the limb (SOTA 1.0-1.5)
+BAND_EXTENT = 2.0      # a joint band reaches +-BAND_EXTENT * halfwidth along the limb (module docstring)
+BAND_ROWS = 3          # rows per half band (row_offsets): 8 rows across the band
+CENTER_PAIR = 0.1      # the centre row is a pair at +-0.1 band half-lengths (row_offsets)
 MIN_EDGE = 1.0         # px: refinement never makes edges shorter than this
 MAX_STEINER = 20000    # refinement budget per layer (a safety cap, never reached in practice)
 PAD = 2                # px of empty border added before tracing, so art touching the edge still closes
+SPLICE_BULGE = 0.02    # px a band row's end point is pushed off its outline edge, at most (see _splice)
+CLEAR = 2.0 * MIN_EDGE # px: a row point this close to an outline vertex snaps to it; interior row
+                       # points keep this far from the outline and from each other (closer ones make
+                       # edges the refiner may not split, i.e. slivers it cannot repair)
 
 
 # ---------------------------------------------------------------- public
@@ -68,17 +92,24 @@ def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None):
 
     alpha     (H, W) uint8 layer alpha
     origin    canvas (x, y) of alpha[0, 0]
-    bands     [{"center": (x, y), "axis": (dx, dy), "halfwidth": px, "rows": 2|3,
-                "extent": optional half-length along the axis in halfwidths}] in canvas
-              coordinates; rows of vertices perpendicular to `axis` are inserted
-              at row_offsets(rows) * extent * halfwidth from the center
+    bands     [{"center": (x, y), "axis": (dx, dy), "halfwidth": px,
+                "rows": per half band (default BAND_ROWS),
+                "extent": half-length along the axis in halfwidths (default BAND_EXTENT),
+                "offsets": optional explicit row positions in [-1, 1] (fractions of
+                the half-length; overrides rows)}] in canvas coordinates; rows of
+              vertices perpendicular to `axis` go at row_offsets(rows) * extent *
+              halfwidth from the center, each from outline to outline
     eps       approxPolyDP tolerance in px
     min_angle refinement target in degrees (CDT smallest-angle criterion)
     max_area  optional largest triangle area in px^2
 
     Returns {"verts": (N, 2) canvas, "uvs": (N, 2), "tris": (M, 3) int,
-    "hull": int, "holes": int, "band_rows": [[vertex index, ...] per row, per band],
-    "stats": {...}}.
+    "hull": int (verts[:hull] is the outer outline, in order), "holes": int,
+    "band_rows": per band, per row (in axis order), the vertex indices of that
+    row: its two outline ends first, then its interior points,
+    "stats": {vertices, triangles, hull, holes, min_angle, grid_vertices,
+    unrefined (CDT's counts of what refinement could not fix), missed_art,
+    missed_solid, overdraw, islands_dropped_px, islands_bridged}}.
     """
     alpha = np.asarray(alpha)
     if alpha.ndim != 2:
@@ -153,18 +184,29 @@ def outlines(m):
 
 
 def row_offsets(rows):
-    """Row positions across a band, as fractions of its half-length.
+    """Row positions across a band, as fractions of its half-length e.
 
-    Rows sit at the centres of `rows` equal slices of the band, so with 2 rows
-    (+-1/2) no row lands on a breakpoint of the joint ramp (weights.py: the
-    ends, and the centre when there is a half-angle helper) and every row
-    vertex carries two influences (B2). 3 rows put one on the centre, where
-    a helper rig binds 100% to the helper.
+    Each half of the band (joint centre to band end) is cut into `rows`
+    equal slices and gets a row on every slice boundary, the band's ends
+    included, so the mesh carries the weight ramp's breakpoints exactly
+    (weights.py ramps upper -> helper over one half and helper -> lower
+    over the other). The one boundary that is not a row is the centre:
+    there a half-angle helper owns 100% of the weight, a single influence
+    that B2 would count against the band, so it becomes a pair of rows at
+    +-CENTER_PAIR.  rows=3: -1, -2/3, -1/3, -0.1, 0.1, 1/3, 2/3, 1.
+
+    WHY (E12, research/experiments/py/elbow42.py): without rows on the band
+    ends the mesh's ramp runs on to the next vertex outside the band; without
+    rows near the half-band middles (+-e/2, where a blend is most compressed)
+    and near the centre, the triangles span the bend and lose area. At 120
+    deg this layout keeps 0.90 of the silhouette area where 2 rows at +-e/2
+    kept 0.86-0.88 (continuum limit 0.917).
     """
     rows = int(rows)
     if rows < 1:
-        raise ValueError("a band needs at least one row")
-    return (2 * np.arange(rows) + 1 - rows) / rows
+        raise ValueError("a band needs at least one row per half")
+    half = np.arange(1, rows + 1) / rows          # (0, 1]: slice boundaries of one half, end included
+    return np.concatenate([-half[::-1], [-CENTER_PAIR, CENTER_PAIR], half])
 
 
 def min_angles(verts, tris):
@@ -345,8 +387,10 @@ def _band_points(loops, bands, origin):
 
     Returns (loops, interior points (k, 2), rows) where rows lists, per band
     and row, the layer-space points of that row (to find their vertex
-    indices after triangulation)."""
-    inserts = [[] for _ in loops]  # per loop: (edge index, u, point)
+    indices after triangulation): each row's two outline points where they
+    actually landed (pushed out by the splice bulge, or the outline vertex
+    they snapped to), then its interior points."""
+    inserts = [[] for _ in loops]  # per loop: (edge index, u, point, insert id)
     interior, rows = [], []
     for band in bands:
         c = np.asarray(band["center"], float) - origin
@@ -355,21 +399,27 @@ def _band_points(loops, bands, origin):
         nrm = np.array([-a[1], a[0]])
         hw = float(band["halfwidth"])
         ext = float(band.get("extent", BAND_EXTENT)) * hw
-        offs = row_offsets(band.get("rows", 2)) * ext
-        gap = max(2.0 * ext / max(len(offs), 1), 0.5 * hw)  # spacing along a row ~ spacing between rows
+        if band.get("offsets") is not None:
+            offs = np.sort(np.asarray(band["offsets"], float)) * ext
+        else:
+            offs = row_offsets(band.get("rows", BAND_ROWS)) * ext
+        gap = max(2.0 * ext / max(len(offs) - 1, 1), 0.5 * hw)  # spacing along a row ~ spacing between rows
         band_rows = []
         for s in offs:
-            pts = _row(loops, c + s * a, nrm, hw, gap, inserts, interior)
-            band_rows.append(pts)
+            band_rows.append(_row(loops, c + s * a, nrm, gap, inserts, interior))
         rows.append(band_rows)
-    out = [_splice(lp, ins) for lp, ins in zip(loops, inserts)]
+    landed = {}
+    out = [_splice(lp, ins, li > 0, landed) for li, (lp, ins) in enumerate(zip(loops, inserts))]
+    rows = [[[landed[p] if isinstance(p, int) else p for p in row] for row in band] for band in rows]
     interior = np.array(interior, float).reshape(-1, 2)
     interior = _clear_points(interior, out)
     return out, interior, rows
 
 
-def _row(loops, p0, nrm, hw, gap, inserts, interior):
-    """One row across the limb through p0 along nrm."""
+def _row(loops, p0, nrm, gap, inserts, interior):
+    """One row across the limb through p0 along nrm. Its two outline
+    crossings are queued for splicing (returned as insert ids), its interior
+    points appended to `interior` (returned as points)."""
     hits = []  # (t, loop, edge, u)
     for li, lp in enumerate(loops):
         e = _edges(lp)
@@ -393,9 +443,9 @@ def _row(loops, p0, nrm, hw, gap, inserts, interior):
         return []
     pts = []
     for t, li, k, u in (lo, hi):
-        p = p0 + t * nrm
-        inserts[li].append((k, u, p))
-        pts.append(p)
+        ident = sum(len(x) for x in inserts)
+        inserts[li].append((k, u, p0 + t * nrm, ident))
+        pts.append(ident)
     m = max(1, int(round((t1 - t0) / gap)))
     for j in range(1, m):
         p = p0 + (t0 + (t1 - t0) * j / m) * nrm
@@ -404,38 +454,69 @@ def _row(loops, p0, nrm, hw, gap, inserts, interior):
     return pts
 
 
-def _splice(loop, ins):
-    """Insert points on loop edges (sorted along each edge), skipping any
-    within 0.75 px of a vertex already there."""
+def _splice(loop, ins, hole, landed):
+    """Insert points on loop edges (sorted along each edge).
+
+    A point within CLEAR px of a vertex already there snaps to that vertex.
+    The others are pushed off their edge, away from the art, by
+    SPLICE_BULGE * 4u(1-u) px (u = position along the edge). WHY: a point
+    computed on an edge rounds to either side of it; one that lands ~1e-13 px
+    on the art side leaves an ulp-thin sliver triangle outside the outline,
+    and CDT's refinement then cannot split that edge (Unrefined
+    split_vertex_invalid) and gives up on the whole neighbourhood (min angle
+    8 deg instead of 28). The bulge is strictly concave along the edge, so
+    several points spliced into one edge also stay strictly convex.
+    landed[insert id] receives where each point ended up."""
     if not ins:
         return loop
     by_edge = {}
-    for k, u, p in ins:
-        by_edge.setdefault(k, []).append((u, p))
+    for k, u, p, ident in ins:
+        by_edge.setdefault(k, []).append((u, p, ident))
     out = []
     n = len(loop)
+    away = _away_sign(loop, hole)
     for k in range(n):
         out.append(loop[k])
-        for u, p in sorted(by_edge.get(k, []), key=lambda e: e[0]):
-            if min(np.linalg.norm(p - out[-1]), np.linalg.norm(p - loop[(k + 1) % n])) > 0.75:
-                out.append(p)
+        a, b = loop[k], loop[(k + 1) % n]
+        d = b - a
+        normal = away * np.array([d[1], -d[0]]) / max(np.linalg.norm(d), 1e-300)
+        for u, p, ident in sorted(by_edge.get(k, []), key=lambda e: e[0]):
+            if np.linalg.norm(p - out[-1]) <= CLEAR:
+                landed[ident] = out[-1]
+            elif np.linalg.norm(p - b) <= CLEAR:
+                landed[ident] = b
+            else:
+                q = p + normal * (SPLICE_BULGE * 4.0 * u * (1.0 - u))
+                out.append(q)
+                landed[ident] = q
     return np.array(out, float)
+
+
+def _away_sign(loop, hole):
+    """+1 when (dy, -dx) of the loop's edges points away from the art, else -1.
+
+    For a counter-clockwise loop (positive shoelace area in these
+    coordinates) (dy, -dx) is the outward normal; the art is inside the
+    outer loop and outside a hole."""
+    x, y = loop[:, 0], loop[:, 1]
+    ccw = float((x * np.roll(y, -1) - np.roll(x, -1) * y).sum()) > 0
+    return (1.0 if ccw else -1.0) * (-1.0 if hole else 1.0)
 
 
 def _clear_points(pts, loops):
     """Interior points strictly inside the outline, out of the holes, and at
-    least 1 px from every outline edge and from each other."""
+    least CLEAR px from every outline edge and from each other."""
     if not len(pts):
         return pts
     keep = inside(loops[0], pts)
     for hole in loops[1:]:
         keep &= ~inside(hole, pts)
     for lp in loops:
-        keep &= _dist_to_edges(pts, _edges(lp)) > 1.0
+        keep &= _dist_to_edges(pts, _edges(lp)) > CLEAR
     pts = pts[keep]
     out = []
     for p in pts:
-        if all(np.linalg.norm(p - q) > 1.0 for q in out):
+        if all(np.linalg.norm(p - q) > CLEAR for q in out):
             out.append(p)
     return np.array(out, float).reshape(-1, 2)
 

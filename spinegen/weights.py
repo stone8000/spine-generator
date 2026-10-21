@@ -11,9 +11,16 @@ WHY TWO METHODS (SOTA §2 權重)
 
   * At a joint the blend must be a controlled ramp across the limb, wide
     enough that the inner side does not fold: a piecewise-linear ramp over
-    the joint band, upper -> helper -> lower when the rig has a half-angle
-    helper bone (each half then only spans half the angle, [E1]: 0 folds at
-    60/90/120 deg, area 0.98/0.97/0.94 in numpy), upper -> lower without one.
+    the joint band |s| <= e (s along the limb from the joint centre, e =
+    extent x halfwidth, default mesh.BAND_EXTENT = 2), upper -> helper ->
+    lower when the rig has a half-angle helper bone (each half then only
+    spans half the angle), upper -> lower without one. In the official
+    runtime (E12, research/experiments/py/elbow42.py) the helper version of
+    a two-layer synthetic arm has 0 folds to 150 deg and keeps 0.90 of the
+    band's silhouette area at 120 deg; without the helper it folds from 130
+    deg and keeps 0.74. Continuum limits for a linear ramp: area 1 - (1 -
+    cos D)/6 (D the angle between the two blended bones), first fold at
+    2 atan(e/h), or 4 atan(e/2h) with the helper (h the limb half-width).
   * Everywhere else (a torso, a tail, a cape, the far end of a limb) the
     weights should follow the SHAPE, not straight-line distance: Pinocchio's
     bone heat (Baran & Popovic 2007), as Blender implements it. Each bone
@@ -23,7 +30,11 @@ WHY TWO METHODS (SOTA §2 權重)
 
   The two meet without a seam: band vertices are fixed to the ramp (Dirichlet
   values) and the heat equation is solved for the rest, so weights are
-  continuous across the band edge.
+  continuous across the band edge. mesh.build puts a vertex row on each band
+  end; those vertices are pinned to the ramp's end values (100% upper or
+  lower), so the ramp stops where the band does instead of diffusing on.
+  Overlapping layers at a joint (upper arm over forearm) get the same ramp
+  at the same canvas point, so they deform together and the seam stays shut.
 
 BONE HEAT IN 2D (Pinocchio; Blender meshlaplacian.cc heat_bone_weighting)
   For each bone j solve  (L + D H) w_j = D H p_j  where
@@ -59,6 +70,9 @@ C_WEIGHT = 1.0       # Pinocchio's c (Blender C_WEIGHT)
 DIST_EPS = 1e-4      # Blender DISTANCE_EPSILON: bones within (1 + eps) x the nearest distance tie
 MIN_DIST = 0.5       # px: a vertex on a bone still gets a finite H
 LATERAL = 1.6        # a joint band reaches this many halfwidths sideways from the joint's bones
+END_TOL = 0.5        # px: mesh.build puts a vertex row on each band end; a vertex this close to an
+                     # end belongs to the band (pinned to the ramp's end value) but is not "inside"
+                     # it for B2 (it carries one influence by design)
 B2_MIN = 0.9         # SOTA §5 B2: >= 90% of joint-band vertices have >= 2 influences
 
 
@@ -73,8 +87,10 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
               holes) for the visibility test
     bones     [{"name", "head": (x, y), "tail": (x, y)}]; head == tail is a point bone
     joints    [{"center", "upper", "helper" (name or None), "lower", "halfwidth",
-               optional "axis", "extent" (band half-length in halfwidths, default
-               mesh.BAND_EXTENT)}]
+               optional "axis" (default: mean direction of the upper and lower
+               bones), "extent" (band half-length in halfwidths, default
+               mesh.BAND_EXTENT; give the mesh band the same)}]; every bone a
+              joint names must be in `bones`
     mode      "auto": heat + joint ramps; "heat": heat only; "rigid": every vertex
               100% on bones[0] (the old cut-out, for comparison)
     visibility  False switches the 2D visibility test off (Euclidean nearest
@@ -83,6 +99,12 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
     names = [b["name"] for b in bones]
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
+    if not bones:
+        raise ValueError("no bones")
+    for j in joints if mode == "auto" else ():
+        missing = [j[k] for k in ("upper", "lower", "helper") if j.get(k) and j[k] not in names]
+        if missing:
+            raise ValueError(f"joint at {tuple(j['center'])} names bones not in `bones`: {missing}")
     n = len(verts)
     if mode == "rigid":
         return [[(names[0], 1.0)] for _ in range(n)]
@@ -174,12 +196,12 @@ def band_coords(verts, joint, bones):
 
 
 def band_mask(verts, joint, bones, strict=False):
-    """Vertices in the joint band: |s| <= half-length (strictly inside with
-    `strict`, which leaves out the ramp's end points) and within LATERAL
-    halfwidths of the joint's bones."""
+    """Vertices in the joint band: |s| <= half-length + END_TOL (with
+    `strict`: |s| < half-length - END_TOL, which leaves out the rows on the
+    band's ends) and within LATERAL halfwidths of the joint's bones."""
     s, lat = band_coords(verts, joint, bones)
     _, _, hw, ext = joint_frame(joint, bones)
-    along = np.abs(s) < ext * (1 - 1e-6) if strict else np.abs(s) <= ext
+    along = np.abs(s) < ext - END_TOL if strict else np.abs(s) <= ext + END_TOL
     return along & (lat <= LATERAL * hw)
 
 

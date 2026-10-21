@@ -298,7 +298,8 @@ class Frag:
 class Frame:
     """A rendered frame: composite image plus what the gates need."""
 
-    def __init__(self, canvas, world, slots, frags, image, top, top_texel, geoms):
+    def __init__(self, canvas, world, slots, frags, image, top, top_texel, geoms, renderer=None,
+                 attachments=None, deform=None):
         self.canvas = canvas
         self.world = world          # bone world matrices (lbs order)
         self.slots = slots          # drawn slot names, draw order
@@ -307,6 +308,10 @@ class Frame:
         self.top = top              # (H, W) int16: index into slots of the topmost slot with alpha >= 0.5, -1 none
         self.top_texel = top_texel  # (H, W) int64: that slot's texel
         self.geoms = geoms          # {slot: SlotGeom}
+        self.renderer = renderer    # the Renderer that drew it (its IR, evaluator, textures)
+        self.attachments = attachments  # the attachment overrides it was drawn with
+        self.deform = deform        # the deform offsets it was drawn with
+        self.cache = {}             # per-frame derived data (the art gates keep rest-frame facts here)
 
     @property
     def shape(self):
@@ -460,7 +465,9 @@ class Renderer:
         frags = {}
         for name, g in geoms.items():
             frags[name] = reuse[name] if reuse and name in reuse else self.fragments(g, canvas)
-        return self.composite(canvas, world, geoms, frags)
+        fr = self.composite(canvas, world, geoms, frags)
+        fr.attachments, fr.deform = attachments, deform
+        return fr
 
     def composite(self, canvas, world, geoms, frags):
         n = canvas.H * canvas.W
@@ -485,7 +492,7 @@ class Renderer:
             top_tex[f.idx[solid]] = f.texel[solid]
         np.clip(img, 0.0, 1.0, out=img)
         return Frame(canvas, world, names, frags, img.reshape(canvas.H, canvas.W, 4),
-                     top.reshape(canvas.shape), top_tex.reshape(canvas.shape), geoms)
+                     top.reshape(canvas.shape), top_tex.reshape(canvas.shape), geoms, renderer=self)
 
     # ---- texture space
 

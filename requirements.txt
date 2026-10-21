@@ -1,0 +1,12 @@
+# spinegen Python dependencies (Python >= 3.12). Versions are the ones the
+# tests ran against; licenses checked for a public repo (SOTA §6).
+# The QA oracle (qa/, Node) has its own exact pins in qa/package.json.
+numpy>=2.0                      # BSD-3-Clause
+scipy>=1.11                     # BSD-3-Clause; sparse solves for bone heat (spinegen/weights.py)
+opencv-python-headless>=4.8     # Apache-2.0; contours, rasterising (spinegen/mesh.py, raster.py)
+PythonCDT==2.0.2                # MPL-2.0 AND BSD-3-Clause AND Apache-2.0 WITH LLVM-exception;
+                                # constrained Delaunay + refinement (spinegen/mesh.py), linked, unmodified
+Pillow>=10                      # MIT-CMU (HPND); PNG read/write
+pytest>=8                       # MIT; tests only
+# Not used in library code: `triangle` (Shewchuk's Triangle needs the author's
+# licence for commercial use; research/experiments/py/elbow.py [E1] only).
