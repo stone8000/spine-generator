@@ -366,9 +366,11 @@ def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=
         slots at any angle), box-filtered down: how the pose reads;
       * the joint close-up, pixel for pixel (nearest-neighbour up): what
         the gates read, at the renderer's own 1:1 pixels;
-      * the same close-up with every FAILING gate's pixels painted over:
-        magenta G4 seam gap, yellow G6a exposed band, cyan G6b revealed
-        duplicate paint, red G5 hole (+ "fold"/"area" in the caption).
+      * a 1:1 close-up centred on the first failing pixel gate's pixels
+        (the joint when none fails; G6b's duplicate can sit far from the
+        joint), with every failing gate painted over: magenta G4 seam gap,
+        yellow G6a exposed band, cyan G6b revealed duplicate paint, red G5
+        hole (+ G1/G2 values in the caption).
     Frames are green while the soft limit holds, amber to the hard limit,
     red past it (grey without a budget). The point of the sheet is to LOOK
     at the first failing angle and check it is visibly broken."""
@@ -398,11 +400,19 @@ def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=
                 limb = Image.fromarray(_on_white(limb)).resize((thumb, thumb), Image.BOX)
                 cn = ag.center_now(p.rest, fr, p.jr.j)
                 raw = _window(fr, cn, half)
-                over = raw.copy()
-                notes = []
-                if res is not None:
-                    notes = _paint_failures(p, fr, res, cn, half, over)
+                masks, notes = _failures(p, fr, res) if res is not None else ({}, [])
+                focus, where = cn, "joint"
+                for k in ("seam", "hole", "ghost_band", "ghost_paint"):
+                    if k in masks and masks[k].any():
+                        ii, jj = np.nonzero(masks[k])
+                        focus = fr.canvas.to_world([[jj.mean() + 0.5, ii.mean() + 0.5]])[0]
+                        where = k
+                        break
+                over = _window(fr, focus, half)
+                _paint(fr, masks, focus, half, over)
                 big = [Image.fromarray(x).resize((thumb, thumb), Image.NEAREST) for x in (raw, over)]
+                if where != "joint":
+                    ImageDraw.Draw(big[1]).text((3, 2), f"at {where}", fill=(0, 0, 0))
                 col = (150, 150, 150)
                 if lim:
                     col = (40, 160, 60) if a <= lim["soft"] else (230, 150, 20) if a <= lim["hard"] else (210, 40, 40)
@@ -417,7 +427,8 @@ def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=
                 text += (f"\nsoft {lim['soft']:g}  hard {lim['hard']:g}\n{lim['limit_by']}\nhard: {lim['hard_by']}")
                 for gid, ff in sorted((lim.get("first_fail") or {}).items(), key=lambda kv: abs(kv[1]["angle"])):
                     text += f"\n{gid} {ff['angle']:+g}"
-            text += "\n\nrows: limb / joint 1:1 /\nfailing gates painted\nmagenta seam, yellow band,\ncyan ghost paint, red hole"
+            text += ("\n\nrows: limb / joint 1:1 /\nfirst failure 1:1, painted:\nmagenta G4 seam, yellow G6a,\n"
+                     "cyan G6b, red G5")
             lab = Image.new("RGB", (label_w, tiles[0].height), (255, 255, 255))
             ImageDraw.Draw(lab).multiline_text((6, 6), text, fill=(0, 0, 0))
             row = Image.new("RGB", (label_w + sum(t.width for t in tiles), tiles[0].height), (255, 255, 255))
@@ -455,38 +466,43 @@ def _window(frame, center, half):
     return out
 
 
-def _paint_failures(probe, frame, res, center, half, img):
-    """Paint the failing gates' pixels into the close-up `img` (in place);
-    returns caption notes."""
-    c = frame.canvas
-    H, W = c.shape
-    full = {}
+def _failures(probe, frame, res):
+    """({gate: full-canvas bool mask}, caption notes) of the failing gates."""
+    H, W = frame.canvas.shape
     g = res["gates"]
-    notes = []
+    masks, notes = {}, []
     if not g["seam"]["pass"]:
         m = ag.seam_gap(probe.rest, frame, probe.joint, masks=True)["masks"]
-        full["seam"] = _unbox(m["gap"], m["box"], (H, W))
+        masks["seam"] = _unbox(m["gap"], m["box"], (H, W))
         notes.append(f"G4:{g['seam']['value']}px")
     if not g["ghost_band"]["pass"]:
         m = ag.ghost_band(probe.rest, frame, probe.joint, masks=True)["masks"]
-        full["ghost_band"] = _unbox(m["ghost"], m["box"], (H, W))
+        masks["ghost_band"] = _unbox(m["ghost"], m["box"], (H, W))
         notes.append(f"G6a:{g['ghost_band']['value']:.0f}")
     if not g["ghost_paint"]["pass"]:
-        full["ghost_paint"] = ag.ghost_paint(probe.rest, frame, masks=True)["masks"]["revealed"]
+        masks["ghost_paint"] = ag.ghost_paint(probe.rest, frame, masks=True)["masks"]["revealed"]
         notes.append(f"G6b:{g['ghost_paint']['value']:.2f}")
     if not g["hole"]["pass"]:
-        full["hole"] = ag.holes(probe.rest, frame, masks=True)["masks"]["holes"]
+        masks["hole"] = ag.holes(probe.rest, frame, masks=True)["masks"]["holes"]
         notes.append(f"G5:{g['hole']['value']}")
     if not g["fold"]["pass"]:
         notes.append(f"G1:{g['fold']['value']}")
     if not g["area"]["pass"]:
         notes.append(f"G2:{g['area']['value']:.2f}")
+    return masks, notes
+
+
+def _paint(frame, masks, center, half, img):
+    """Paint full-canvas gate masks into the window `img` (as cut by
+    _window around `center`), in place."""
+    c = frame.canvas
+    H, W = c.shape
     cx, cy = c.to_px([center])[0]
     r = int(math.ceil(half * c.scale))
     i0, j0 = int(math.floor(cy)) - r, int(math.floor(cx)) - r
     n = img.shape[0]
     for key in ("ghost_paint", "ghost_band", "hole", "seam"):
-        m = full.get(key)
+        m = masks.get(key)
         if m is None:
             continue
         win = np.zeros((n, n), bool)
@@ -499,7 +515,6 @@ def _paint_failures(probe, frame, res, center, half, img):
             img[win] = col.astype(np.uint8)
         else:
             img[win] = np.clip(img[win] * 0.45 + col * 0.55, 0, 255).astype(np.uint8)
-    return notes
 
 
 def _unbox(mask, box, shape):
