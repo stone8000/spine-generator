@@ -58,7 +58,7 @@ def test_hard_limit_keeps_g4s_speck_rule(monkeypatch):
     what the rule drops ends neither a hold nor a strike."""
     ir, images, joints = synth_art.build(scale=SCALE, mode="rigid", overlap=0, round_ends=False)
     elbow = next(j for j in budget.load_joints(joints) if j["name"] == "elbow_l")
-    p = budget.Probe(ir, images, elbow, 1.0, canvas=budget.scan_canvas(ir, images, joints, 60))
+    p = budget.Probe(ir, images, elbow, 1.0, canvas=budget.scan_canvas(ir, images, 60))
     assert p.judge(0)["hard"]
     r = p.judge(4)
     g = r["gates"]["seam"]
@@ -162,10 +162,30 @@ def test_shard_in_the_forearm_is_an_art_request_not_a_limit():
     assert g["joints"]["elbow_l"]["+"]["limit_by"] == "ghost@torso|forearm_l" and g["artreq"] == []
 
 
+def test_only_scans_on_the_same_canvas_as_the_full_scan():
+    """P2 review F4: the canvas was the box of the scanned joints' sweeps,
+    so a partial scan rendered on a shifted pixel grid and read the same
+    joint differently. It is the whole rig's now, integer-aligned."""
+    ir, images, joints = synth_art.build(scale=SCALE, mode="joint", arms=2, legs=2)
+    names = [j["name"] for j in budget.load_joints(joints)]
+    assert len(names) > 2
+    full = budget.scan(ir, images, joints, step=20.0, max_angle=60.0)
+    for only in ({"elbow_l"}, {names[-1]}):
+        part = budget.scan(ir, images, joints, step=20.0, max_angle=60.0, only=only)
+        assert part["meta"]["canvas"] == full["meta"]["canvas"]
+        for n in only:
+            for d in ("+", "-"):
+                a, b = part["joints"][n][d], full["joints"][n][d]
+                assert {k: a[k] for k in ("soft", "hard", "limit_by", "hard_by", "first_fail")} == \
+                    {k: b[k] for k in ("soft", "hard", "limit_by", "hard_by", "first_fail")}, (n, d)
+    c = full["meta"]["canvas"]
+    assert all(float(v).is_integer() for v in c["origin"] + c["size"])
+
+
 def test_scan_canvas_holds_the_swung_limb():
     ir, images, joints = synth_art.build(scale=SCALE, mode="rigid")
     small = raster.Renderer(ir, images).canvas
-    big = budget.scan_canvas(ir, images, joints, 180)
+    big = budget.scan_canvas(ir, images, 180)
     assert big.w > small.w and big.h > small.h
     r = raster.Renderer(ir, images, canvas=big)
     rot = {b["name"]: b["rotation"] for b in ir["bones"]}

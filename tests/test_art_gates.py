@@ -27,7 +27,7 @@ SCALE = 0.5   # ~300 px tall fixtures: every gate still has tens of pixels to re
 @functools.lru_cache(maxsize=None)
 def _rig(**kw):
     ir, images, joints = synth_art.build(scale=SCALE, **kw)
-    canvas = budget.scan_canvas(ir, images, joints, 180)
+    canvas = budget.scan_canvas(ir, images, 180)
     return ir, images, {j["name"]: j for j in budget.load_joints(joints)}, canvas
 
 
@@ -61,6 +61,24 @@ def test_g2_band_area():
     assert not bad["pass"] and bad["value"] < 0.9 and bad["worst"] == "upper_arm_l"
     # a rest frame is exactly 1
     assert ag.band_area_ratio(p.rest, p.rest, p.joint)["value"] == pytest.approx(1.0)
+
+
+def test_g2_single_triangles_count_in_soft():
+    """P2 review F3: SOTA §5 G2 is the band sum >= 0.9 AND every band
+    triangle within [0.3, 3]. At 80 deg the joint elbow's band still holds
+    0.91 in sum while its crook triangles are crushed to ~0.06: G2 fails
+    by "tris" (it passed on the sum alone before)."""
+    p = _probe("elbow_l", mode="joint")
+    for a in (80, -80):
+        g = ag.band_area_ratio(p.rest, p.frame(a), p.joint)
+        assert g["value"] >= ag.MIN_BAND_RATIO and g["tri_min"] < ag.TRI_RANGE[0]
+        assert not g["pass"] and g["by"] == ["tris"] and g["tri_out_of_range"] > 0
+        assert g["tri_worst"]["ratio"] < ag.TRI_RANGE[0] and g["worst"] == g["tri_worst"]["slot"]
+        assert ag.band_area_ratio(p.rest, p.frame(a), p.joint, strict_tris=False)["pass"]
+    assert ag.band_area_ratio(p.rest, p.frame(40), p.joint)["pass"]
+    # the budget names the triangle's slot, not the band
+    r = p.judge(80)
+    assert not r["soft"] and r["soft_by"].startswith("tri@")
 
 
 def test_g2_one_sided_band_is_read_where_it_deforms():

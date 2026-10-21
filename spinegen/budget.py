@@ -56,7 +56,8 @@ OUTPUT (budget.json)
   "+" is a positive local rotation of the bone (counter-clockwise, y up).
   limit_by is "<gate>@<where>" for the soft limit (fold@slot, hole@slot,
   seam@upper|lower, ghost@slot (G6a band) or ghost@revealed|occluder (G6b
-  paint), area@<joint>_band); hard_by the same for the
+  paint), area@<joint>_band (G2 summed band area) or tri@slot (G2: a band
+  triangle of that slot left [0.3, 3])); hard_by the same for the
   hard limit; limits lists every soft gate that failed at the first failing
   angle. A limit that never fails within max_angle is max_angle with
   limit_by null.
@@ -200,7 +201,8 @@ class Probe:
 
 def _label(gate, res, jr):
     if gate == "area":
-        return f"area@{jr.name}_band"
+        # the band's summed area, or (G2's per-triangle range) one triangle
+        return f"area@{jr.name}_band" if "band" in res.get("by", ["band"]) else f"tri@{res['worst']}"
     if gate == "seam":
         return f"seam@{res['worst'] or jr.name}"
     return f"{gate.split('_')[0]}@{res['worst']}"
@@ -304,26 +306,39 @@ def verify(probe, sign, angle, step, max_angle, which):
     return a, None, n
 
 
-def scan_canvas(ir, images, joints, max_angle=180.0, skin=None, margin=0.05):
-    """A world canvas holding the setup pose AND every joint's moving
-    slots at any angle up to max_angle (sampled every 45 deg). The default
-    renderer canvas is the setup box + 10%; an arm swung out of it would
-    leave the frame, and G5 counts a background component touching the
-    canvas edge as open, so a hole the arm closes off-canvas would be
-    missed."""
+def scan_canvas(ir, images, max_angle=180.0, skin=None, margin=0.05):
+    """A world canvas holding the setup pose AND every bone of the rig
+    turned on its own to any angle up to max_angle (sampled every 45 deg,
+    IK off as in the sweep), grown by `margin` and snapped outward to whole
+    world units, so its origin is integer-aligned.
+
+    WHY the whole rig, not the joints being scanned: the gates read pixels,
+    and a pixel grid that moves moves the numbers. The canvas used to be
+    the box of the scanned joints' sweeps, so `--only arms` rendered on a
+    different (fractionally offset) grid than the full scan, and the same
+    joint read differently (the joint monkey's shoulder_l -: 20 vs 18 deg,
+    hip_l: 8/6 vs 10/26). Every bone, whatever is scanned, gives one
+    canvas per rig and max_angle; the integer origin keeps any two such
+    canvases on the same lattice.
+    WHY the canvas is that big at all: the default renderer canvas is the
+    setup box + 10%; an arm swung out of it would leave the frame, and G5
+    counts a background component touching the canvas edge as open, so a
+    hole the arm closes off-canvas would be missed."""
     r = raster.Renderer(ir, images, skin=skin, missing="skip")
     ev = r.ev
     state = {c["name"]: {"mix": 0.0} for c in ir["ik"]}
     pts = [r.setup_points(ev.world(None, state))]
-    for j in load_joints(joints):
-        if j["bone"] not in ev.index:
+    for b in ir["bones"]:
+        if b["parent"] is None:
             continue
-        rot0 = ir["bones"][ev.index[j["bone"]]]["rotation"]
         for k in range(-4, 5):
             a = 45.0 * k
             if k and abs(a) <= max_angle + 1e-9:
-                pts.append(r.setup_points(ev.world({j["bone"]: {"rotation": rot0 + a}}, state)))
-    return raster.bbox_canvas(np.concatenate(pts), margin)
+                pts.append(r.setup_points(ev.world({b["name"]: {"rotation": b["rotation"] + a}}, state)))
+    c = raster.bbox_canvas(np.concatenate(pts), margin)
+    x0, y1 = math.floor(c.x0), math.ceil(c.y0)  # y up: the canvas origin is its top-left corner
+    x1, y0 = math.ceil(c.x0 + c.w), math.floor(c.y0 - c.h)
+    return raster.Canvas((float(x0), float(y1)), (float(x1 - x0), float(y1 - y0)), 1.0)
 
 
 def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=True, skin=None, only=None,
@@ -339,7 +354,7 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=T
     joints = load_joints(joints)
     if only:
         joints = [j for j in joints if j["name"] in only]
-    canvas = canvas or scan_canvas(ir, images, joints, max_angle, skin)
+    canvas = canvas or scan_canvas(ir, images, max_angle, skin)  # the whole rig's, whatever `only` says
     coarse_cache, full_cache = {}, {}
     artreq = {}
     out = {"schema": SCHEMA, "joints": {}, "meta": {"step": step, "max_angle": max_angle, "scale": scale,
@@ -554,7 +569,8 @@ def _failures(probe, frame, res):
     if not g["fold"]["pass"]:
         notes.append(f"G1:{g['fold']['value']}")
     if not g["area"]["pass"]:
-        notes.append(f"G2:{g['area']['value']:.2f}")
+        bad = g["area"].get("tri_out_of_range") if "tris" in g["area"].get("by", []) else 0
+        notes.append(f"G2:{g['area']['value']:.2f}" + (f"/{bad}t" if bad else ""))
     return masks, notes
 
 

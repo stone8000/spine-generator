@@ -81,8 +81,12 @@ WHERE THE DEFINITIONS COME FROM
   lies in the joint band (+-1.25 halfwidths along the limb, +-1.6 across,
   as spinegen.weights draws it), oriented by each mesh's setup winding, so
   a fold subtracts: posed / rest >= 0.9 (the budget's soft limit; SOTA
-  allows 0.85 outside holds). The single-triangle ratio range [0.3, 3] is
-  reported and enforced only with strict_tris.
+  allows 0.85 outside holds), AND every one of those triangles keeps its
+  own posed / rest area within [0.3, 3] (SOTA §5 G2 names both). The sum
+  alone let a band hide a crushed or stretched triangle behind the others
+  (P2 review F3: the monkey's elbows read 98-110 deg on the sum while
+  single band triangles left the range from 60-80 deg); strict_tris=False
+  keeps the old sum-only reading for comparison.
   G1 FOLDS is lbs' count (the same definition as qa/run.mjs G1).
 
 UNITS
@@ -563,14 +567,21 @@ def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
     return out
 
 
-def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=False):
+def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=True):
     """G2: posed / rest signed area of the joint band's triangles (each mesh
-    oriented by its setup winding, so folded triangles subtract)."""
+    oriented by its setup winding, so folded triangles subtract) >=
+    min_ratio, and, with strict_tris (default, SOTA §5), every band
+    triangle's own ratio inside tri_range. "by" says which part failed
+    ("band", "tris" or both); `worst` is the slot with the lowest ratio when
+    the band fails, else the slot with the most triangles out of range;
+    "tri_worst" names that slot's most extreme triangle (index into its
+    mesh, ratio)."""
     jr = joint_rest(rest, joint)
     ev = rest.renderer.ev
     refs = ev.fold_references()
     num = den = 0.0
     tri_min, tri_max, bad, per = math.inf, -math.inf, 0, {}
+    extreme = {}
     for s, k in band_triangles(rest, jr):
         g0, g1 = rest.geoms[s], frame.geoms.get(s)
         if g1 is None:
@@ -580,23 +591,39 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
         a0 = lbs.signed_areas(g0.xy, g0.tris[k]) * su * ref
         a1 = lbs.signed_areas(g1.xy, g1.tris[k]) * su * ref
         ok = a0 > 1e-9
-        a0, a1 = a0[ok], a1[ok]
+        a0, a1, kk = a0[ok], a1[ok], k[ok]
         if not len(a0):
             continue
         num += a1.sum()
         den += a0.sum()
         r = a1 / a0
         tri_min, tri_max = min(tri_min, r.min()), max(tri_max, r.max())
-        nb = int(((r < tri_range[0]) | (r > tri_range[1])).sum())
+        out = (r < tri_range[0]) | (r > tri_range[1])
+        nb = int(out.sum())
         bad += nb
         per[s] = {"ratio": float(a1.sum() / a0.sum()), "tris": int(len(a0)), "tri_out_of_range": nb}
+        if nb:
+            # most extreme = furthest outside the range on a log scale
+            dist = np.maximum(np.log(tri_range[0] / np.maximum(r, 1e-9)), np.log(np.maximum(r, 1e-9) / tri_range[1]))
+            i = int(np.argmax(np.where(out, dist, -np.inf)))
+            extreme[s] = (int(kk[i]), float(r[i]))
     if den <= 0:
         return _result("G2_AREA", 1.0, True, None, joint=jr.name, note="no mesh triangles in the band")
     ratio = num / den
-    ok = ratio >= min_ratio and (bad == 0 or not strict_tris)
-    worst = None if ok else min(per, key=lambda s: per[s]["ratio"])
-    return _result("G2_AREA", float(ratio), ok, worst, joint=jr.name, min=min_ratio,
-                   tri_min=float(tri_min), tri_max=float(tri_max), tri_out_of_range=bad, slots=per)
+    band_ok = ratio >= min_ratio
+    tris_ok = bad == 0 or not strict_tris
+    by = [n for n, good in (("band", band_ok), ("tris", tris_ok)) if not good]
+    worst = tri_worst = None
+    if not band_ok:
+        worst = min(per, key=lambda s: per[s]["ratio"])
+    elif not tris_ok:
+        worst = max(per, key=lambda s: per[s]["tri_out_of_range"])
+    if bad:
+        w = worst if worst in extreme else max(extreme, key=lambda s: per[s]["tri_out_of_range"])
+        tri_worst = {"slot": w, "tri": extreme[w][0], "ratio": extreme[w][1]}
+    return _result("G2_AREA", float(ratio), band_ok and tris_ok, worst, joint=jr.name, min=min_ratio,
+                   tri_min=float(tri_min), tri_max=float(tri_max), tri_out_of_range=bad, tri_range=list(tri_range),
+                   strict_tris=bool(strict_tris), by=by, tri_worst=tri_worst, slots=per)
 
 
 # ---------------------------------------------------------------- G4
