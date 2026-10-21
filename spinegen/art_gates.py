@@ -24,11 +24,17 @@ WHERE THE DEFINITIONS COME FROM
     of a skinned one; a limb that swings whole carries every point back
     to where it was, so motion alone never reads as a tear.
   G4 SEAM GAP counts pixels inside the convex hull of the band as both parts
-  carry it into the frame, within the disk of radius 1.5 x halfwidth around
-  the (posed) joint, eroded by 1 px, that the two parts together leave below
-  alpha 0.5 and that at least one part, carried back, finds drawn at setup.
-  The hull is the joint's own extent (the far end of a swinging limb never
-  counts); the rest test keeps a notch the art already had from counting.
+  carry it into the frame (each part carrying the band pixels it drew
+  itself), within the disk of radius 1.5 x halfwidth around the (posed)
+  joint, eroded by 1 px, that the two parts together leave below alpha 0.5
+  and that at least one part, carried back, finds drawn at setup and not on
+  the rest drawing's 1 px rim. The hull is the joint's own extent (the far
+  end of a swinging limb, or the crook of a bent one, never counts); the
+  rest test keeps a notch the art already had from counting, and the rim
+  erosion keeps an anti-aliased outline that recedes by a pixel from
+  reading as a tear. A jagged outline (fur) that turns still opens real
+  1-2 px notches inside the hull; at 0 px those count (SOTA §8.3 expects
+  this threshold to be calibrated on reference characters).
   G6 GHOST (a) takes the pixels only one part draws whose own carry-back
   lands in the band but whose partner's carry-back finds nothing drawn at
   setup: the overlap swung clear of its partner. Its LENGTH is how far it
@@ -72,7 +78,7 @@ import math
 import numpy as np
 
 from . import lbs
-from .raster import COVER, QUAD_TRIS
+from .raster import COVER
 
 DISK = 1.5             # G4 disk radius, in limb halfwidths
 BAND_EXTENT = 1.25     # G2 band half-length along the limb, halfwidths (= spinegen.mesh/weights)
@@ -82,7 +88,7 @@ TRI_RANGE = (0.3, 3.0)  # G2 single-triangle ratio range
 HOLE_MIN_AREA = 16.0   # G5, px at scale 1
 GHOST_MAX_LEN = 0.25   # G6(a), x limb width
 GHOST_MAX_NCC = 0.3    # G6(b)
-NCC_MIN_PX = 16.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1)
+NCC_MIN_PX = 64.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1; see ghost_paint)
 NCC_ERODE = 2.0        # G6(b) correlates only revealed pixels this far (px, scale 1) inside the revealed patch
 
 
@@ -342,6 +348,10 @@ class JointRest:
         self.U0 = union_alpha(rest, self.upper_slots) >= COVER
         self.L0 = union_alpha(rest, self.lower_slots) >= COVER
         self.drawn0 = self.U0 | self.L0
+        # G4's "1 px erosion" applied to what the parts drew at rest: a pixel
+        # on the rest silhouette's rim is not a place a tear can open, only a
+        # place where the outline recedes by a pixel as a piece turns
+        self.drawn0_in = cv2.erode(self.drawn0.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
         # where the two drawings overlap or MEET (1 px): a cut-out whose
         # pieces only abut has a seam line and no overlap, and tears too
         k = np.ones((3, 3), np.uint8)
@@ -352,21 +362,28 @@ class JointRest:
         self.band = band
         ii, jj = np.nonzero(band)
         self.band_world = c.to_world(np.stack([jj + 0.5, ii + 0.5], 1))
-        self.band_up = self.upper.locate(self.upper.rest_tris, self.band_world)
-        self.band_lo = self.lower.locate(self.lower.rest_tris, self.band_world)
+        # each part carries only the band pixels it drew itself: a rim pixel
+        # only the forearm drew is not the sleeve's to hold in place, and
+        # carrying it with the sleeve would read the forearm's outline moving
+        # by a pixel as a tear
+        self.band_mine_up = self.U0[ii, jj]
+        self.band_mine_lo = self.L0[ii, jj]
+        self.band_up = self.upper.locate(self.upper.rest_tris, self.band_world[self.band_mine_up])
+        self.band_lo = self.lower.locate(self.lower.rest_tris, self.band_world[self.band_mine_lo])
 
     @property
     def readable(self):
         """A joint with no band (the parts do not meet at rest) is a SKIP."""
         return bool(self.band.any()) and bool(self.upper_slots) and bool(self.lower_slots)
 
-    def rest_drawn(self, world_pts):
-        """Did either part draw these setup-pose world points at rest?"""
+    def rest_drawn(self, world_pts, interior=False):
+        """Did either part draw these setup-pose world points at rest?
+        interior=True: and not on the drawing's 1 px rim."""
         c = self.rest.canvas
         px = np.floor(c.to_px(world_pts)).astype(np.int64)
         ok = (px[:, 0] >= 0) & (px[:, 0] < c.W) & (px[:, 1] >= 0) & (px[:, 1] < c.H)
         out = np.zeros(len(px), bool)
-        out[ok] = self.drawn0[px[ok, 1], px[ok, 0]]
+        out[ok] = (self.drawn0_in if interior else self.drawn0)[px[ok, 1], px[ok, 0]]
         return out
 
     def in_band(self, world_pts):
@@ -561,8 +578,8 @@ def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False):
     if cand.any():
         ci, cj = np.nonzero(cand)
         pts = _box_world(c, box, ci, cj)
-        hit = jr.rest_drawn(jr.upper.carry_back(frame, pts, posed_u)) | \
-            jr.rest_drawn(jr.lower.carry_back(frame, pts, posed_l))
+        hit = jr.rest_drawn(jr.upper.carry_back(frame, pts, posed_u), interior=erode > 0) | \
+            jr.rest_drawn(jr.lower.carry_back(frame, pts, posed_l), interior=erode > 0)
         gap[ci[hit], cj[hit]] = True
     n = int(gap.sum())
     out = _result("G4_SEAM_GAP", n, n == 0, pair if n else None, joint=jr.name,
@@ -599,7 +616,7 @@ def _closed_background(solid):
     return lab, stats, np.nonzero(keep)[0].tolist()
 
 
-def holes(rest, frame, min_area=HOLE_MIN_AREA):
+def holes(rest, frame, min_area=HOLE_MIN_AREA, masks=False):
     """G5: background that the art itself encloses and that was covered at
     rest: >= min_area px (scale 1) per 8-connected component.
 
@@ -656,8 +673,15 @@ def holes(rest, frame, min_area=HOLE_MIN_AREA):
                           "enclosed_by": "static" if group is static else "moved"})
     found.sort(key=lambda f: -f["area"])
     worst = found[0]["slot"] if found else None
-    return _result("G5_HOLES", len(found), not found, worst, holes=found[:10],
-                   area=float(sum(f["area"] for f in found)))
+    out = _result("G5_HOLES", len(found), not found, worst, holes=found[:10],
+                  area=float(sum(f["area"] for f in found)))
+    if masks:
+        keep = np.zeros((H, W), bool)
+        if hole.any():
+            big = np.nonzero(stats[:, 4] >= min_area * c.scale ** 2)[0]
+            keep = np.isin(lab, big[big > 0])
+        out["masks"] = {"holes": keep}
+    return out
 
 
 def _pix_box_world(c, ii, jj):
@@ -755,11 +779,18 @@ def _top_slot(frame, box, ii, jj, slots):
     return max(set(owners), key=owners.count) if owners else slots[-1]
 
 
-def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None):
+def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None, masks=False):
     """G6(b): newly revealed pixels of an underlying slot vs what its
     occluder showed there at rest (texel identity; see the module doc).
     The value is the highest NCC over (revealed slot, occluder) pairs with
-    at least min_px pixels (scale 1)."""
+    at least min_px pixels (scale 1); `worst` is "revealed|occluder".
+
+    The correlation is symmetric, so it also fires when the OCCLUDER's
+    image carries a copy of the underlay (a flat-image cut that left a
+    shard of trousers in the hand layer): the duplicate is real either way,
+    it just travels with the occluder instead of staying behind.
+    masks=True adds "masks": {"revealed": (H, W) bool of the judged pixels
+    of the worst pair}."""
     import cv2
     c = frame.canvas
     H, W = c.shape
@@ -795,7 +826,7 @@ def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=Non
         for o in np.unique(occ):
             k = occ == o
             pairs[(uname, rest_names[o])] = (p[k], q[k])
-    best, items = (0.0, None), []
+    best, items = (0.0, None, None), []
     need = min_px * c.scale ** 2
     for (u, o), (p, q) in pairs.items():
         m = np.zeros(H * W, np.uint8)
@@ -807,10 +838,16 @@ def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=Non
         v = ncc(img_now[p[k], :3], img_rest[q[k], :3])
         items.append({"slot": u, "occluder": o, "px": int(k.sum()), "ncc": v})
         if v > best[0]:
-            best = (v, u)
+            best = (v, f"{u}|{o}", p[k])
     items.sort(key=lambda it: -it["ncc"])
     ok = best[0] <= max_ncc
-    return _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10])
+    out = _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10])
+    if masks:
+        m = np.zeros(H * W, bool)
+        if best[2] is not None:
+            m[best[2]] = True
+        out["masks"] = {"revealed": m.reshape(H, W)}
+    return out
 
 
 def _disk_kernel(r):

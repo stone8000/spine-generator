@@ -2,8 +2,8 @@
 (SOTA §4.3; budget.json format §3.2).
 
     python -m spinegen.budget <rig.json | skeleton.json> <images dir | .atlas> --joints joints.json
-        -o budget.json [--sheet sheet.png] [--step 2] [--max-angle 180] [--scale 0.5]
-        [--no-verify] [--only name,name] [--skin name]
+        -o budget.json [--sheet sheet.png | --sheet DIR] [--sheet-max 90] [--step 2]
+        [--max-angle 180] [--scale 1] [--no-verify] [--only name,name] [--skin name] [--trace]
 
 WHY
   "This arm holds 26 degrees" was measured on the monkey by eye, 10 degrees
@@ -27,21 +27,29 @@ HOW
   the reset frame (no simulation). Each pose is rendered by spinegen.raster
   (geometry = spinegen.lbs, which C1 pins to spine-core) and read by
   spinegen.art_gates against the rest frame.
-  Speed: slots the bone does not move are rasterised once and reused; the
-  sweep runs at `scale` (default 0.5, pixel thresholds scaled with it) and
-  stops at the first hard failure; then both limits are VERIFIED at full
-  scale (the angle must pass and the next step must fail at scale 1; if not,
-  the limit is walked to where that holds), because a coarse pixel can hide
-  a 1 px tear.
+  The sweep goes on past the soft limit to the hard one, recording where
+  EACH gate first fails (first_fail), because a disagreement with a hand
+  measurement has to be argued gate by gate.
+  Speed: slots the bone does not move are rasterised once and reused, and
+  the sweep stops at the first hard failure. It runs at full scale by
+  default (SOTA §5 pixel thresholds are for 1:1 renders; the monkey's four
+  arm joints take under a minute). `scale` < 1 sweeps coarser (pixel
+  thresholds scaled with it) and then VERIFIES both limits at scale 1 (the
+  angle must pass and the next step fail; if not, the limit is walked to
+  where that holds), because a coarse pixel can hide a 1 px tear. That
+  check is local: contiguity below the limit and first_fail come from the
+  coarse sweep.
 
 OUTPUT (budget.json)
   {"schema": "spinegen-budget/1",
-   "joints": {name: {"+": {"soft", "hard", "limit_by", "hard_by", "limits"},
+   "joints": {name: {"+": {"soft", "hard", "limit_by", "hard_by", "limits",
+                           "first_fail": {gate id: {"angle", "by", "value"}}},
                      "-": {...}}},
    "meta": {...}}
   "+" is a positive local rotation of the bone (counter-clockwise, y up).
   limit_by is "<gate>@<where>" for the soft limit (fold@slot, hole@slot,
-  seam@upper|lower, ghost@slot, area@<joint>_band); hard_by the same for the
+  seam@upper|lower, ghost@slot (G6a band) or ghost@revealed|occluder (G6b
+  paint), area@<joint>_band); hard_by the same for the
   hard limit; limits lists every soft gate that failed at the first failing
   angle. A limit that never fails within max_angle is max_angle with
   limit_by null.
@@ -163,7 +171,7 @@ class Probe:
         for name in SOFT_ORDER:
             for key in ([name] if name != "ghost" else ["ghost_band", "ghost_paint"]):
                 if not g[key]["pass"]:
-                    fails.append(_label(name, g[key], self.jr))
+                    fails.append(_label(key, g[key], self.jr))
         hard_fails = [_label(n, g[n], self.jr) for n in ("fold", "hole") if not g[n]["pass"]]
         return {"angle": angle, "soft": not fails, "hard": not hard_fails,
                 "soft_by": fails[0] if fails else None, "hard_by": hard_fails[0] if hard_fails else None,
@@ -175,7 +183,7 @@ def _label(gate, res, jr):
         return f"area@{jr.name}_band"
     if gate == "seam":
         return f"seam@{res['worst'] or jr.name}"
-    return f"{gate}@{res['worst']}"
+    return f"{gate.split('_')[0]}@{res['worst']}"
 
 
 # ---------------------------------------------------------------- sweeping
@@ -188,16 +196,30 @@ def _angles(step, max_angle):
     return out
 
 
+GATE_IDS = {"fold": "G1_FOLDS", "area": "G2_AREA", "seam": "G4_SEAM_GAP", "hole": "G5_HOLES",
+            "ghost_band": "G6A_GHOST_BAND", "ghost_paint": "G6B_GHOST_PAINT"}
+
+
 def sweep(probe, sign, step, max_angle, trace=None):
-    """Coarse sweep in one direction: (soft, hard, soft_res, hard_res); a
-    *_res is the judgement at the first failing angle (None if none)."""
+    """Sweep in one direction until the hard limit fails: (soft, hard,
+    soft_res, hard_res, first_fail); a *_res is the judgement at the first
+    failing angle (None if none); first_fail {gate id: {"angle", "by",
+    "value"}} is where each gate first failed (angles signed, absent if it
+    never failed before the sweep stopped). Per-gate first failures are what
+    a disagreement with a hand measurement is argued from."""
     prev = 0.0
     soft = hard = None
     soft_res = hard_res = None
+    first = {}
     for a in _angles(step, max_angle):
         res = probe.judge(sign * a)
+        for key, gid in GATE_IDS.items():
+            g = res["gates"][key]
+            if not g["pass"] and gid not in first:
+                first[gid] = {"angle": sign * a, "by": _label(key, g, probe.jr), "value": g["value"]}
         if trace is not None:
-            trace.append({"angle": sign * a, "soft": res["soft"], "hard": res["hard"], "by": res["soft_by"]})
+            trace.append({"angle": sign * a, "soft": res["soft"], "hard": res["hard"], "by": res["soft_by"],
+                          "values": {GATE_IDS[k]: _num(g["value"]) for k, g in res["gates"].items()}})
         if soft is None and not res["soft"]:
             soft, soft_res = prev, res
         if not res["hard"]:
@@ -208,7 +230,11 @@ def sweep(probe, sign, step, max_angle, trace=None):
         soft = max_angle if hard is None else hard
     if hard is None:
         hard = max_angle
-    return soft, hard, soft_res, hard_res
+    return soft, hard, soft_res, hard_res, first
+
+
+def _num(v):
+    return round(float(v), 4) if isinstance(v, (int, float, np.floating, np.integer)) else v
 
 
 def verify(probe, sign, angle, step, max_angle, which):
@@ -238,16 +264,42 @@ def verify(probe, sign, angle, step, max_angle, which):
     return a, None, n
 
 
-def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=0.5, verify_full=True, skin=None, only=None,
-         progress=None, keep_trace=False):
+def scan_canvas(ir, images, joints, max_angle=180.0, skin=None, margin=0.05):
+    """A world canvas holding the setup pose AND every joint's moving
+    slots at any angle up to max_angle (sampled every 45 deg). The default
+    renderer canvas is the setup box + 10%; an arm swung out of it would
+    leave the frame, and G5 counts a background component touching the
+    canvas edge as open, so a hole the arm closes off-canvas would be
+    missed."""
+    r = raster.Renderer(ir, images, skin=skin, missing="skip")
+    ev = r.ev
+    state = {c["name"]: {"mix": 0.0} for c in ir["ik"]}
+    pts = [r.setup_points(ev.world(None, state))]
+    for j in load_joints(joints):
+        if j["bone"] not in ev.index:
+            continue
+        rot0 = ir["bones"][ev.index[j["bone"]]]["rotation"]
+        for k in range(-4, 5):
+            a = 45.0 * k
+            if k and abs(a) <= max_angle + 1e-9:
+                pts.append(r.setup_points(ev.world({j["bone"]: {"rotation": rot0 + a}}, state)))
+    return raster.bbox_canvas(np.concatenate(pts), margin)
+
+
+def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=True, skin=None, only=None,
+         progress=None, keep_trace=False, canvas=None):
     """budget.json (dict) for `joints` (see load_joints for the entry form).
 
-    scale        the sweep's render scale; 1.0 sweeps at full scale and
-                 skips verification
-    verify_full  re-check every limit at scale 1 (default)
+    scale        the sweep's render scale; 1.0 (default) sweeps at full
+                 scale and needs no verification
+    verify_full  with scale < 1, re-check every limit at scale 1 (default)
+    canvas       world canvas (scale 1); default scan_canvas()
     """
     t0 = time.time()
     joints = load_joints(joints)
+    if only:
+        joints = [j for j in joints if j["name"] in only]
+    canvas = canvas or scan_canvas(ir, images, joints, max_angle, skin)
     coarse_cache, full_cache = {}, {}
     out = {"schema": SCHEMA, "joints": {}, "meta": {"step": step, "max_angle": max_angle, "scale": scale,
                                                     "verified": bool(verify_full and scale != 1.0),
@@ -255,15 +307,15 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=0.5, verify_full=T
     for j in joints:
         if only and j["name"] not in only:
             continue
-        coarse = Probe(ir, images, j, scale, skin, coarse_cache)
+        coarse = Probe(ir, images, j, scale, skin, coarse_cache, canvas=canvas.scaled(scale))
         full = None
         if verify_full and scale != 1.0:
-            full = Probe(ir, images, j, 1.0, skin, full_cache)
+            full = Probe(ir, images, j, 1.0, skin, full_cache, canvas=canvas)
         res_j = {}
         trace = [] if keep_trace else None
         for d in j["dirs"]:
             sign = 1 if d > 0 else -1
-            soft, hard, soft_res, hard_res = sweep(coarse, sign, step, max_angle, trace)
+            soft, hard, soft_res, hard_res, first = sweep(coarse, sign, step, max_angle, trace)
             out["meta"]["frames"]["coarse"] += len(_angles(step, min(max_angle, hard + step)))
             coarse_soft, coarse_hard = soft, hard
             if full is not None:
@@ -279,9 +331,11 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=0.5, verify_full=T
             entry = {"soft": soft, "hard": hard,
                      "limit_by": soft_res["soft_by"] if soft_res else None,
                      "hard_by": hard_res["hard_by"] if hard_res else None,
-                     "limits": soft_res["limits"] if soft_res else []}
+                     "limits": soft_res["limits"] if soft_res else [],
+                     "first_fail": first}
             if full is not None:
                 entry["coarse"] = {"soft": coarse_soft, "hard": coarse_hard}
+                entry["first_fail_scale"] = scale
             res_j["+" if sign > 0 else "-"] = entry
             if progress:
                 progress(f"{j['name']} {'+' if sign > 0 else '-'}: soft {soft:g} hard {hard:g} "
@@ -294,47 +348,76 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=0.5, verify_full=T
             "lower_slots": jr.lower_slots, "moving_slots": sorted(coarse.moving), "band_px": int(jr.band.sum())}
         if keep_trace:
             out["meta"]["joints"][j["name"]]["trace"] = trace
+    out["meta"]["canvas"] = canvas.to_dict()
     out["meta"]["seconds"] = round(time.time() - t0, 2)
     return out
 
 
 # ---------------------------------------------------------------- contact sheet
 
-def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=180.0, thumb=160, skin=None,
-                  only=None):
-    """(H, W, 4) uint8: one row per joint and direction, one thumbnail per
-    `every` degrees from 0 to max_angle, framed green (soft holds), amber
-    (hard only) or red (past hard), using `budget` when given."""
+OVERLAY = {"seam": (255, 0, 255), "ghost_band": (255, 200, 0), "ghost_paint": (0, 200, 255), "hole": (255, 0, 0)}
+
+
+def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=90.0, thumb=180, skin=None,
+                  only=None, canvas=None):
+    """(H, W, 4) uint8 contact sheet: one row per joint and direction, one
+    column per `every` degrees from 0 to max_angle. Each tile stacks
+      * the limb (a fixed window around the joint that holds the moving
+        slots at any angle), box-filtered down: how the pose reads;
+      * the joint close-up, pixel for pixel (nearest-neighbour up): what
+        the gates read, at the renderer's own 1:1 pixels;
+      * the same close-up with every FAILING gate's pixels painted over:
+        magenta G4 seam gap, yellow G6a exposed band, cyan G6b revealed
+        duplicate paint, red G5 hole (+ "fold"/"area" in the caption).
+    Frames are green while the soft limit holds, amber to the hard limit,
+    red past it (grey without a budget). The point of the sheet is to LOOK
+    at the first failing angle and check it is visibly broken."""
     from PIL import Image, ImageDraw
     joints = load_joints(joints)
     cache = {}
     angles = [0.0] + _angles(every, max_angle)
-    label_w, pad = 230, 4
+    label_w, pad, cap = 230, 3, 26
     rows = []
     for j in joints:
         if only and j["name"] not in only:
             continue
-        p = Probe(ir, images, j, 1.0, skin, cache)
-        reach = _reach(p, j)
-        c = p.jr.j["center"]
-        cv = raster.Canvas((c[0] - reach, c[1] + reach), (2 * reach, 2 * reach), thumb / (2 * reach))
+        p = Probe(ir, images, j, 1.0, skin, cache, canvas=canvas)
+        reach = _reach(p)
+        c = np.asarray(p.jr.j["center"], float)
+        limb_cv = raster.Canvas((c[0] - reach, c[1] + reach), (2 * reach, 2 * reach), 1.0)
+        half = max(1.4 * p.jr.radius, 24.0)
         for d in j["dirs"]:
             sign = 1 if d > 0 else -1
             key = "+" if sign > 0 else "-"
             lim = (budget or {}).get("joints", {}).get(j["name"], {}).get(key)
             tiles = []
             for a in angles:
-                img = _on_white(p.frame(sign * a, canvas=cv).rgba())
+                fr = p.frame(sign * a)
+                res = p.judge(sign * a) if a else None
+                limb = p.r.frame(p.pose(sign * a), p.state, canvas=limb_cv).rgba()
+                limb = Image.fromarray(_on_white(limb)).resize((thumb, thumb), Image.BOX)
+                cn = ag.center_now(p.rest, fr, p.jr.j)
+                raw = _window(fr, cn, half)
+                over = raw.copy()
+                notes = []
+                if res is not None:
+                    notes = _paint_failures(p, fr, res, cn, half, over)
+                big = [Image.fromarray(x).resize((thumb, thumb), Image.NEAREST) for x in (raw, over)]
                 col = (150, 150, 150)
                 if lim:
                     col = (40, 160, 60) if a <= lim["soft"] else (230, 150, 20) if a <= lim["hard"] else (210, 40, 40)
-                t = Image.new("RGB", (thumb + 2 * pad, thumb + 2 * pad + 14), col)
-                t.paste(Image.fromarray(img), (pad, pad))
-                ImageDraw.Draw(t).text((pad + 2, thumb + pad + 1), f"{key}{a:g}", fill=(255, 255, 255))
+                t = Image.new("RGB", (thumb + 2 * pad, 3 * thumb + 4 * pad + cap), col)
+                for k, im in enumerate((limb, big[0], big[1])):
+                    t.paste(im, (pad, pad + k * (thumb + pad)))
+                txt = f"{key}{a:g}" + (("  " + " ".join(notes)) if notes else "")
+                ImageDraw.Draw(t).text((pad + 2, 3 * thumb + 3 * pad + 2), txt[:34], fill=(255, 255, 255))
                 tiles.append(t)
-            text = f"{j['name']} {key}\nbone {j['bone']}"
+            text = f"{j['name']} {key}\nbone {j['bone']}\nhalfwidth {p.jr.hw:.1f}"
             if lim:
-                text += f"\nsoft {lim['soft']:g}  hard {lim['hard']:g}\n{lim['limit_by']}\nhard: {lim['hard_by']}"
+                text += (f"\nsoft {lim['soft']:g}  hard {lim['hard']:g}\n{lim['limit_by']}\nhard: {lim['hard_by']}")
+                for gid, ff in sorted((lim.get("first_fail") or {}).items(), key=lambda kv: abs(kv[1]["angle"])):
+                    text += f"\n{gid} {ff['angle']:+g}"
+            text += "\n\nrows: limb / joint 1:1 /\nfailing gates painted\nmagenta seam, yellow band,\ncyan ghost paint, red hole"
             lab = Image.new("RGB", (label_w, tiles[0].height), (255, 255, 255))
             ImageDraw.Draw(lab).multiline_text((6, 6), text, fill=(0, 0, 0))
             row = Image.new("RGB", (label_w + sum(t.width for t in tiles), tiles[0].height), (255, 255, 255))
@@ -355,7 +438,78 @@ def contact_sheet(ir, images, joints, budget=None, every=SHEET_EVERY, max_angle=
     return np.asarray(sheet.convert("RGBA"))
 
 
-def _reach(probe, j):
+def _window(frame, center, half):
+    """White-backed RGB (n, n, 3) of the frame's pixels in a square of
+    half-size `half` world units around `center` (off-canvas is white)."""
+    c = frame.canvas
+    cx, cy = c.to_px([center])[0]
+    r = int(math.ceil(half * c.scale))
+    i0, j0 = int(math.floor(cy)) - r, int(math.floor(cx)) - r
+    n = 2 * r + 1
+    out = np.full((n, n, 3), 255, np.uint8)
+    rgb = _on_white(frame.rgba())
+    si0, sj0 = max(0, i0), max(0, j0)
+    si1, sj1 = min(c.H, i0 + n), min(c.W, j0 + n)
+    if si1 > si0 and sj1 > sj0:
+        out[si0 - i0:si1 - i0, sj0 - j0:sj1 - j0] = rgb[si0:si1, sj0:sj1]
+    return out
+
+
+def _paint_failures(probe, frame, res, center, half, img):
+    """Paint the failing gates' pixels into the close-up `img` (in place);
+    returns caption notes."""
+    c = frame.canvas
+    H, W = c.shape
+    full = {}
+    g = res["gates"]
+    notes = []
+    if not g["seam"]["pass"]:
+        m = ag.seam_gap(probe.rest, frame, probe.joint, masks=True)["masks"]
+        full["seam"] = _unbox(m["gap"], m["box"], (H, W))
+        notes.append(f"G4:{g['seam']['value']}px")
+    if not g["ghost_band"]["pass"]:
+        m = ag.ghost_band(probe.rest, frame, probe.joint, masks=True)["masks"]
+        full["ghost_band"] = _unbox(m["ghost"], m["box"], (H, W))
+        notes.append(f"G6a:{g['ghost_band']['value']:.0f}")
+    if not g["ghost_paint"]["pass"]:
+        full["ghost_paint"] = ag.ghost_paint(probe.rest, frame, masks=True)["masks"]["revealed"]
+        notes.append(f"G6b:{g['ghost_paint']['value']:.2f}")
+    if not g["hole"]["pass"]:
+        full["hole"] = ag.holes(probe.rest, frame, masks=True)["masks"]["holes"]
+        notes.append(f"G5:{g['hole']['value']}")
+    if not g["fold"]["pass"]:
+        notes.append(f"G1:{g['fold']['value']}")
+    if not g["area"]["pass"]:
+        notes.append(f"G2:{g['area']['value']:.2f}")
+    cx, cy = c.to_px([center])[0]
+    r = int(math.ceil(half * c.scale))
+    i0, j0 = int(math.floor(cy)) - r, int(math.floor(cx)) - r
+    n = img.shape[0]
+    for key in ("ghost_paint", "ghost_band", "hole", "seam"):
+        m = full.get(key)
+        if m is None:
+            continue
+        win = np.zeros((n, n), bool)
+        si0, sj0 = max(0, i0), max(0, j0)
+        si1, sj1 = min(H, i0 + n), min(W, j0 + n)
+        if si1 > si0 and sj1 > sj0:
+            win[si0 - i0:si1 - i0, sj0 - j0:sj1 - j0] = m[si0:si1, sj0:sj1]
+        col = np.array(OVERLAY[key], float)
+        if key == "seam":
+            img[win] = col.astype(np.uint8)
+        else:
+            img[win] = np.clip(img[win] * 0.45 + col * 0.55, 0, 255).astype(np.uint8)
+    return notes
+
+
+def _unbox(mask, box, shape):
+    out = np.zeros(shape, bool)
+    i0, i1, j0, j1 = box
+    out[i0:i1, j0:j1] = mask
+    return out
+
+
+def _reach(probe):
     """Half-size of a square around the joint that holds the moving slots
     at any angle (their farthest setup vertex) and some context."""
     c = np.asarray(probe.jr.j["center"])
@@ -372,6 +526,25 @@ def _on_white(rgba):
     return np.clip(np.round(rgb), 0, 255).astype(np.uint8)
 
 
+def write_sheets(path, ir, images, joints, budget=None, max_angle=90.0, every=SHEET_EVERY, skin=None, only=None,
+                 canvas=None):
+    """`path` ending in .png: one sheet for all joints; otherwise a
+    directory with <joint>.png per joint (small enough to look at)."""
+    joints = load_joints(joints)
+    if str(path).lower().endswith(".png"):
+        raster.save_png(path, contact_sheet(ir, images, joints, budget, every, max_angle, skin=skin, only=only,
+                                            canvas=canvas))
+        return [path]
+    out = []
+    for j in joints:
+        if only and j["name"] not in only:
+            continue
+        f = os.path.join(path, f"{j['name']}.png")
+        raster.save_png(f, contact_sheet(ir, images, [j], budget, every, max_angle, skin=skin, canvas=canvas))
+        out.append(f)
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv=None):
@@ -380,10 +553,14 @@ def main(argv=None):
     ap.add_argument("images", help="directory of attachment PNGs or a .atlas")
     ap.add_argument("--joints", required=True)
     ap.add_argument("-o", "--out", required=True)
-    ap.add_argument("--sheet", default=None, help="write a contact sheet PNG (every 10 deg)")
+    ap.add_argument("--sheet", default=None,
+                    help="contact sheet: a .png for all joints, else a directory of <joint>.png")
+    ap.add_argument("--sheet-max", type=float, default=90.0, help="last angle on the sheet (deg)")
+    ap.add_argument("--sheet-every", type=float, default=SHEET_EVERY)
     ap.add_argument("--step", type=float, default=2.0)
     ap.add_argument("--max-angle", type=float, default=180.0)
-    ap.add_argument("--scale", type=float, default=0.5)
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="sweep render scale; < 1 is faster and re-checks the limits at 1")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--only", default=None, help="comma-separated joint names")
     ap.add_argument("--skin", default=None)
@@ -400,9 +577,10 @@ def main(argv=None):
         json.dump(budget, f, indent=1)
     print(f"{a.out}: {len(budget['joints'])} joint(s) in {budget['meta']['seconds']} s", file=sys.stderr)
     if a.sheet:
-        raster.save_png(a.sheet, contact_sheet(ir, images, joints, budget, max_angle=a.max_angle, skin=a.skin,
-                                               only=only))
-        print(f"{a.sheet}: contact sheet", file=sys.stderr)
+        canvas = raster.Canvas(budget["meta"]["canvas"]["origin"], budget["meta"]["canvas"]["size"], 1.0)
+        for f in write_sheets(a.sheet, ir, images, joints, budget, min(a.sheet_max, a.max_angle), a.sheet_every,
+                              a.skin, only, canvas):
+            print(f"{f}: contact sheet", file=sys.stderr)
 
 
 if __name__ == "__main__":
