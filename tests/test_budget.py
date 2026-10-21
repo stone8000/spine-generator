@@ -116,6 +116,26 @@ def test_cli_writes_budget_and_per_joint_sheets(tmp_path):
     assert sorted(p.name for p in (tmp_path / "sheets").iterdir()) == ["elbow_l.png", "shoulder_l.png"]
 
 
+def test_shard_in_the_forearm_is_an_art_request_not_a_limit():
+    """A forearm image that carries torso paint (synth_art shard): the
+    elbow is not limited by G6b; budget.json lists one art request for the
+    forearm layer, with the angle the shard first shows."""
+    b = _scan(["elbow_l"], step=10.0, max_angle=40.0, mode="rigid", shard=True)
+    for d in ("+", "-"):
+        e = b["joints"]["elbow_l"][d]
+        assert "G6B_GHOST_PAINT" not in e["first_fail"], d
+    (it,) = b["artreq"]
+    assert it["id"] == "clean_forearm_l__torso" and it["kind"] == "clean" and it["layer"] == "forearm_l"
+    assert it["status"] == "open" and it["max_visible_px"] > 0
+    assert set(it["seen"]) == {"elbow_l +", "elbow_l -"}
+    assert it["visible_from"]["elbow_l +"] in (10.0, 20.0) and it["visible_from"]["elbow_l -"] in (-10.0, -20.0)
+    x0, y0, x1, y1 = it["region"]
+    assert 0 <= x0 < x1 and 0 <= y0 < y1
+    # the same arm with the copy in the torso instead is a G6b limit, no request
+    g = _scan(["elbow_l"], step=10.0, max_angle=40.0, mode="rigid", ghost=True)
+    assert g["joints"]["elbow_l"]["+"]["limit_by"] == "ghost@torso|forearm_l" and g["artreq"] == []
+
+
 def test_scan_canvas_holds_the_swung_limb():
     ir, images, joints = synth_art.build(scale=SCALE, mode="rigid")
     small = raster.Renderer(ir, images).canvas
@@ -134,14 +154,19 @@ def test_scan_canvas_holds_the_swung_limb():
 
 def test_monkey_hand_carries_a_trouser_shard():
     """The shipped monkey's hand layers carry a shard of the trousers (a
-    flat-image cut): moving the shoulder at all reveals thigh paint that
-    correlates with what the hand showed there (G6b), and the pair is
-    named. The rest pose passes."""
+    flat-image cut): moving the shoulder reveals thigh paint that correlates
+    with what the hand showed there. G6b sees that the HAND holds the copy
+    (it looks like the thigh around it, not like the hand), so the joint
+    passes and the pair is reported as carried, visible where the hand
+    takes it off the thigh. The rest pose passes."""
     js, atlas = third_party("monkey")
     ir, images = raster.load_rig(js), raster.load_images(atlas)
     p = budget.Probe(ir, images, {"name": "shoulder_r", "bone": "armR", "dirs": [1], "band": {"lower": "armR"}})
     assert p.judge(0)["soft"]
     r = p.judge(10)
     g = r["gates"]["ghost_paint"]
-    assert not g["pass"] and g["worst"] == "right_leg_0_thigh|right_arm_2_hand"
+    assert g["pass"]
+    c = {(it["slot"], it["occluder"]): it for it in g["carried"]}
+    it = c[("right_leg_0_thigh", "right_arm_2_hand")]
+    assert it["ncc"] > 0.3 and it["visible_px"] >= 64
     assert r["hard"]  # no fold, no hole

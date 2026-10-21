@@ -4,6 +4,7 @@
     python -m spinegen.budget <rig.json | skeleton.json> <images dir | .atlas> --joints joints.json
         -o budget.json [--sheet sheet.png | --sheet DIR] [--sheet-max 90] [--step 2]
         [--max-angle 180] [--scale 1] [--no-verify] [--only name,name] [--skin name] [--trace]
+        [--artreq artreq.json]
 
 WHY
   "This arm holds 26 degrees" was measured on the monkey by eye, 10 degrees
@@ -53,6 +54,11 @@ OUTPUT (budget.json)
   hard limit; limits lists every soft gate that failed at the first failing
   angle. A limit that never fails within max_angle is max_angle with
   limit_by null.
+  "artreq" lists art requests (spinegen-artreq/1 items) for duplicates a
+  layer carries away from the paint it copies (G6(b) "carried", e.g. a
+  shard of trousers cut into a hand image): not a joint limit, an art fix,
+  with the angles where the scan first met it ("seen") and first saw it
+  show ("visible_from", null if it never left matching paint).
 
 JOINTS FILE (--joints)
   A list, or {"joints": [...]}, or {"joints": {name: entry}}; entries are
@@ -165,7 +171,7 @@ class Probe:
              "hole": ag.holes(self.rest, fr),
              "seam": ag.seam_gap(self.rest, fr, j),
              "ghost_band": ag.ghost_band(self.rest, fr, j),
-             "ghost_paint": ag.ghost_paint(self.rest, fr),
+             "ghost_paint": ag.ghost_paint(self.rest, fr, visibility=True),
              "area": ag.band_area_ratio(self.rest, fr, j)}
         fails = []
         for name in SOFT_ORDER:
@@ -200,19 +206,33 @@ GATE_IDS = {"fold": "G1_FOLDS", "area": "G2_AREA", "seam": "G4_SEAM_GAP", "hole"
             "ghost_band": "G6A_GHOST_BAND", "ghost_paint": "G6B_GHOST_PAINT"}
 
 
-def sweep(probe, sign, step, max_angle, trace=None):
+def sweep(probe, sign, step, max_angle, trace=None, carried=None):
     """Sweep in one direction until the hard limit fails: (soft, hard,
     soft_res, hard_res, first_fail); a *_res is the judgement at the first
     failing angle (None if none); first_fail {gate id: {"angle", "by",
     "value"}} is where each gate first failed (angles signed, absent if it
     never failed before the sweep stopped). Per-gate first failures are what
-    a disagreement with a hand measurement is argued from."""
+    a disagreement with a hand measurement is argued from.
+    `carried` (a dict) collects the duplicates G6(b) found carried by an
+    occluder (art_gates.ghost_paint), keyed (under, occluder): {"seen",
+    "visible_from" (first angle the shard shows on >= NCC_MIN_PX px, or
+    None), "max_visible_px", "components"}."""
     prev = 0.0
     soft = hard = None
     soft_res = hard_res = None
     first = {}
+    need = ag.NCC_MIN_PX * probe.scale ** 2
     for a in _angles(step, max_angle):
         res = probe.judge(sign * a)
+        if carried is not None:
+            for it in res["gates"]["ghost_paint"].get("carried", []):
+                c = carried.setdefault((it["slot"], it["occluder"]), {"seen": sign * a, "visible_from": None,
+                                                                        "max_visible_px": 0, "components": set()})
+                c["components"].update(it["components"])
+                vis = it.get("visible_px", 0)
+                c["max_visible_px"] = max(c["max_visible_px"], vis)
+                if vis >= need and c["visible_from"] is None:
+                    c["visible_from"] = sign * a
         for key, gid in GATE_IDS.items():
             g = res["gates"][key]
             if not g["pass"] and gid not in first:
@@ -301,6 +321,7 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=T
         joints = [j for j in joints if j["name"] in only]
     canvas = canvas or scan_canvas(ir, images, joints, max_angle, skin)
     coarse_cache, full_cache = {}, {}
+    artreq = {}
     out = {"schema": SCHEMA, "joints": {}, "meta": {"step": step, "max_angle": max_angle, "scale": scale,
                                                     "verified": bool(verify_full and scale != 1.0),
                                                     "frames": {"coarse": 0, "full": 0}, "joints": {}}}
@@ -315,7 +336,10 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=T
         trace = [] if keep_trace else None
         for d in j["dirs"]:
             sign = 1 if d > 0 else -1
-            soft, hard, soft_res, hard_res, first = sweep(coarse, sign, step, max_angle, trace)
+            found = {}
+            soft, hard, soft_res, hard_res, first = sweep(coarse, sign, step, max_angle, trace, found)
+            for (u, o), c in found.items():
+                _artreq(artreq, coarse.rest, u, o, c, f"{j['name']} {'+' if sign > 0 else '-'}")
             out["meta"]["frames"]["coarse"] += len(_angles(step, min(max_angle, hard + step)))
             coarse_soft, coarse_hard = soft, hard
             if full is not None:
@@ -348,9 +372,31 @@ def scan(ir, images, joints, step=2.0, max_angle=180.0, scale=1.0, verify_full=T
             "lower_slots": jr.lower_slots, "moving_slots": sorted(coarse.moving), "band_px": int(jr.band.sum())}
         if keep_trace:
             out["meta"]["joints"][j["name"]]["trace"] = trace
+    out["artreq"] = list(artreq.values())
     out["meta"]["canvas"] = canvas.to_dict()
     out["meta"]["seconds"] = round(time.time() - t0, 2)
     return out
+
+
+def _artreq(items, rest, under, occluder, c, where):
+    """Merge one sweep's carried duplicate into the art requests: one
+    item per (occluder, under) pair, in the spinegen-artreq/1 item form
+    (SOTA §3.2) plus where the scan met it."""
+    key = (occluder, under)
+    _, box = ag.carried_texels(rest, under, occluder, sorted(c["components"]))
+    it = items.get(key)
+    if it is None:
+        g = rest.geoms.get(occluder)
+        it = items[key] = {
+            "id": f"clean_{occluder}__{under}", "kind": "clean", "layer": g.tex_key if g is not None else occluder,
+            "slot": occluder, "region": list(box) if box else None,
+            "what": f"paint of {under} cut into {occluder}",
+            "why": f"G6(b): {occluder} carries a copy of {under}'s paint; it moves with {occluder} and shows "
+                   f"wherever it leaves matching paint (not a joint limit: the copy is in the layer)",
+            "seen": {}, "visible_from": {}, "max_visible_px": 0, "status": "open"}
+    it["seen"][where] = c["seen"]
+    it["visible_from"][where] = c["visible_from"]
+    it["max_visible_px"] = max(it["max_visible_px"], int(c["max_visible_px"]))
 
 
 # ---------------------------------------------------------------- contact sheet
@@ -580,6 +626,7 @@ def main(argv=None):
     ap.add_argument("--only", default=None, help="comma-separated joint names")
     ap.add_argument("--skin", default=None)
     ap.add_argument("--trace", action="store_true", help="keep every judged angle in meta")
+    ap.add_argument("--artreq", default=None, help="also write the art requests as spinegen-artreq/1 here")
     a = ap.parse_args(argv)
     ir = raster.load_rig(a.rig)
     images = raster.load_images(a.images)
@@ -590,6 +637,10 @@ def main(argv=None):
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
         json.dump(budget, f, indent=1)
+    if a.artreq and budget["artreq"]:
+        with open(a.artreq, "w") as f:
+            json.dump({"schema": "spinegen-artreq/1", "items": budget["artreq"]}, f, indent=1)
+        print(f"{a.artreq}: {len(budget['artreq'])} art request(s)", file=sys.stderr)
     print(f"{a.out}: {len(budget['joints'])} joint(s) in {budget['meta']['seconds']} s", file=sys.stderr)
     if a.sheet:
         canvas = raster.Canvas(budget["meta"]["canvas"]["origin"], budget["meta"]["canvas"]["size"], 1.0)

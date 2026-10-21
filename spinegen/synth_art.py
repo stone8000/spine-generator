@@ -2,7 +2,7 @@
 and the budget scanner that are ours to publish.
 
     python -m spinegen.synth_art OUTDIR [--mode rigid|joint] [--arms 1|2] [--legs 0|2]
-        [--overlap PX] [--ghost] [--hole] [--no-helper] [--scale S]
+        [--overlap PX] [--ghost] [--hole] [--shard] [--no-helper] [--scale S]
 
 WHY
   The art gates (SOTA §5 G4 seam gap, G5 holes, G6 ghost) judge PIXELS, so
@@ -19,7 +19,10 @@ WHY
       (G6a);
     * `ghost` paints the arm's own pattern into the torso under the arm
       (G6b), `hole` leaves a transparent disc inside the torso under the
-      upper arm that only a moved arm reveals (G5).
+      upper arm that only a moved arm reveals (G5);
+    * `shard` is the opposite cut: the torso paint inside the forearm image
+      where it lies over the torso, which correlates exactly as a ghost does
+      but is carried away by the forearm (G6b "carried", an art request).
   `mode` decides the weights: "rigid" binds every piece 100% to its own bone
   (the old cut-out, the RIGID comparison mode); "joint" gives the pieces the
   same piecewise ramp across each joint band (upper -> half-angle helper ->
@@ -262,7 +265,7 @@ def _region_attachment(builder, piece):
 
 
 def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, helper=True, head=None,
-          scale=1.0, arm_hw=40.0, leg_hw=45.0, round_ends=None):
+          scale=1.0, arm_hw=40.0, leg_hw=45.0, round_ends=None, shard=False):
     """(ir, images, joints) of a synthetic character; see the module doc.
 
     mode       "rigid" (each piece 100% on its bone) or "joint" (ramps)
@@ -270,6 +273,9 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
     overlap    px each limb piece runs past a joint under its partner
     ghost      paint the arm pattern into the torso under the arm
     hole       a transparent disc in the torso under the upper arm
+    shard      paint the torso into the forearm wherever the forearm lies over
+               it (the opposite flat-image cut: the occluder carries a piece
+               of the underlay, like a hand cut with the trousers behind it)
     helper     half-angle helper bones at elbows and knees (joint mode)
     scale      multiplies every length (1.0: ~600 px tall, ~920 with legs)
     round_ends rounded piece ends at the joints (default: overlap > 0)
@@ -326,6 +332,8 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
         if ghost:
             _bake(torso, p_up)
             _bake(torso, p_lo)
+        if shard:
+            _bake(p_lo, torso)
         if hole:
             _cut_hole(torso, ax + sg * -4 * s, y_sh - 110 * s, 14 * s)
 
@@ -492,11 +500,12 @@ def main(argv=None):
     ap.add_argument("--overlap", type=float, default=24.0)
     ap.add_argument("--ghost", action="store_true")
     ap.add_argument("--hole", action="store_true")
+    ap.add_argument("--shard", action="store_true")
     ap.add_argument("--no-helper", action="store_true")
     ap.add_argument("--scale", type=float, default=1.0)
     a = ap.parse_args(argv)
     for p in write(a.outdir, mode=a.mode, arms=a.arms, legs=a.legs, overlap=a.overlap, ghost=a.ghost,
-                   hole=a.hole, helper=not a.no_helper, scale=a.scale):
+                   hole=a.hole, helper=not a.no_helper, scale=a.scale, shard=a.shard):
         print(p)
 
 

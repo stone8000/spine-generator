@@ -33,8 +33,15 @@ WHERE THE DEFINITIONS COME FROM
   rest test keeps a notch the art already had from counting, and the rim
   erosion keeps an anti-aliased outline that recedes by a pixel from
   reading as a tear. A jagged outline (fur) that turns still opens real
-  1-2 px notches inside the hull; at 0 px those count (SOTA §8.3 expects
-  this threshold to be calibrated on reference characters).
+  1 px wide notches inside the hull.
+  CALIBRATION (SOTA §5 gives "0 px" as a starting value, §8.3 asks for it
+  to be calibrated): the count keeps only gap components (8-connected) of
+  at least 4 px, the area of a 2 x 2 block (G4_MIN_PX, scaled by the
+  frame's scale squared); the threshold stays 0 such pixels. A 1-3 px speck
+  where a jagged (fur) or anti-aliased outline turns is not visible at 1:1;
+  a crack that is visible, even a 1 px hairline across a limb, is longer
+  than that. "raw_px" keeps the count before the rule; P2_REPORT has the
+  monkey's first failures before and after.
   G6 GHOST (a) takes the pixels only one part draws whose own carry-back
   lands in the band but whose partner's carry-back finds nothing drawn at
   setup: the overlap swung clear of its partner. Its LENGTH is how far it
@@ -50,6 +57,19 @@ WHERE THE DEFINITIONS COME FROM
   with what O showed there at rest by normalised cross-correlation of
   mean-free RGB; NCC > 0.3 means U's paint repeats the occluder (an arm left
   in the torso paint by a flat-image cut).
+  The correlation cannot say WHICH layer holds the copy, and only one case
+  shows: an arm copy in the torso is revealed as a second arm, but a shard
+  of trousers cut into the hand image reveals trousers where trousers were
+  (the hand carries the copy away, and it shows only where it lands on
+  something else). When a pair correlates, duplicates() finds the copy at
+  rest (the occluder's paint matches the paint under it, CIELAB distance
+  < 10) and gives it an owner from the paint around it: a copy that looks
+  like the underlay's own visible paint nearby is CARRIED by the occluder.
+  A carried pair leaves the G6(b) judgement and is reported as "carried"
+  (budget.json turns it into an art request: clean the shard out of that
+  layer), so G6(b) limits a joint only by a duplicate that is visible
+  where it is revealed. Where the shard itself shows (over background or
+  over paint it does not match) is carried_visible()'s count.
   G5 HOLES are background pixels (>= 16 px per component) that one group
   of slots encloses on its own art, the slots that did not move or the
   ones that did, and that something covered at rest: a moved arm baring an
@@ -81,6 +101,7 @@ from . import lbs
 from .raster import COVER
 
 DISK = 1.5             # G4 disk radius, in limb halfwidths
+G4_MIN_PX = 4.0        # G4 counts a gap component only from this many px (a 2 x 2 block; scale 1; module doc)
 BAND_EXTENT = 1.25     # G2 band half-length along the limb, halfwidths (= spinegen.mesh/weights)
 BAND_LATERAL = 1.6     # G2 band half-width across the limb, halfwidths (= spinegen.weights)
 MIN_BAND_RATIO = 0.9   # G2 soft (hold) limit
@@ -90,6 +111,9 @@ GHOST_MAX_LEN = 0.25   # G6(a), x limb width
 GHOST_MAX_NCC = 0.3    # G6(b)
 NCC_MIN_PX = 64.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1; see ghost_paint)
 NCC_ERODE = 2.0        # G6(b) correlates only revealed pixels this far (px, scale 1) inside the revealed patch
+DUP_DE = 10.0          # G6(b) duplicates(): CIELAB distance under which two layers' paint is "the same"
+DUP_CONTEXT = 10.0     # G6(b) duplicates(): px (scale 1) of paint around a duplicate that decide its owner
+DUP_MIN_PX = 16.0      # G6(b) duplicates(): smallest duplicate component, px (scale 1)
 
 
 # ---------------------------------------------------------------- joints
@@ -561,10 +585,13 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
 
 # ---------------------------------------------------------------- G4
 
-def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False):
+def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False, min_px=None):
     """G4: background opened inside the joint (see the module doc).
+    The value counts only gap components of at least min_px pixels
+    (default G4_MIN_PX, scale 1; "raw_px" is the count before that rule).
     masks=True adds "masks": {"box": (i0, i1, j0, j1), "gap", "hull"}."""
     import cv2
+    min_px = G4_MIN_PX if min_px is None else min_px
     jr = joint_rest(rest, joint, disk)
     pair = "|".join(jr.upper_slots[-1:] + jr.lower_slots[-1:]) or jr.name
     if not jr.readable:
@@ -596,13 +623,27 @@ def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False):
         hit = jr.rest_drawn(jr.upper.carry_back(frame, pts, posed_u), interior=erode > 0) | \
             jr.rest_drawn(jr.lower.carry_back(frame, pts, posed_l), interior=erode > 0)
         gap[ci[hit], cj[hit]] = True
+    raw = int(gap.sum())
+    gap = drop_specks(gap, min_px * c.scale ** 2)
     n = int(gap.sum())
     out = _result("G4_SEAM_GAP", n, n == 0, pair if n else None, joint=jr.name,
                   area=n / c.scale ** 2, box=_bbox_world(c, box, gap), hull_px=int((region > 0).sum()),
-                  depth=_depth(gap) / c.scale)
+                  depth=_depth(gap) / c.scale, raw_px=raw, min_px=min_px)
     if masks:
         out["masks"] = {"box": box, "gap": gap, "hull": region > 0}
     return out
+
+
+def drop_specks(mask, min_px):
+    """The mask without its 8-connected components of fewer than min_px
+    pixels. G4's calibration rule, see G4_MIN_PX."""
+    import cv2
+    if min_px <= 1 or not mask.any():
+        return mask
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    keep = st[:, cv2.CC_STAT_AREA] >= min_px
+    keep[0] = False
+    return keep[lab]
 
 
 def _depth(mask):
@@ -794,16 +835,25 @@ def _top_slot(frame, box, ii, jj, slots):
     return max(set(owners), key=owners.count) if owners else slots[-1]
 
 
-def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None, masks=False):
+def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None, masks=False,
+                visibility=False):
     """G6(b): newly revealed pixels of an underlying slot vs what its
     occluder showed there at rest (texel identity; see the module doc).
     The value is the highest NCC over (revealed slot, occluder) pairs with
     at least min_px pixels (scale 1); `worst` is "revealed|occluder".
 
-    The correlation is symmetric, so it also fires when the OCCLUDER's
-    image carries a copy of the underlay (a flat-image cut that left a
-    shard of trousers in the hand layer): the duplicate is real either way,
-    it just travels with the occluder instead of staying behind.
+    The correlation is symmetric: it is as high when the OCCLUDER's image
+    carries a copy of the underlay (a flat-image cut that left a shard of
+    trousers in the hand layer) as when the underlay carries a copy of the
+    occluder (an arm left in the torso paint). Only the second shows where
+    the pixels are revealed: the first reveals trousers where trousers were.
+    So a pair that correlates is checked for who holds the copy: if most
+    of its revealed pixels that lie in a duplicate (duplicates()) lie in
+    one the OCCLUDER carries, the pair is listed under "carried" instead of
+    judged: the shard is the occluder layer's fault, goes to the art
+    request list (budget.json "artreq"), and is not a limit of the joint. visibility=True adds, per carried pair, "visible_px": the
+    shard pixels now drawn over background or over paint that does not
+    match them (carried_visible()).
     masks=True adds "masks": {"revealed": (H, W) bool of the judged pixels
     of the worst pair}."""
     import cv2
@@ -841,28 +891,190 @@ def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=Non
         for o in np.unique(occ):
             k = occ == o
             pairs[(uname, rest_names[o])] = (p[k], q[k])
-    best, items = (0.0, None, None), []
-    need = min_px * c.scale ** 2
+    best, items, carried = (0.0, None, None), [], []
+    need = max(min_px * c.scale ** 2, 4)
     for (u, o), (p, q) in pairs.items():
         m = np.zeros(H * W, np.uint8)
         m[p] = 1
         inner = cv2.erode(m.reshape(H, W), _disk_kernel(erode * c.scale)).reshape(-1)
         k = inner[p] > 0
-        if k.sum() < max(need, 4):
+        if k.sum() < need:
             continue
         v = ncc(img_now[p[k], :3], img_rest[q[k], :3])
+        if v > max_ncc:
+            # a duplicate: which layer holds it? (only asked once the
+            # pattern correlates: two layers sharing a palette agree pixel
+            # by pixel by chance, which duplicates() alone would take for a
+            # copy)
+            dup = duplicates(rest, u, o)
+            lab = dup["labels"][q[k]]
+            mine = dup["carried"][q[k]]
+            if (lab > 0).any() and mine.sum() >= 0.5 * (lab > 0).sum():
+                it = {"slot": u, "occluder": o, "px": int(k.sum()), "ncc": v,
+                      "components": sorted(int(x) for x in np.unique(lab[mine]))}
+                if visibility:
+                    it["visible_px"] = carried_visible(rest, frame, u, o, it["components"])
+                carried.append(it)
+                continue
         items.append({"slot": u, "occluder": o, "px": int(k.sum()), "ncc": v})
         if v > best[0]:
             best = (v, f"{u}|{o}", p[k])
     items.sort(key=lambda it: -it["ncc"])
     ok = best[0] <= max_ncc
-    out = _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10])
+    out = _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10],
+                  carried=carried)
     if masks:
         m = np.zeros(H * W, bool)
         if best[2] is not None:
             m[best[2]] = True
         out["masks"] = {"revealed": m.reshape(H, W)}
     return out
+
+
+def _lab(rgb):
+    """CIELAB (L 0-100) of straight RGB in [0, 1], (n, 3) float32."""
+    import cv2
+    x = np.clip(np.asarray(rgb, np.float32), 0, 1).reshape(-1, 1, 3)
+    return cv2.cvtColor(x, cv2.COLOR_RGB2LAB).reshape(-1, 3)
+
+
+def _straight(premult):
+    a = premult[:, 3:4]
+    return premult[:, :3] / np.maximum(a, 1e-6)
+
+
+def _nearest_de(x, ref, n=400, m=2000):
+    """Median over (a sample of) x of the colour distance to the nearest
+    colour in (a sample of) ref: "does x look like ref's paint"; inf when
+    ref is empty."""
+    if len(ref) == 0 or len(x) == 0:
+        return math.inf
+    rng = np.random.default_rng(0)
+    if len(x) > n:
+        x = x[rng.choice(len(x), n, replace=False)]
+    if len(ref) > m:
+        ref = ref[rng.choice(len(ref), m, replace=False)]
+    d = np.sqrt(((x[:, None, :] - ref[None, :, :]) ** 2).sum(-1)).min(1)
+    return float(np.median(d))
+
+
+def duplicates(rest, under, occluder):
+    """Where the occluder's paint at rest repeats the paint of the slot
+    under it, and which of the two layers carries the copy. Cached.
+
+    A DUPLICATE pixel is one the occluder covers at rest while `under`
+    draws beneath it (alpha >= 0.5) with nearly the same colour (CIELAB
+    distance < DUP_DE); duplicate pixels are grouped into 8-connected
+    components of >= DUP_MIN_PX px. A component's OWNER is decided from the
+    paint around it (within DUP_CONTEXT px): if the duplicate looks like
+    the visible paint of `under` nearby (median nearest-colour distance <=
+    DUP_DE) and more like it than like the occluder's own paint nearby, the
+    occluder carries a piece of the underlay (owner "occluder": a shard of
+    trousers cut into the hand image); otherwise the underlay carries a copy
+    of the occluder (owner "under": the classic arm left in the torso).
+
+    Returns {"labels": (H*W,) int32 component id (0 none), "carried": (H*W,)
+    bool pixels of occluder-owned components, "components": {id: {"px",
+    "owner", "de_under", "de_occluder"}}}."""
+    import cv2
+    cache = rest.cache.setdefault("duplicates", {})
+    key = (under, occluder)
+    if key in cache:
+        return cache[key]
+    c = rest.canvas
+    H, W = c.shape
+    n = H * W
+    rank = {s: k for k, s in enumerate(rest.slots)}
+    labels = np.zeros(n, np.int32)
+    carried = np.zeros(n, bool)
+    comps = {}
+    fu = rest.frags.get(under)
+    if fu is None or occluder not in rank or under not in rank:
+        cache[key] = {"labels": labels, "carried": carried, "components": comps}
+        return cache[key]
+    top = rest.top.reshape(-1)
+    ua = np.zeros(n, np.float32)
+    ua[fu.idx] = fu.alpha
+    ov = np.nonzero((top == rank[occluder]) & (ua >= COVER))[0]
+    img = rest.image.reshape(-1, 4)
+    ucol = np.zeros((n, 3), np.float32)
+    ucol[fu.idx] = _straight(fu.rgba)
+    dup = np.zeros(n, np.uint8)
+    if len(ov):
+        de = np.linalg.norm(_lab(_straight(img[ov])) - _lab(ucol[ov]), axis=1)
+        dup[ov[de < DUP_DE]] = 1
+    nl, lab, st, _ = cv2.connectedComponentsWithStats(dup.reshape(H, W), connectivity=8)
+    lab = lab.reshape(-1)
+    near_k = _disk_kernel(DUP_CONTEXT * c.scale)
+    dup_grown = cv2.dilate(dup.reshape(H, W), np.ones((3, 3), np.uint8)).reshape(-1) > 0
+    for i in range(1, nl):
+        if st[i, cv2.CC_STAT_AREA] < DUP_MIN_PX * c.scale ** 2:
+            continue
+        comp = (lab == i)
+        ring = (cv2.dilate(comp.reshape(H, W).astype(np.uint8), near_k).reshape(-1) > 0) & ~dup_grown
+        x = _lab(_straight(img[comp]))
+        under_own = _lab(_straight(img[ring & (top == rank[under])]))
+        occ_own = _lab(_straight(img[ring & (top == rank[occluder])]))
+        du, do = _nearest_de(x, under_own), _nearest_de(x, occ_own)
+        owner = "occluder" if du <= DUP_DE and du < do else "under"
+        labels[comp] = i
+        if owner == "occluder":
+            carried[comp] = True
+        comps[i] = {"px": int(comp.sum()), "owner": owner, "de_under": du, "de_occluder": do}
+    cache[key] = {"labels": labels, "carried": carried, "components": comps}
+    return cache[key]
+
+
+def carried_texels(rest, under, occluder, components):
+    """The occluder's texels (flat texture indices) that make up the given
+    duplicate components, and their bbox in the occluder's image
+    (x0, y0, x1, y1)."""
+    dup = duplicates(rest, under, occluder)
+    pix = np.nonzero(np.isin(dup["labels"], list(components)))[0]
+    tex = np.unique(rest.top_texel.reshape(-1)[pix])
+    tex = tex[tex >= 0]
+    g = rest.geoms[occluder]
+    t = rest.renderer.texture(g.tex_key)
+    if not len(tex):
+        return tex, None
+    ty, tx = np.divmod(tex, t.w)
+    return tex, (int(tx.min()), int(ty.min()), int(tx.max()) + 1, int(ty.max()) + 1)
+
+
+def carried_visible(rest, frame, under, occluder, components, min_de=DUP_DE):
+    """How many pixels of a shard the occluder carries show in `frame`: the
+    shard's texels drawn on top there, over background (what is under them
+    has alpha < 0.5) or over paint whose colour differs by >= min_de. At
+    rest (and wherever the shard still lies over matching paint) this is 0:
+    the shard is camouflaged until it moves over something else."""
+    tex, _ = carried_texels(rest, under, occluder, components)
+    f = frame.frags.get(occluder)
+    if f is None or not len(tex) or occluder not in frame.slots:
+        return 0
+    io = frame.slots.index(occluder)
+    top = frame.top.reshape(-1)
+    on = np.isin(f.texel, tex) & (f.alpha >= COVER)
+    pix = f.idx[on]
+    sel = top[pix] == io
+    pix, col = pix[sel], f.rgba[on][sel]
+    if not len(pix):
+        return 0
+    n = frame.canvas.H * frame.canvas.W
+    where = np.full(n, -1, np.int64)
+    where[pix] = np.arange(len(pix))
+    under_img = np.zeros((len(pix), 4), np.float32)
+    for s in frame.slots[:io]:   # what is drawn below the occluder there, composited
+        g = frame.frags.get(s)
+        if g is None or frame.geoms[s].blend == "additive":
+            continue
+        k = where[g.idx]
+        hit = k >= 0
+        if hit.any():
+            dst = under_img[k[hit]]
+            under_img[k[hit]] = g.rgba[hit] + dst * (1 - g.rgba[hit][:, 3:4])
+    bare = under_img[:, 3] < COVER
+    de = np.linalg.norm(_lab(_straight(col)) - _lab(_straight(np.maximum(under_img, 1e-6))), axis=1)
+    return int((bare | (de >= min_de)).sum())
 
 
 def _disk_kernel(r):

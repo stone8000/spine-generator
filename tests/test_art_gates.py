@@ -10,7 +10,8 @@ one case that must fail and one that must pass per gate (SOTA §5).
                       around open space is not a hole (SOTA §8.3)
     G6a ghost band    a long square underlay swings out past 0.25 limb width
     G6b ghost paint   an arm baked into the torso paint correlates ~1; a clean
-                      torso ~0
+                      torso ~0; torso paint baked into the forearm correlates
+                      ~1 too but is carried by the forearm: not a ghost
 """
 import functools
 
@@ -79,6 +80,20 @@ def test_g4_square_cut_elbow_tears_at_once():
     assert v[0] < v[1] < v[2]
 
 
+def test_g4_drops_specks_under_4px():
+    """G4's calibration rule: a gap component counts from 4 px (a 2 x 2
+    block); a 1-3 px speck where an outline turns is invisible at 1:1, a
+    1 px hairline crack longer than that is not."""
+    m = np.zeros((12, 12), bool)
+    m[1, 1:4] = True                          # 3 px speck: dropped
+    m[3, 1:9] = True                          # 8 px hairline: kept
+    m[6:8, 6:8] = True                        # 2 x 2 block: kept
+    out = ag.drop_specks(m, ag.G4_MIN_PX)
+    assert not out[1].any() and out[3, 1:9].all() and out[6:8, 6:8].all() and out.sum() == 12
+    assert (ag.drop_specks(m, 1) == m).all()
+    assert ag.G4_MIN_PX == 4.0
+
+
 def test_g4_ramp_weighted_elbow_never_opens():
     p = _probe("elbow_l", mode="joint")
     for a in (10, 30, -30, 60, 100, -100):
@@ -136,6 +151,25 @@ def test_g6b_arm_baked_into_torso_paint():
     for a in (20, -20, 40):
         r = ag.ghost_paint(clean.rest, clean.frame(a))
         assert r["pass"] and r["value"] < 0.2, a
+
+
+def test_g6b_shard_carried_by_the_occluder_is_not_a_ghost():
+    """The forearm image carries the torso paint it lies over (the
+    opposite cut to the ghost above): the revealed torso correlates ~1 with
+    what the forearm showed, but the copy is the forearm's, so G6b passes
+    and reports the pair as carried, visible once the forearm takes the
+    copy off the torso."""
+    p = _probe("elbow_l", mode="rigid", shard=True)
+    dup = ag.duplicates(p.rest, "torso", "forearm_l")
+    assert [c["owner"] for c in dup["components"].values()] == ["occluder"]
+    assert ag.carried_visible(p.rest, p.rest, "torso", "forearm_l", list(dup["components"])) == 0
+    for a in (20, -20):
+        r = ag.ghost_paint(p.rest, p.frame(a), visibility=True)
+        assert r["pass"], a
+        (c,) = r["carried"]
+        assert (c["slot"], c["occluder"]) == ("torso", "forearm_l") and c["ncc"] > 0.9 and c["visible_px"] > 0
+    ghost = _probe("elbow_l", mode="rigid", ghost=True)
+    assert [c["owner"] for c in ag.duplicates(ghost.rest, "torso", "forearm_l")["components"].values()] == ["under"]
 
 
 def test_ncc():
