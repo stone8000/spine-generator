@@ -9,10 +9,10 @@
  * Comparisons across frame rates use common times t = k/30, which fixes the
  * old probe's misaligned 144 fps samples.
  */
-import { play, slotVertices, countFolds, foldReferences, boneTip, spine } from "./runtime.mjs";
+import { play, slotVertices, countFolds, foldReferences, boneTip, localToWorld, world, R } from "./runtime.mjs";
 import { makeGate, skippedGate, pixelScale, round } from "./gate.mjs";
 
-const det = (b) => b.a * b.d - b.b * b.c;
+const det = (bone) => { const p = world(bone); return p.a * p.d - p.b * p.c; };
 
 /** Setup-pose determinant sign of every bone (the G3 reference). */
 function setupSigns(data, skin) {
@@ -36,7 +36,8 @@ export function sweep(data, { fps = 60, pose = null, poseMode = "add", skin = nu
     out.frames++;
     let frameFolds = 0, worstSlot = null, worstSlotFolds = 0;
     sk.bones.forEach((b, i) => {
-      const vals = [b.a, b.b, b.c, b.d, b.worldX, b.worldY];
+      const p = world(b);
+      const vals = [p.a, p.b, p.c, p.d, p.worldX, p.worldY];
       if (!vals.every(Number.isFinite)) { if (out.nonFinite.length < 50) out.nonFinite.push(`${anim ?? "setup"}@${round(t)} bone ${b.data.name}`); return; }
       const s = Math.sign(det(b));
       if (s !== 0 && ref[i] !== 0 && s !== ref[i] && !flipAllowed.has(b.data.name) && !out.flips.has(b.data.name)) {
@@ -44,7 +45,7 @@ export function sweep(data, { fps = 60, pose = null, poseMode = "add", skin = nu
       }
     });
     for (const slot of sk.slots) {
-      const w = slotVertices(slot);
+      const w = slotVertices(sk, slot);
       if (!w.every(Number.isFinite)) { if (out.nonFinite.length < 50) out.nonFinite.push(`${anim ?? "setup"}@${round(t)} slot ${slot.data.name}`); continue; }
       const f = countFolds(slot, w, refs);
       frameFolds += f;
@@ -111,8 +112,7 @@ export function gateFootPlant(data, ir, H, dt = "grid") {
       const [lx, ly] = Array.isArray(p.point) ? p.point : [0, 0];
       const track = [];
       play(data, { anim, fps, physics: "update", dt }, (sk, t) => {
-        const b = sk.findBone(p.bone);
-        const v = b.localToWorld(new spine.Vector2(lx, ly));
+        const v = localToWorld(sk.findBone(p.bone), lx, ly);
         track.push([t, v.x, v.y]);
       });
       for (const [t0, t1] of spans) {
@@ -139,7 +139,7 @@ export function gateFootPlant(data, ir, H, dt = "grid") {
 
 /** Physics bone tips at every step of one run, with their times. */
 function physicsTrack(data, anim, fps, dt) {
-  const bones = data.physicsConstraints.map((pc) => pc.bone.name);
+  const bones = R.physicsConstraints(data).map((pc) => pc.bone.name);
   const track = [];
   play(data, { anim, fps, physics: "update", dt }, (sk, t) => {
     track.push({ t, tips: bones.map((n) => boneTip(sk.findBone(n))) });
@@ -166,7 +166,7 @@ function tipsAt(track, t) {
  * default grid dt gives 1.92/1.20 px, see play()).
  */
 export function gateFpsRobust(data, fpsList, H, dt = "grid") {
-  if (!data.physicsConstraints.length) return skippedGate("P1_FPS_ROBUST", "skipped: no physics constraints", 0);
+  if (!R.physicsConstraints(data).length) return skippedGate("P1_FPS_ROBUST", "skipped: no physics constraints", 0);
   if (new Set(fpsList).size < 2) return skippedGate("P1_FPS_ROBUST", `skipped: needs >= 2 frame rates, got --fps ${fpsList.join(",")}`, 0);
   const ref = Math.max(...fpsList);
   const s = pixelScale(H);
@@ -224,8 +224,8 @@ function snapshotRun(data, anim, dts) {
   const frames = [];
   play(data, { anim, dts, physics: "update" }, (sk) => {
     const v = [];
-    for (const b of sk.bones) v.push(b.a, b.b, b.c, b.d, b.worldX, b.worldY);
-    for (const slot of sk.slots) v.push(...slotVertices(slot));
+    for (const b of sk.bones) { const p = world(b); v.push(p.a, p.b, p.c, p.d, p.worldX, p.worldY); }
+    for (const slot of sk.slots) v.push(...slotVertices(sk, slot));
     frames.push(v);
   });
   return frames;

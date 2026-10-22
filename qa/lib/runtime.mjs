@@ -1,9 +1,11 @@
 /**
- * The official spine-core 4.2 runtime, driven headless.
+ * The official spine-core runtime, driven headless: 4.2.120 (default) or
+ * 4.3.13 (`useRuntime("4.3")`, the primary target).
  *
- * WHY this file exists: every number the QA reports must be what a 4.2 player
- * would show, so loading, posing and stepping all go through spine-core
- * itself; nothing here re-implements runtime maths. What IS ours:
+ * WHY this file exists: every number the QA reports must be what a player
+ * of that version would show, so loading, posing and stepping all go
+ * through spine-core itself; nothing here re-implements runtime maths. What
+ * IS ours:
  *
  *  - a fake Texture, so atlases load in Node without a GPU or image decoding
  *    (UVs come from the page's declared size; the PNG is never decoded);
@@ -12,62 +14,35 @@
  *    hides every other gate (geometry still works on a 1x1 placeholder);
  *  - ONE playback loop (`play`) shared by `dump` and every gate, so the
  *    oracle that Python compares against and the gates can never disagree on
- *    how a frame is produced.
+ *    how a frame is produced;
+ *  - the runtime adapter (rt42.mjs, rt43.mjs): the only code that knows
+ *    which version is loaded. `spine`, `RUNTIME` and `R` are live bindings
+ *    set by useRuntime(), which run.mjs calls before anything else.
  */
-import fs from "node:fs";
-import * as spine from "@esotericsoftware/spine-core";
+export let spine = null;
+export let RUNTIME = null;
+/** The selected runtime adapter (see rt42.mjs for its functions). */
+export let R = null;
 
-export { spine };
-export const RUNTIME = "@esotericsoftware/spine-core@4.2.120";
+export const RUNTIMES = ["4.2", "4.3"];
 
-class FakeTexture extends spine.Texture {
-  setFilters() {}
-  setWraps() {}
-  dispose() {}
-}
-
-/** A 1x1 full-page region used where the atlas has none (geometry stays valid). */
-function placeholderRegion() {
-  const r = new spine.TextureRegion();
-  Object.assign(r, { u: 0, v: 0, u2: 1, v2: 1, width: 1, height: 1, originalWidth: 1, originalHeight: 1, degrees: 0, offsetX: 0, offsetY: 0 });
-  r.texture = new FakeTexture({ width: 1, height: 1 });
-  return r;
-}
-
-/** AtlasAttachmentLoader that lists missing regions in `this.missing` instead of throwing. */
-class RecordingAtlasLoader extends spine.AtlasAttachmentLoader {
-  constructor(atlas) {
-    super(atlas);
-    this.missing = [];
-    this.placeholder = placeholderRegion();
+/**
+ * Select the runtime every later call uses. 4.3 needs `npm ci` in qa43/
+ * (its spine-core is pinned there); the error says so instead of a stack.
+ */
+export async function useRuntime(version = "4.2") {
+  if (!RUNTIMES.includes(version)) throw new Error(`--runtime must be one of ${RUNTIMES.join(", ")}, got '${version}'`);
+  let mod;
+  try {
+    mod = version === "4.3" ? await import("./rt43.mjs") : await import("./rt42.mjs");
+  } catch (e) {
+    const where = version === "4.3" ? "qa43/" : "qa/";
+    throw new Error(`spine-core for ${version} is not installed (npm ci in ${where}): ${e.message}`);
   }
-
-  regionFor(path, name, kind) {
-    const region = this.atlas.findRegion(path);
-    if (region) return region;
-    this.missing.push({ path, attachment: name, kind });
-    return this.placeholder;
-  }
-
-  fillSequence(name, basePath, sequence) {
-    for (let i = 0; i < sequence.regions.length; i++) {
-      sequence.regions[i] = this.regionFor(sequence.getPath(basePath, i), name, "sequence");
-    }
-  }
-
-  newRegionAttachment(skin, name, path, sequence) {
-    const att = new spine.RegionAttachment(name, path);
-    if (sequence) this.fillSequence(name, path, sequence);
-    else att.region = this.regionFor(path, name, "region");
-    return att;
-  }
-
-  newMeshAttachment(skin, name, path, sequence) {
-    const att = new spine.MeshAttachment(name, path);
-    if (sequence) this.fillSequence(name, path, sequence);
-    else att.region = this.regionFor(path, name, "mesh");
-    return att;
-  }
+  R = mod.adapter;
+  spine = R.spine;
+  RUNTIME = R.RUNTIME;
+  return R;
 }
 
 /**
@@ -77,18 +52,7 @@ class RecordingAtlasLoader extends spine.AtlasAttachmentLoader {
  * parsed file either way, so file-only gates still run.
  */
 export function load(skeletonPath, atlasPath) {
-  const text = fs.readFileSync(skeletonPath, "utf8");
-  const raw = JSON.parse(text);
-  const atlas = new spine.TextureAtlas(fs.readFileSync(atlasPath, "utf8"));
-  for (const page of atlas.pages) page.setTexture(new FakeTexture({ width: page.width, height: page.height }));
-  const loader = new RecordingAtlasLoader(atlas);
-  try {
-    // A fresh parse: the reader must not share objects with `raw`.
-    const data = new spine.SkeletonJson(loader).readSkeletonData(JSON.parse(text));
-    return { raw, atlas, data, missingRegions: loader.missing, error: null };
-  } catch (e) {
-    return { raw, atlas, data: null, missingRegions: loader.missing, error: String(e && e.message ? e.message : e) };
-  }
+  return R.load(skeletonPath, atlasPath);
 }
 
 const POSE_FIELDS = ["rotation", "x", "y", "scaleX", "scaleY", "shearX", "shearY"];
@@ -113,36 +77,26 @@ export function validatePose(data, pose) {
 function applyPose(sk, pose, mode) {
   const saved = [];
   for (const [name, fields] of Object.entries(pose ?? {})) {
-    const bone = sk.findBone(name);
+    const local = R.local(sk.findBone(name));
     for (const [f, v] of Object.entries(fields)) {
-      saved.push([bone, f, bone[f]]);
-      bone[f] = mode === "set" ? v : bone[f] + v;
+      saved.push([local, f, local[f]]);
+      local[f] = mode === "set" ? v : local[f] + v;
     }
   }
-  return () => { for (const [bone, f, v] of saved.reverse()) bone[f] = v; };
-}
-
-/** Zero every constraint's mix so the pose is pure forward kinematics (C1 hook). */
-function disableConstraints(sk) {
-  for (const c of sk.ikConstraints) c.mix = 0;
-  for (const c of sk.transformConstraints) Object.assign(c, { mixRotate: 0, mixX: 0, mixY: 0, mixScaleX: 0, mixScaleY: 0, mixShearY: 0 });
-  for (const c of sk.pathConstraints) Object.assign(c, { mixRotate: 0, mixX: 0, mixY: 0 });
-  for (const c of sk.physicsConstraints) c.mix = 0;
+  return () => { for (const [local, f, v] of saved.reverse()) local[f] = v; };
 }
 
 /** A skeleton at the origin, scale 1, no flip, in setup pose. */
 export function newSkeleton(data, skinName) {
-  const sk = new spine.Skeleton(data);
+  const sk = R.newSkeleton(data);
   Object.assign(sk, { x: 0, y: 0, scaleX: 1, scaleY: 1 });
   if (skinName) {
     if (!data.findSkin(skinName)) throw new Error(`no skin named '${skinName}'`);
-    sk.setSkinByName(skinName);
+    R.setSkin(sk, skinName);
   }
-  sk.setToSetupPose();
+  R.setupPose(sk);
   return sk;
 }
-
-const PHYSICS = { update: spine.Physics.update, reset: spine.Physics.reset, none: spine.Physics.none };
 
 /**
  * Requested times split into grid steps and off-grid times. A time t is on
@@ -175,7 +129,7 @@ function splitTimes(times, fps) {
  * the determinism gate uses it), pose, poseMode ("add" | "set"),
  * constraints (false = all mixes 0), skin, dt ("grid" | "const").
  *
- * Per frame, exactly the documented player order:
+ * Per frame, exactly the documented player order (both versions):
  *   state.update(dt); state.apply(sk); [pose]; sk.update(dt);
  *   sk.updateWorldTransform(first frame ? Physics.reset : physics)
  * Grid step k sits at time k/fps (not a running sum of dt), so every frame
@@ -187,14 +141,14 @@ function splitTimes(times, fps) {
  * differ by ~1e-17 s per step, yet physics whose step equals the frame time
  * lands on the other side of `remaining >= step` now and then, so the P1
  * numbers differ (warden react 1.92/1.20 px grid vs 1.39/0.90 px const at
- * 30/60 fps).
+ * 30/60 fps on 4.2).
  */
 export function play(data, opts, visit) {
   const { anim = null, fps = 60, physics = "update", times = null, dts = null, pose = null, poseMode = "add", constraints = true, skin = null, dt = "grid" } = opts;
-  if (!(physics in PHYSICS)) throw new Error(`physics must be one of ${Object.keys(PHYSICS).join("|")}`);
+  if (!["update", "reset", "none"].includes(physics)) throw new Error("physics must be one of update|reset|none");
   if (!["grid", "const"].includes(dt)) throw new Error("dt must be grid|const");
-  const mode = PHYSICS[physics];
-  const first = physics === "none" ? spine.Physics.none : spine.Physics.reset;
+  const mode = R.physics(physics);
+  const first = physics === "none" ? R.physics("none") : R.physics("reset");
   const animation = anim ? data.findAnimation(anim) : null;
   if (anim && !animation) throw new Error(`no animation named '${anim}'`);
 
@@ -205,14 +159,10 @@ export function play(data, opts, visit) {
    */
   const run = (steps, emit) => {
     const sk = newSkeleton(data, skin);
-    let state = null;
-    if (animation) {
-      state = new spine.AnimationState(new spine.AnimationStateData(data));
-      state.setAnimationWith(0, animation, false);
-    }
+    const state = animation ? R.newState(data, animation) : null;
     steps.forEach(([t, dt], i) => {
       if (state) { state.update(dt); state.apply(sk); }
-      if (!constraints) disableConstraints(sk);
+      if (!constraints) R.disableConstraints(sk);
       const undo = applyPose(sk, pose, poseMode);
       sk.update(dt);
       sk.updateWorldTransform(i === 0 ? first : mode);
@@ -241,31 +191,23 @@ export function play(data, opts, visit) {
   }
 }
 
+/** World matrix + origin of a bone: {a, b, c, d, worldX, worldY} (4.3: its applied pose). */
+export function world(bone) {
+  return R.world(bone);
+}
+
+/** The attachment a slot shows now. */
+export function slotAttachment(slot) {
+  return R.attachment(slot);
+}
+
 /**
  * World vertices of a slot's current attachment, skeleton space:
  * meshes/bounding boxes/clipping/paths via computeWorldVertices (deform
  * included), regions as the 4-corner quad, points as [x, y]; [] otherwise.
  */
-export function slotVertices(slot) {
-  const att = slot.getAttachment();
-  if (!att) return new Float64Array(0);
-  if (att instanceof spine.RegionAttachment) {
-    const out = new Float64Array(8);
-    att.computeWorldVertices(slot, out, 0, 2);
-    return out;
-  }
-  // Before VertexAttachment: in 4.2 PointAttachment extends it (with no
-  // vertices), so the generic branch would swallow points and return [].
-  if (att instanceof spine.PointAttachment) {
-    const p = att.computeWorldPosition(slot.bone, new spine.Vector2());
-    return Float64Array.of(p.x, p.y);
-  }
-  if (att instanceof spine.VertexAttachment) {
-    const out = new Float64Array(att.worldVerticesLength);
-    att.computeWorldVertices(slot, 0, att.worldVerticesLength, out, 0, 2);
-    return out;
-  }
-  return new Float64Array(0);
+export function slotVertices(sk, slot) {
+  return R.slotVertices(sk, slot);
 }
 
 /**
@@ -297,15 +239,13 @@ function windings(att, w) {
  */
 export function foldReferences(data, skinName = null) {
   const sk = newSkeleton(data, skinName);
-  sk.updateWorldTransform(spine.Physics.reset);
+  sk.updateWorldTransform(R.physics("reset"));
   const refs = new Map(), mirrored = [], setupFolds = [];
   for (const skin of new Set([sk.skin, data.defaultSkin].filter(Boolean))) {
-    for (const { slotIndex, name, attachment: att } of skin.getAttachments()) {
+    for (const { slotIndex, name, attachment: att } of R.skinEntries(skin)) {
       if (!(att instanceof spine.MeshAttachment) || refs.get(att)?.has(slotIndex)) continue;
       const slot = sk.slots[slotIndex];
-      const w = new Float64Array(att.worldVerticesLength);
-      att.computeWorldVertices(slot, 0, att.worldVerticesLength, w, 0, 2); // setup: no deform
-      const ws = windings(att, w);
+      const ws = windings(att, R.meshSetupVertices(sk, slot, att)); // setup: no deform
       const pos = ws.filter((x) => x > 0).length, neg = ws.length - pos;
       const sign = pos > neg ? 1 : -1;
       if (!refs.has(att)) refs.set(att, new Map());
@@ -326,7 +266,7 @@ export function foldReferences(data, skinName = null) {
  * attachments.
  */
 export function countFolds(slot, w, refs = null) {
-  const att = slot.getAttachment();
+  const att = R.attachment(slot);
   if (!(att instanceof spine.MeshAttachment)) return 0;
   const ref = refs ? refs.sign(slot, att) : -1;
   return windings(att, w).filter((x) => x !== ref).length;
@@ -334,8 +274,13 @@ export function countFolds(slot, w, refs = null) {
 
 /** World point of a bone's tip (local (length, 0)); the origin for a 0-length bone. */
 export function boneTip(bone) {
-  const len = bone.data.length;
-  return [bone.worldX + bone.a * len, bone.worldY + bone.c * len];
+  const len = bone.data.length, p = R.world(bone);
+  return [p.worldX + p.a * len, p.worldY + p.c * len];
+}
+
+/** World point of a bone-local point. */
+export function localToWorld(bone, x, y) {
+  return R.world(bone).localToWorld(new spine.Vector2(x, y));
 }
 
 /**
@@ -347,7 +292,7 @@ export function skeletonHeight(data) {
   let lo = Infinity, hi = -Infinity;
   play(data, { physics: "none" }, (sk) => {
     for (const slot of sk.slots) {
-      const v = slotVertices(slot);
+      const v = slotVertices(sk, slot);
       for (let i = 1; i < v.length; i += 2) { lo = Math.min(lo, v[i]); hi = Math.max(hi, v[i]); }
     }
   });

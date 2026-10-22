@@ -6,8 +6,9 @@ WHY A WRAPPER
   answer to "is the oracle installed?" so they can skip cleanly on a machine
   without Node or without `npm ci` in qa/.
 
-  SPINEGEN_QA_RUN points at another run.mjs with the same interface (for
-  example a 4.3 build in qa43/).
+  SPINEGEN_QA_RUN points at another run.mjs with the same interface.
+  `runtime="4.3"` asks the same run.mjs to judge with spine-core 4.3.13
+  (installed in qa43/; available("4.3") says whether it is).
 """
 import json
 import os
@@ -22,36 +23,44 @@ def run_script():
     return Path(os.environ.get("SPINEGEN_QA_RUN") or REPO / "qa" / "run.mjs")
 
 
-def available():
-    """(ok, reason) — whether `dump` can run here."""
+def available(runtime="4.2"):
+    """(ok, reason) — whether `dump` can run here (with that runtime)."""
     node = shutil.which("node")
     if not node:
         return False, "node is not on PATH"
     run = run_script()
     if not run.exists():
         return False, f"{run} does not exist (the JS oracle is not built)"
+    if runtime == "4.3":
+        qa43 = run.parent.parent / "qa43"
+        if (qa43 / "node_modules" / "@esotericsoftware" / "spine-core").is_dir():
+            return True, ""
+        return False, f"spine-core 4.3.13 is not installed (run npm ci in {qa43})"
     for d in [run.parent, *run.parent.parents]:
         if (d / "node_modules" / "@esotericsoftware" / "spine-core").is_dir():
             return True, ""
     return False, f"@esotericsoftware/spine-core is not installed for {run} (run npm ci in {run.parent})"
 
 
-def _run(args, timeout):
-    ok, why = available()
+def _run(args, timeout, runtime=None):
+    ok, why = available(runtime or "4.2")
     if not ok:
         raise RuntimeError(why)
+    if runtime:
+        args = [args[0], "--runtime", runtime, *args[1:]]
     p = subprocess.run(["node", str(run_script()), *args], capture_output=True, text=True, timeout=timeout)
     return p
 
 
 def dump(skeleton, atlas, anim=None, times=None, fps=None, physics=None, pose=None, pose_mode=None,
-         constraints=True, skin=None, folds=False, timeout=600):
+         constraints=True, skin=None, folds=False, timeout=600, runtime=None):
     """World bones and slot vertices from the runtime (see qa/README.md, dump).
 
     pose        {bone: {rotation, x, y, scaleX, scaleY, shearX, shearY}}
     pose_mode   "add" (runtime default: added to the frame's local values) or "set"
     constraints False zeroes every constraint mix (pure forward kinematics)
     folds       adds each frame's G1 fold count
+    runtime     "4.2" (default) or "4.3"
     """
     args = ["dump", "--skeleton", str(skeleton), "--atlas", str(atlas)]
     if anim is not None:
@@ -72,13 +81,13 @@ def dump(skeleton, atlas, anim=None, times=None, fps=None, physics=None, pose=No
         args += ["--skin", skin]
     if folds:
         args += ["--folds"]
-    p = _run(args, timeout)
+    p = _run(args, timeout, runtime)
     if p.returncode != 0:
         raise RuntimeError(f"qa dump failed ({p.returncode}): {p.stderr.strip()[-2000:]}")
     return json.loads(p.stdout)
 
 
-def check(skeleton, atlas, target=None, ir=None, fps=None, c1=None, timeout=1800):
+def check(skeleton, atlas, target=None, ir=None, fps=None, c1=None, timeout=1800, runtime=None):
     """(exit code, report) of `qa/run.mjs check` (0 = every hard gate passed).
 
     c1 is the file oracle_check --out wrote; qa merges it as gate C1_ORACLE.
@@ -92,7 +101,7 @@ def check(skeleton, atlas, target=None, ir=None, fps=None, c1=None, timeout=1800
         args += ["--fps", ",".join(str(f) for f in fps)]
     if c1:
         args += ["--c1", str(c1)]
-    p = _run(args, timeout)
+    p = _run(args, timeout, runtime)
     try:
         report = json.loads(p.stdout)
     except ValueError:

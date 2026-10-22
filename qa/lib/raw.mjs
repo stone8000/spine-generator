@@ -124,6 +124,63 @@ export function versionFeatures(raw) {
   return found;
 }
 
+/** The `type` values a 4.3 runtime reads from `constraints[]`; anything else is skipped without a word. */
+export const TYPES_43 = ["ik", "transform", "path", "physics", "slider"];
+
+/**
+ * What a 4.3 runtime (SkeletonJson 4.3.13) does not read the way the file
+ * means it, as strings for L1 when the target is 4.3. Every one of these is
+ * silent in 4.3, or a load that throws with a message naming a symptom:
+ *  - 4.2's top-level ik/transform/path/physics arrays: 4.3 reads only
+ *    `constraints[]`, so they are dropped (or the load throws when an
+ *    animation or skin names one, [E5]);
+ *  - a `constraints[]` entry whose `type` is not one of TYPES_43: skipped;
+ *  - 4.2 spellings inside a 4.3 entry: transform `target`/`local`/
+ *    `relative` (4.3: `source`, `localSource` + `localTarget`, `additive`),
+ *    path `target` (4.3: `slot`), IK `uniform` (4.3: `scaleY: "uniform"`);
+ *  - a linked mesh with 4.2's `parent` and no `source`: 4.3 reads it as a
+ *    plain mesh and the load throws on its missing uvs.
+ */
+export function format43Findings(raw) {
+  const items = [];
+  for (const kind of CONSTRAINT_KINDS) {
+    if (size(raw[kind]) > 0) items.push(`top-level ${kind}[] (${size(raw[kind])} constraints): 4.3 reads only constraints[] and drops these (write entries with type '${kind}')`);
+  }
+  const list = Array.isArray(raw.constraints) ? raw.constraints : [];
+  list.forEach((c, i) => {
+    const where = `constraints[${i}] '${c?.name}'`;
+    if (!TYPES_43.includes(c?.type)) { items.push(`${where}: type ${JSON.stringify(c?.type)} is not read by 4.3 (the entry is skipped)`); return; }
+    if (c.type === "transform") {
+      for (const [old, now] of [["target", "source"], ["local", "localSource/localTarget"], ["relative", "additive"]]) {
+        if (c[old] !== undefined) items.push(`${where}: 4.2 key '${old}' in a 4.3 transform (4.3 reads '${now}')`);
+      }
+      if (c.source === undefined) items.push(`${where}: no 'source' (the 4.3 load throws)`);
+    }
+    if (c.type === "path" && c.slot === undefined) items.push(`${where}: no 'slot'${c.target !== undefined ? " (4.2 'target' is not read)" : ""} (the 4.3 load throws)`);
+    if (c.type === "ik" && c.uniform !== undefined) items.push(`${where}: 4.2 key 'uniform' (4.3 reads scaleY: "uniform")`);
+  });
+  for (const skin of skinList(raw)) {
+    for (const [slot, atts] of Object.entries(skin.attachments ?? {})) {
+      for (const [name, a] of Object.entries(atts ?? {})) {
+        if (a && a.type === "linkedmesh" && a.source === undefined) {
+          items.push(`linked mesh ${skin.name}/${slot}/${name}: no 'source'${a.parent !== undefined ? " (4.2 'parent' is not read)" : ""}; 4.3 reads it as a plain mesh and throws`);
+        }
+      }
+    }
+  }
+  return items;
+}
+
+/** 4.3 transform `properties` to-names -> the mix each one reads. */
+export const TO_MIX_43 = { rotate: "mixRotate", x: "mixX", y: "mixY", scaleX: "mixScaleX", scaleY: "mixScaleY", shearY: "mixShearY" };
+
+/** The to-properties a 4.3 transform entry drives (union over its from-properties). */
+export function transformTargets43(c) {
+  const out = new Set();
+  for (const from of Object.values(c?.properties ?? {})) for (const to of Object.keys(from?.to ?? {})) out.add(to);
+  return out;
+}
+
 /**
  * Number of curve channels a timeline interpolates, i.e. a key's `curve`
  * array must hold 4 numbers per channel (cx1, cy1, cx2, cy2 each).
@@ -136,6 +193,7 @@ export function curveChannels(group, name) {
     slots: { rgba: 4, rgb: 3, rgba2: 7, rgb2: 6, alpha: 1, attachment: 0, color: 4, twocolor: 7 },
     path: { position: 1, spacing: 1, mix: 3 },
     physics: { inertia: 1, strength: 1, damping: 1, mass: 1, wind: 1, gravity: 1, mix: 1, reset: 0 },
+    slider: { time: 1, mix: 1 }, // 4.3
     attachments: { deform: 1, sequence: 0 },
   };
   if (group === "ik") return 2; // mix, softness
@@ -152,7 +210,7 @@ export function timelines(raw) {
   const out = [];
   for (const [anim, map] of Object.entries(raw.animations ?? {})) {
     const push = (group, owner, name, keys) => { if (Array.isArray(keys)) out.push({ anim, group, owner, name, keys }); };
-    for (const group of ["bones", "slots", "path", "physics"]) {
+    for (const group of ["bones", "slots", "path", "physics", "slider"]) {
       for (const [owner, tls] of Object.entries(map[group] ?? {})) {
         for (const [name, keys] of Object.entries(tls ?? {})) push(group, owner, name, keys);
       }

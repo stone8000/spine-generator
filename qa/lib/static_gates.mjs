@@ -11,12 +11,13 @@
  * author wrote, and the runtime data for what a player will actually do.
  */
 import path from "node:path";
-import { spine } from "./runtime.mjs";
+import { spine, R, RUNTIME } from "./runtime.mjs";
 import { makeGate, skippedGate } from "./gate.mjs";
 import { pngSize } from "./png.mjs";
 import {
   parseVersion, versionFeatures, rawCounts, rawConstraints, timelines, curveChannels,
-  attachmentEntries, decodeMeshVertices, boundaryEdges, insidePolygon,
+  attachmentEntries, decodeMeshVertices, boundaryEdges, insidePolygon, format43Findings, TO_MIX_43,
+  transformTargets43,
 } from "./raw.mjs";
 
 const vnum = (v) => v.major * 1000 + v.minor;
@@ -28,6 +29,9 @@ const vnum = (v) => v.major * 1000 + v.minor;
  * and no feature is newer than the declared version (or than the target),
  * nor an older key name the target ignores (4.1 bone `transform`, linked
  * mesh `deform`, animation `deform` / `draworder`, object-form skins).
+ * Target 4.3 adds the 4.3 format rules (raw.format43Findings): no 4.2
+ * top-level constraint arrays, every constraints[] entry of a type 4.3
+ * reads, no 4.2 spellings inside it, linked meshes with `source`.
  */
 export function gateVersion(raw, target, loadError) {
   const items = [];
@@ -49,7 +53,8 @@ export function gateVersion(raw, target, loadError) {
       items.push(`${f.feature} (${f.where}) is a ${f.since} feature; a ${target} runtime ignores it`);
     }
   }
-  if (loadError) items.push(`spine-core 4.2.120 throws on load: ${loadError}`);
+  if (vnum(tgt) >= 4003) items.push(...format43Findings(raw));
+  if (loadError) items.push(`${RUNTIME.replace("@esotericsoftware/", "")} throws on load: ${loadError}`);
   return makeGate("L1_VERSION", {
     value: items.length, max: 0, items,
     worst: items[0],
@@ -59,7 +64,7 @@ export function gateVersion(raw, target, loadError) {
 
 // ----------------------------------------------------------------- L2 COUNTS
 
-/** The L2 counts as the 4.2 runtime loaded them. */
+/** The L2 counts as the selected runtime loaded them. */
 export function runtimeCounts(data) {
   let attachments = 0, meshes = 0, regions = 0;
   for (const skin of data.skins) {
@@ -72,9 +77,9 @@ export function runtimeCounts(data) {
   return {
     bones: data.bones.length, slots: data.slots.length, skins: data.skins.length,
     animations: data.animations.length, events: data.events.length,
-    ik: data.ikConstraints.length, transform: data.transformConstraints.length,
-    path: data.pathConstraints.length, physics: data.physicsConstraints.length,
-    slider: 0, // 4.2 has no slider constraint
+    ik: R.ikConstraints(data).length, transform: R.transformConstraints(data).length,
+    path: R.pathConstraints(data).length, physics: R.physicsConstraints(data).length,
+    slider: R.sliders(data).length, // 4.2 has no slider constraint: always 0
     attachments, meshes, regions,
   };
 }
@@ -143,13 +148,11 @@ export function gateCounts(raw, data, ir) {
  * the later of two sharing an order, simply never runs
  * (research/experiments/spine42/order.mjs, [E4]); items name each one.
  */
-export function gateOrder(raw, data) {
+export function gateOrder(raw, data, ir = null) {
+  if (R.version === "4.3") return gateOrder43(raw, data, ir);
   const list = [];
   if (data) {
-    for (const [kind, arr] of [["ik", data.ikConstraints], ["transform", data.transformConstraints],
-      ["path", data.pathConstraints], ["physics", data.physicsConstraints]]) {
-      for (const c of arr) list.push({ kind, name: c.name, order: c.order });
-    }
+    list.push(...R.constraintList(data));
   } else {
     const cons = rawConstraints(raw);
     for (const kind of ["ik", "transform", "path", "physics"]) {
@@ -177,6 +180,65 @@ export function gateOrder(raw, data) {
   return makeGate("L3_ORDER", {
     value: items.length, max: 0, items, worst: items[0],
     note: `${n} constraints` + (unwritten.length ? `; no 'order' key (runtime default 0): ${unwritten.join(", ")}` : ""),
+  });
+}
+
+/**
+ * The IR's constraints in evaluation order, [{kind, name}]: (order, kind
+ * rank ik < transform < path < physics, list position), the order
+ * spinegen's emitters write (spinegen/ir.py constraints()). A half_angle
+ * entry is one transform. Constraints that never ran are included: the
+ * emitters keep them in place, inert.
+ */
+export function irConstraintOrder(ir) {
+  const out = [];
+  ["ik", "transform", "path", "physics"].forEach((kind, rank) => {
+    (Array.isArray(ir?.[kind]) ? ir[kind] : []).forEach((c, i) => out.push({ kind, name: c.name, key: [c.order ?? 0, rank, i] }));
+  });
+  out.sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2]);
+  return out.map(({ kind, name }) => ({ kind, name }));
+}
+
+/**
+ * L3 on 4.3: there is no `order`; constraints run in `constraints[]` list
+ * order. What still goes wrong silently:
+ *  - an `order` key left on an entry (a 4.2 file moved over by hand) that
+ *    disagrees with the entry's position: 4.3 ignores it and runs the list;
+ *  - two constraints of one type with the same name: timelines and skins
+ *    bind to the first, the second is never keyed;
+ *  - with --ir: the list order is not the IR's evaluation order (the
+ *    "contiguous" order the emitter must write, see spinegen/emit/spine43.py).
+ */
+function gateOrder43(raw, data, ir) {
+  const items = [];
+  const list = Array.isArray(raw.constraints) ? raw.constraints : [];
+  list.forEach((c, i) => {
+    if (c && c.order !== undefined && c.order !== i) items.push(`${c.type} ${c.name}: 'order' ${c.order} but runs at list position ${i} (4.3 ignores 'order')`);
+  });
+  const seen = new Map();
+  for (const c of list) {
+    const key = `${c?.type}:${c?.name}`;
+    if (seen.has(key)) items.push(`two ${c.type} constraints named '${c.name}': timelines and skins bind to the first`);
+    seen.set(key, true);
+  }
+  const runtime = data ? R.constraintList(data) : list.map((c, order) => ({ kind: c.type, name: c.name, order }));
+  let irNote = "";
+  if (ir && ["ik", "transform", "path", "physics"].some((k) => Array.isArray(ir[k]))) {
+    const want = irConstraintOrder(ir);
+    const n = Math.max(want.length, runtime.length);
+    let off = 0;
+    for (let k = 0; k < n; k++) {
+      const a = runtime[k], b = want[k];
+      if (!a || !b || a.name !== b.name || a.kind !== b.kind) {
+        off++;
+        if (off <= 10) items.push(`position ${k}: runtime runs ${a ? `${a.kind} ${a.name}` : "nothing"}, IR order has ${b ? `${b.kind} ${b.name}` : "nothing"}`);
+      }
+    }
+    irNote = off ? `; ${off} positions differ from the IR order` : "; list order = IR evaluation order";
+  }
+  return makeGate("L3_ORDER", {
+    value: items.length, max: 0, items, worst: items[0],
+    note: `${runtime.length} constraints, run in constraints[] order (4.3 has no 'order')${irNote}`,
   });
 }
 
@@ -242,10 +304,11 @@ export function loadedTimelineFindings(data) {
 export function gateIk(data) {
   if (!data) return makeGate("L5_IK_VALID", { value: 1, max: 0, note: "runtime did not load the file" });
   const items = [];
-  for (const ik of data.ikConstraints) {
+  const iks = R.ikConstraints(data);
+  for (const ik of iks) {
     const bones = ik.bones;
     if (bones.length < 1 || bones.length > 2) { items.push(`${ik.name}: ${bones.length} bones (1 or 2 allowed)`); continue; }
-    for (const b of bones) if (b.inherit !== spine.Inherit.Normal) items.push(`${ik.name}: bone ${b.name} inherit ${spine.Inherit[b.inherit]}, needs Normal`);
+    for (const b of bones) if (R.boneInherit(b) !== spine.Inherit.Normal) items.push(`${ik.name}: bone ${b.name} inherit ${spine.Inherit[R.boneInherit(b)]}, needs Normal`);
     if (bones.length === 1 && !bones[0].parent) items.push(`${ik.name}: bone ${bones[0].name} has no parent`);
     if (bones.length === 2) {
       const [parent, child] = bones;
@@ -254,7 +317,7 @@ export function gateIk(data) {
       if (!(child.length > 0)) items.push(`${ik.name}: child ${child.name} length ${child.length}`);
     }
   }
-  return makeGate("L5_IK_VALID", { value: items.length, max: 0, items, worst: items[0], note: `${data.ikConstraints.length} IK constraints` });
+  return makeGate("L5_IK_VALID", { value: items.length, max: 0, items, worst: items[0], note: `${iks.length} IK constraints` });
 }
 
 // ---------------------------------------------------------- L6 PHYSICS_VALID
@@ -426,15 +489,38 @@ export function gateMesh(raw, { generated }) {
 
 const TC_MIXES = ["mixRotate", "mixX", "mixY", "mixScaleX", "mixScaleY", "mixShearY"];
 
-/** L9: every transform constraint writes all six mixes (each defaults to 1). */
+/**
+ * L9: transform-constraint mixes are written, never left to defaults.
+ * 4.2 (top-level transform[]): all six mixes (each defaults to 1, mixY to
+ * mixX, mixScaleY to mixScaleX). 4.3 (constraints[] entries): the mix of
+ * every property the entry drives (`properties` ... `to`), with the same
+ * defaults; an entry that drives nothing does nothing; and a transform
+ * timeline keying the mix of a property the entry does not drive keys
+ * nothing (in 4.2 every mix always applied, so a converted file loses that
+ * motion without a word).
+ */
 export function gateTcMix(raw) {
-  const cons = rawConstraints(raw).transform;
+  const v42 = Array.isArray(raw.transform) ? raw.transform : [];
+  const v43 = (Array.isArray(raw.constraints) ? raw.constraints : []).filter((c) => c?.type === "transform");
   const items = [];
-  for (const c of cons) {
+  for (const c of v42) {
     const missing = TC_MIXES.filter((k) => c[k] === undefined);
     if (missing.length) items.push(`${c.name}: not written: ${missing.join(", ")} (default 1)`);
   }
-  return makeGate("L9_TC_MIX", { value: items.length, max: 0, items, worst: items[0], note: `${cons.length} transform constraints` });
+  for (const c of v43) {
+    const tos = transformTargets43(c);
+    if (!tos.size) { items.push(`${c.name}: no properties: the 4.3 constraint does nothing`); continue; }
+    const missing = [...tos].map((t) => TO_MIX_43[t]).filter((k) => k && c[k] === undefined);
+    if (missing.length) items.push(`${c.name}: not written: ${missing.join(", ")} (default 1, or mixX / mixScaleX for the Y mixes)`);
+    const driven = new Set([...tos].map((t) => TO_MIX_43[t]));
+    for (const [anim, map] of Object.entries(raw.animations ?? {})) {
+      const keys = map?.transform?.[c.name];
+      if (!Array.isArray(keys)) continue;
+      const dead = TC_MIXES.filter((k) => !driven.has(k) && keys.some((key) => key && key[k] !== undefined && key[k] !== 0));
+      if (dead.length) items.push(`${anim}/transform/${c.name}: keys ${dead.join(", ")}, which drive nothing in 4.3 (not in properties)`);
+    }
+  }
+  return makeGate("L9_TC_MIX", { value: items.length, max: 0, items, worst: items[0], note: `${v42.length + v43.length} transform constraints` });
 }
 
 export { skippedGate };

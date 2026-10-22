@@ -1,15 +1,23 @@
 #!/usr/bin/env node
 /**
- * spinegen QA oracle: the official spine-core 4.2.120 runtime as the judge.
+ * spinegen QA oracle: the official spine-core runtime as the judge,
+ * 4.2.120 (default) or 4.3.13 (`--runtime 4.3`, the primary target).
  *
- *   node qa/run.mjs dump  --skeleton x.json --atlas x.atlas [--anim name] [--times 0,0.1,..]
- *                         [--fps 60] [--physics reset|update|none] [--pose JSON|@file]
- *                         [--pose-mode add|set] [--constraints on|off] [--skin name]
- *                         [--folds] [--dt grid|const] [--out file]
- *   node qa/run.mjs check --skeleton x.json --atlas x.atlas [--target 4.2] [--ir build/rig.json]
- *                         [--fps 30,60,120,240] [--pose JSON|@file] [--pma true|false]
- *                         [--c1 c1.json] [--skin name] [--dt grid|const]
+ *   node qa/run.mjs dump  --skeleton x.json --atlas x.atlas [--runtime 4.2|4.3] [--anim name]
+ *                         [--times 0,0.1,..] [--fps 60] [--physics reset|update|none]
+ *                         [--pose JSON|@file] [--pose-mode add|set] [--constraints on|off]
+ *                         [--skin name] [--folds] [--dt grid|const] [--out file]
+ *   node qa/run.mjs check --skeleton x.json --atlas x.atlas [--runtime 4.2|4.3] [--target 4.2|4.3]
+ *                         [--ir build/rig.json] [--fps 30,60,120,240] [--pose JSON|@file]
+ *                         [--pma true|false] [--c1 c1.json] [--skin name] [--dt grid|const]
  *                         [--out report.json]
+ *
+ * --runtime picks the judge (4.3 needs `npm ci` in qa43/, where 4.3.13 is
+ * pinned); --target, the version the file must declare, defaults to it.
+ * The gates are the same on both; L1, L3 and L9 apply the target's format
+ * rules (4.3: one constraints[] list in run order, `properties` on transform
+ * constraints). C1 is 4.2 only: spinegen.lbs models the 4.2.120 runtime, so
+ * on 4.3 it is skipped and says where the equivalent check lives.
  *
  * WHY two commands: `dump` is the raw oracle (world bone matrices and world
  * vertices exactly as a 4.2 player computes them) that the Python side's
@@ -23,8 +31,9 @@ import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { RUNTIME, load, play, slotVertices, countFolds, foldReferences, validatePose, skeletonHeight } from "./lib/runtime.mjs";
-import { makeGate } from "./lib/gate.mjs";
+import * as rt from "./lib/runtime.mjs";
+import { useRuntime, load, play, slotVertices, slotAttachment, world, countFolds, foldReferences, validatePose, skeletonHeight } from "./lib/runtime.mjs";
+import { makeGate, skippedGate } from "./lib/gate.mjs";
 import {
   gateVersion, gateCounts, gateOrder, curveFindings, loadedTimelineFindings, gateIk, gatePhysics,
   gateAtlas, missingRegionsFromFile, gateMesh, gateTcMix,
@@ -108,10 +117,10 @@ function writeJson(obj, out) {
 function frameJson(sk, anim, t, foldRefs, trackTime) {
   const bones = {}, slots = {};
   let folds = 0;
-  for (const b of sk.bones) bones[b.data.name] = { a: b.a, b: b.b, c: b.c, d: b.d, x: b.worldX, y: b.worldY };
+  for (const b of sk.bones) { const p = world(b); bones[b.data.name] = { a: p.a, b: p.b, c: p.c, d: p.d, x: p.worldX, y: p.worldY }; }
   for (const slot of sk.slots) {
-    const att = slot.getAttachment();
-    const v = slotVertices(slot);
+    const att = slotAttachment(slot);
+    const v = slotVertices(sk, slot);
     if (foldRefs) folds += countFolds(slot, v, foldRefs);
     slots[slot.data.name] = { attachment: att ? att.name : null, vertices: Array.from(v) };
   }
@@ -123,7 +132,7 @@ function frameJson(sk, anim, t, foldRefs, trackTime) {
 
 function dump(opts) {
   const { L } = loadInputs(opts);
-  if (!L.data) throw new UsageError(`spine-core 4.2.120 cannot load the skeleton: ${L.error}`);
+  if (!L.data) throw new UsageError(`${rt.RUNTIME} cannot load the skeleton: ${L.error}`);
   const pose = opts.pose ? readJsonArg(opts.pose, "--pose") : null;
   if (pose) asUsage(() => validatePose(L.data, pose));
   const anim = opts.anim ?? null;
@@ -145,7 +154,7 @@ function dump(opts) {
   const refs = opts.folds ? foldReferences(L.data, playOpts.skin) : null;
   play(L.data, playOpts, (sk, t, i, trackTime) => frames.push(frameJson(sk, anim, t, refs, trackTime)));
   frames.sort((x, y) => x.t - y.t); // off-grid --times come from their own runs
-  writeJson({ runtime: RUNTIME, frames }, opts.out);
+  writeJson({ runtime: rt.RUNTIME, frames }, opts.out);
   return 0;
 }
 
@@ -179,6 +188,10 @@ const REPO = path.dirname(QA_DIR);
  * FAILS as "not measured": an unmeasured must-pass gate is not a pass.
  */
 function gateOracle(opts, skeleton, atlas, pose, skin) {
+  if (rt.R.version !== "4.2") {
+    return skippedGate("C1_ORACLE", "4.2 only: spinegen.lbs models spine-core 4.2.120; for a 4.3 file run C1 on the same IR's 4.2 emit " +
+      "(--runtime 4.2) and spinegen.equiv43 for 4.2 = 4.3", 0.1);
+  }
   if (opts.c1) {
     const r = readJsonArg(`@${opts.c1}`, "--c1");
     return makeGate("C1_ORACLE", { value: r.value, max: r.max ?? 0.1, pass: r.pass, worst: r.worst, note: r.note ?? `from ${opts.c1}` });
@@ -220,7 +233,7 @@ function irFlipSet(ir) {
 function check(opts) {
   const { skeleton, atlas: atlasPath, L } = loadInputs(opts);
   const { raw, data, atlas } = L;
-  const target = opts.target ?? "4.2";
+  const target = opts.target ?? rt.R.version;
   const ir = opts.ir ? readJsonArg(`@${opts.ir}`, "--ir") : null;
   const fpsList = numberList(opts.fps ?? "30,60,120,240", "--fps").filter((f) => f > 0);
   const pose = opts.pose ? readJsonArg(opts.pose, "--pose") : null;
@@ -232,7 +245,7 @@ function check(opts) {
   const flipAllowed = irFlipSet(ir);
   const dtMode = dtOpt(opts);
 
-  const gates = [gateVersion(raw, target, L.error), gateCounts(raw, data, ir), gateOrder(raw, data)];
+  const gates = [gateVersion(raw, target, L.error), gateCounts(raw, data, ir), gateOrder(raw, data, ir)];
 
   // L4 needs the sweep's world values, so the sweep runs first.
   let sw = null, sweepError = null;
@@ -267,7 +280,7 @@ function check(opts) {
 
   const pass = gates.every((g) => g.pass || !g.hard);
   const report = {
-    schema: "spinegen-qa/1", runtime: RUNTIME, pass,
+    schema: "spinegen-qa/1", runtime: rt.RUNTIME, pass,
     input: { skeleton, atlas: atlasPath, target, ir: opts.ir ?? null, pose, H, dt: dtMode },
     gates,
   };
@@ -282,20 +295,22 @@ function check(opts) {
 
 // ---------------------------------------------------------------------- main
 
-function main(argv) {
+async function main(argv) {
   const opts = parseArgs(argv);
   const cmd = opts._[0];
   if (opts.help || !cmd) {
     process.stderr.write(fs.readFileSync(new URL(import.meta.url), "utf8").split("*/")[0].replace(/^#!.*\n\/\*\*?/, "").replace(/^ \* ?/gm, "") + "\n");
     return cmd || opts.help ? 0 : 2;
   }
+  if (!["dump", "check"].includes(cmd)) throw new UsageError(`unknown command '${cmd}' (dump | check)`);
+  try { await useRuntime(opts.runtime ?? "4.2"); } catch (e) { throw new UsageError(e.message); }
   if (cmd === "dump") return dump(opts);
   if (cmd === "check") return check(opts);
   throw new UsageError(`unknown command '${cmd}' (dump | check)`);
 }
 
 try {
-  process.exitCode = main(process.argv.slice(2));
+  process.exitCode = await main(process.argv.slice(2));
 } catch (e) {
   process.stderr.write(`qa/run.mjs: ${e instanceof UsageError ? "" : "error: "}${e.message}\n`);
   if (!(e instanceof UsageError)) process.stderr.write(`${e.stack}\n`);
