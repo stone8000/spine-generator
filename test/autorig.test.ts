@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { buildRig, checkJoints, guessJoints } from '../src/autorig.ts';
 import { defaultJoints, JOINTS, toSpine } from '../src/rigTemplate.ts';
@@ -178,4 +179,17 @@ test('celebrate keeps each upper arm within `swing` of how it was drawn (a rear 
   assert.ok(free > 75, `negative control: with the default (no cap) the upper arm turns ${free.toFixed(1)}°`);
   assert.ok(capped < free - 30, `30° cap: ${capped.toFixed(1)}° vs ${free.toFixed(1)}° uncapped`);
   assert.ok(small <= capped + 0.1, `a tighter cap never turns more: ${small.toFixed(1)}° vs ${capped.toFixed(1)}°`);
+});
+
+test('celebrate with only a tighter swing cap stays smooth: the capped arm keeps its bend and never flips mid-pump', () => {
+  // joints of a near-frontal, wide-stance delivery (the bandit monkey, hand-set): capping its arms used to fold the
+  // elbow shut or flip it during the pump (smoothness 20–30)
+  const j = { ...defaultJoints(), ...JSON.parse(readFileSync(new URL('./fixtures/wideStanceJoints.json', import.meta.url), 'utf8')) };
+  const rig = buildRig(j, [...synthLayers('good').keys()]);
+  for (const swing of [10, 20, 30]) {
+    const { json } = compileRecipe(rig.json, { roles: rig.roles, size: estimateSize(rig.json), animations: [{ name: 'cel', preset: 'celebrate', params: { swing } }] });
+    const [r] = checkSkeleton(json, { loops: ['cel'] });
+    const arms = r.issues.filter((i) => i.severity !== 'info' && /arm|fist/i.test(`${i.bone ?? ''} ${i.message}`));
+    assert.deepEqual(arms.map((i) => i.message), [], `swing ${swing}`);
+  }
 });

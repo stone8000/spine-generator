@@ -500,6 +500,7 @@ export const PRESETS: PresetDef[] = [
       const angle = c.param('angle', 85);
       const elbowAngle = c.param('elbow', 40);
       const swing = c.param('swing', 180);
+      const PUMP_FORE = 10, PUMP_UPPER = 5; // degrees
       c.roleList('fists').forEach((f, i) => {
         const peakAt = 0.2 + (i * 2) / 30; // the far fist trails by 2 frames; a peak between key frames makes the runtime's 10-line curve segments jolt
         const chain = c.ikChain(f);
@@ -509,8 +510,10 @@ export const PRESETS: PresetDef[] = [
         // the far arm goes a little higher, so its glove shows over the back of the head instead of stacking on the near one
         const want = i ? c.param('elbowBack', 60) : elbowAngle;
         const off = drawn === undefined ? 0 : ((want - drawn + 540) % 360) - 180;
-        const foreAngle = i ? c.param('angleBack', 95) : angle;
         const elbowPose = drawn === undefined ? want : drawn + Math.max(-swing, Math.min(swing, off));
+        // a capped upper arm takes the forearm with it: keeping the requested elbow bend, not the requested forearm
+        // angle, so the arm keeps its shape instead of folding shut or locking straight
+        const foreAngle = (i ? c.param('angleBack', 95) : angle) + (elbowPose - want);
         // Pose each arm by its two angles (upper arm `elbow`, forearm `angle`, from forward) and solve the fist target
         // from them, so the glove ends up at the same place on any rig: at the defaults, at the top of the head with the
         // elbow forward. A side-on character's front arm crosses the face on the way up; a negative `elbow` keeps it
@@ -524,8 +527,13 @@ export const PRESETS: PresetDef[] = [
             return { ex, ey, x: ex + Math.cos(w) * l2 * c.facing, y: ey + Math.sin(w) * l2 };
           };
           const side = (p: { x: number; y: number }, q: { x: number; y: number }) => Math.sign((q.x - chain.root.x) * (p.y - chain.root.y) - (q.y - chain.root.y) * (p.x - chain.root.x));
-          const p = at(elbowPose, foreAngle);
-          return side(chain.mid, chain.target) === side({ x: p.ex, y: p.ey }, p) ? at : undefined;
+          // the elbow must stay on the drawn side through the whole pump, not just at its centre, or the IK flips mid-swing
+          const drawnSide = side(chain.mid, chain.target);
+          for (const du of [-PUMP_UPPER, 0, PUMP_UPPER]) for (const df of [-PUMP_FORE, 0, PUMP_FORE]) {
+            const p = at(elbowPose + du, foreAngle + df);
+            if (side({ x: p.ex, y: p.ey }, p) !== drawnSide) return undefined;
+          }
+          return at;
         })();
         if (chain && !posed && Math.abs(off) > swing) {
           // the capped pose would flip the elbow: leave the arm as drawn and only pump it
@@ -536,9 +544,9 @@ export const PRESETS: PresetDef[] = [
           out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 25 * s, period: 0.6, peakAt, offset: c.param('lift', 120) * s, duration: D }) });
           return;
         }
-        // the pump: the forearm swings 10° and the upper arm 5° around the pose, together
-        const fore = wave({ amplitude: 10, period: 0.6, peakAt, offset: foreAngle, duration: D });
-        const upper = wave({ amplitude: 5, period: 0.6, peakAt, offset: elbowPose, duration: D });
+        // the pump: the forearm and the upper arm swing around the pose together
+        const fore = wave({ amplitude: PUMP_FORE, period: 0.6, peakAt, offset: foreAngle, duration: D });
+        const upper = wave({ amplitude: PUMP_UPPER, period: 0.6, peakAt, offset: elbowPose, duration: D });
         const fist = (t: number) => posed(upper.value(t), fore.value(t));
         out.screen.push({ bone: f, channel: 'x', motion: fn(D, (t) => fist(t).x - chain.target.x, [], true) });
         out.screen.push({ bone: f, channel: 'y', motion: fn(D, (t) => fist(t).y - chain.target.y, [], true) });
