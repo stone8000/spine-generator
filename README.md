@@ -14,7 +14,7 @@
 |---|---|---|
 | 研究：量化基準、節拍表、外部最佳做法 | ✅ | `research/FINDINGS.md`、`research/beat_table.json`、`research/SOTA.md` |
 | P1 裁判與輸出骨幹 | ✅ 6 項驗收全過，兩輪反查後修正 | `research/P1_REPORT.md`、`qa/README.md` |
-| P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②③④ 通過，⑤ 部分通過，① 未過（剛性掃描比 README 手量嚴）。③ 肘 96 / 92 / 98 / 90°（固定 G2 視窗，含單一三角形；之前 78 / 64 / 62 / 58），頂點 0.53 倍格網，手 0 px。深蹲 0.05–0.13H、重心左右 ±40 px：摺疊 137 → 22，0.10H 以內全 0。袖口／褲管的 physics 權重保留（R3）。審查 F1–F6、R1–R3 已修 | `research/P2_REPORT.md` |
+| P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②③④ 通過，⑤ 部分通過，① 未過（剛性掃描比 README 手量嚴）。③ 肘 96 / 92 / 98 / 90°（固定 G2 視窗，含單一三角形；之前 78 / 64 / 62 / 58），頂點 0.53 倍格網，手 0 px。深蹲 0.05–0.13H、重心左右 ±40 px：摺疊 137 → 22 → **0**（S3：帶內權重剪枝 0.005、`--fit-crouch` 逐腿挑膝蓋長度和腳踝 ramp 次方），頂點 0.52 倍格網。袖口／褲管跟著輔助骨（S1 配件複本）：左袖 physics 位移 17 → 54 px（原版 58），褲管 mix 按原版擺幅調低。腿的預算改用 IK 姿勢量（S2，`budget.json` 的 `ik`；最早的限制是左髖胯下的縫，0.02H）。審查 F1–F6、R1–R3 已修 | `research/P2_REPORT.md` |
 
 P1 的東西：
 - `qa/`：Node 裁判，精確鎖定官方 `@esotericsoftware/spine-core@4.2.120`（與 `spine-canvaskit@4.2.120`），
@@ -30,11 +30,12 @@ P2 的東西：
 - `spinegen/raster.py`、`spinegen/art_gates.py`（G1 G2 G4 G5 G6）、`spinegen/budget.py`（逐關節 θ_soft／θ_hard，
   加上 artreq 項目與對照表）。
 - `research/p2_sheets.py`（rigid／joint 對照表）、`research/p2_crouch_view.py`（蹲下的對照圖）：P2_REPORT 看圖用；
-  `research/p2_band_variants.py`（改模板的關節帶形狀、重建、量肘或深蹲）：A1、A2 的變體表。
+  `research/p2_band_variants.py`（改模板的關節帶形狀、重建、量肘或深蹲）：A1、A2 的變體表；
+  `research/p2_crouch_grid.py`（spine-core 深蹲表）、`research/p2_physics_motion.py`、`research/p2_physics_view.py`（physics 帶動的頂點位移與看圖）。
 
 ```bash
 cd qa && npm ci && npm test        # 55 tests
-python3 -m pytest tests -q         # 233 tests（第三方檔案不存在時自動跳過）
+python3 -m pytest tests -q         # 248 tests（第三方檔案不存在時自動跳過）
 ```
 
 ## 目前的發現
