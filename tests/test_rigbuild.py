@@ -676,6 +676,46 @@ def test_match_physics_scales_down_a_harder_swing_only():
     assert out["pant_phys"]["source_px"] == 11.0 and out["pant_phys"]["px"] == 34.0
 
 
+def test_leg_budget_scans_ik_poses_with_the_ankle_in_its_boot(built):
+    """P2 open issue 6: the per-joint sweep turns the shin with IK off, so
+    the foot stays on its target and the ankle leaves the boot (the knee
+    and ankle numbers are for poses no leg makes). budget.ik_scan walks a
+    crouch, a step and a lifted foot with the IK on: every pose it judges
+    keeps each ankle on its foot, the knees bend in the crouch, and every
+    leg joint gets a limit in each direction, with the move that found it."""
+    from spinegen import budget
+    res = built["joint"]
+    ir = res["ir"]
+    images = {L: img for L, img in res["images"].items()}
+    joints = res["joints"]
+    # the old way: turning the knee 40 deg with IK off pulls the ankle away
+    ev = lbs.Evaluator(ir)
+    state = {c["name"]: {"mix": 0.0} for c in ir["ik"]}
+    b = irmod.by_name(ir["bones"])
+    leg = next(x for x in budget.ik_legs(ir) if x["side"] == "l")
+    shin = leg["shin"]
+    w = ev.world_dict(ev.world({shin: {"rotation": b[shin]["rotation"] + 40.0}}, state))
+    tip = budget._tip(w[shin], b[shin]["length"])
+    assert budget._dist((0, 0, 0, 0, *tip), w[leg["foot"]]) > 20.0
+    ik = budget.ik_scan(ir, images, joints, shifts=(0.0, 20.0), depth_step=0.03, depth_max=0.12, move_step=0.06,
+                        move_max=0.18)
+    assert set(ik["moves"]) == {"crouch dx+0", "crouch dx+20", "step l+", "step l-", "step r+", "step r-",
+                                "lift l", "lift r"}
+    for m in ik["moves"].values():
+        for p in m["poses"]:
+            if p["valid"]:
+                assert p["dislocated_px"] <= budget.IK_DISLOCATE
+        assert m["soft"] <= m["hard"] and all(e["soft"] <= e["hard"] for e in m["per_joint"].values())
+    crouch = [p for p in ik["moves"]["crouch dx+0"]["poses"] if p["valid"]]
+    assert len(crouch) == 4 and abs(crouch[-1]["turns"]["knee_l"]) > 60.0  # the knees bend, the feet stay
+    knees = [k for k in ik["joints"] if k.startswith("knee")]
+    assert knees and all(max(e["soft"] for e in ik["joints"][k].values()) > 20.0 for k in knees)
+    for e in ik["joints"].values():
+        for d in e.values():
+            assert d["soft"] <= d["hard"] + 1e-9 or d["hard_fails_at"] is not None
+            assert d["soft"] == 0.0 or d["soft_move"] in ik["moves"]
+
+
 def test_band_above_an_overlap_keeps_its_share(layers_dir):
     """The knee overlaps the hip band (template "overlap") and keeps the
     reach the template asks for (2 halfwidths up the thigh); the hip band,

@@ -128,6 +128,10 @@ BAND_LATERAL = 1.6     # G2 band half-width across the limb, halfwidths (= spine
 MIN_BAND_RATIO = 0.9   # G2 soft (hold) limit
 TRI_RANGE = (0.3, 3.0)  # G2 single-triangle ratio range
 HOLE_MIN_AREA = 16.0   # G5, px at scale 1
+HOLE_FRAC = 0.02       # G5: at least this share of an enclosed background component was covered at rest
+                       # (P2 IK leg scan: legs stepping apart enclose 21049 px of background between them,
+                       # of which the carry-back put 21 px (0.1%) on rest art: a speck at the rim of open
+                       # space; the elbow crook holes the arm sheets show are 5-14% (44 of 826, 146 of 1218))
 GHOST_MAX_LEN = 0.25   # G6(a), x limb width
 GHOST_MAX_NCC = 0.3    # G6(b)
 NCC_MIN_PX = 64.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1; see ghost_paint)
@@ -758,7 +762,9 @@ def holes(rest, frame, min_area=HOLE_MIN_AREA, masks=False):
     (alpha < 0.5), it lies in a closed background component of ONE group's
     own art (the static slots alone, or the moved slots alone), and at rest
     something covered it (for the moved group: at the point the moved art
-    carries it back to). So a moved arm uncovering an unpainted patch inside
+    carries it back to), in a component at least HOLE_FRAC of which was
+    covered so (a wide gap the legs open between them, with a few carried
+    pixels landing on rest art, is open space). So a moved arm uncovering an unpainted patch inside
     the torso counts; an arm, the torso and a leg closing a loop around
     open space does not (no single group encloses it: the false positive
     SOTA §8.3 warns about), nor does a hole the art showed at rest."""
@@ -788,6 +794,12 @@ def holes(rest, frame, min_area=HOLE_MIN_AREA, masks=False):
             ok = (px[:, 0] >= 0) & (px[:, 0] < W) & (px[:, 1] >= 0) & (px[:, 1] < H)
             hit = np.zeros(len(ii), bool)
             hit[ok] = covered0[px[ok, 1], px[ok, 0]]
+        # a background component the art covered only a sliver of at rest
+        # is open space the art moved off, not a hole (HOLE_FRAC)
+        labs = lab[ii, jj]
+        cnt = np.bincount(labs, minlength=lab.max() + 1)
+        hits = np.bincount(labs[hit], minlength=lab.max() + 1)
+        hit &= hits[labs] >= HOLE_FRAC * cnt[labs]
         hole[ii[hit], jj[hit]] = True
         owner[ii[hit], jj[hit]] = gi
     found = []

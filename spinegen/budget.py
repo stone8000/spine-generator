@@ -61,6 +61,13 @@ OUTPUT (budget.json)
   hard limit; limits lists every soft gate that failed at the first failing
   angle. A limit that never fails within max_angle is max_angle with
   limit_by null.
+  "ik" (rigs with leg IK, ik_scan): the legs in the poses legs make, IK
+  on: a crouch (depth x sideways shift), a step and a lifted foot per leg,
+  each walked in steps of H; per move the depth/distance each leg joint
+  holds to, and per leg joint and direction the turn it holds to in those
+  poses ("joints"). These replace the per-joint hip / knee / ankle sweeps
+  above for planning, which turn one bone with IK off and so pull the
+  ankle out of its boot.
   "artreq" lists art requests (spinegen-artreq/1 items) for duplicates a
   layer carries away from the paint it copies (G6(b) "carried", e.g. a
   shard of trousers cut into a hand image): not a joint limit, an art fix,
@@ -85,7 +92,7 @@ import time
 import numpy as np
 
 from . import art_gates as ag
-from . import raster
+from . import lbs, raster
 
 SCHEMA = "spinegen-budget/1"
 SHEET_EVERY = 10.0
@@ -435,6 +442,357 @@ def _artreq(items, rest, under, occluder, c, where):
     it["max_visible_px"] = max(it["max_visible_px"], int(c["max_visible_px"]))
 
 
+# ---------------------------------------------------------------- legs in IK poses
+
+IK_MOVES = ("crouch", "step", "lift")
+IK_DEPTH_STEP = 0.01   # crouch: hips lowered in steps of this fraction of H
+IK_DEPTH_MAX = 0.20
+IK_SHIFTS = (-40.0, -20.0, 0.0, 20.0, 40.0)  # crouch: hips moved sideways, px (P2 review R2's grid)
+IK_MOVE_STEP = 0.02    # step / lift: the foot target moves in steps of this fraction of H
+IK_MOVE_MAX = 0.30
+IK_REACH = 0.98        # a step lowers the hips until each leg spans at most this much of its length
+IK_DISLOCATE = 1.0     # px: an ankle (shin tip) this far off its foot is a broken pose (hard)
+
+
+def ik_legs(ir):
+    """[{"name", "side", "thigh", "shin", "target", "foot", "hips"}] for each
+    two-bone leg IK whose target carries a foot bone (rigbuild's legs)."""
+    by = {b["name"]: b for b in ir["bones"]}
+    out = []
+    for c in ir.get("ik", []):
+        if len(c["bones"]) != 2:
+            continue
+        thigh, shin = c["bones"]
+        feet = [b["name"] for b in ir["bones"] if b["parent"] == c["target"]]
+        out.append({"name": c["name"], "side": c["name"].rsplit("_", 1)[-1], "thigh": thigh, "shin": shin,
+                    "target": c["target"], "foot": feet[0] if feet else None, "hips": by[thigh]["parent"]})
+    return out
+
+
+class LegProbe:
+    """Renders and judges whole-leg poses with the leg IK ON (the poses a
+    crouch, a step or a lifted foot actually make), on the legs' own slots
+    plus the trunk the hips carry. ik_scan says why."""
+
+    def __init__(self, ir, images, joints, legs, skin=None, canvas=None, H=None):
+        self.ir, self.legs = ir, legs
+        by = {b["name"]: b for b in ir["bones"]}
+        self.by = by
+        r0 = raster.Renderer(ir, images, skin=skin, canvas=canvas)
+        ev = r0.ev
+        self.ev = ev
+        leg_bones = set()
+        for leg in legs:
+            for root in (leg["thigh"], leg["target"]):
+                leg_bones |= _subtree_names(ir, root)
+        hips = {leg["hips"] for leg in legs}
+        trunk = set(hips) | {b["name"] for b in ir["bones"] if b["parent"] in hips and b["name"] not in leg_bones}
+        # the legs' slots and the trunk on the hips (the hip seam's upper
+        # part); arms, head and props are left out: a hand hanging by a
+        # crouching thigh encloses background that is no leg's hole (P2 R2)
+        self.slots = [s["name"] for s in ir["slots"] if s["bone"] in leg_bones | trunk]
+        self.r = r0
+        self.rest = r0.frame(slots=self.slots)
+        self.H = float(H or ir.get("H") or 1.0)
+        names = {leg[k] for leg in legs for k in ("thigh", "shin", "foot") if leg[k]}
+        self.joints = [j for j in joints if j["bone"] in names]
+        self.jrs = {j["name"]: ag.joint_rest(self.rest, j) for j in self.joints}
+        self.world0 = ev.world_dict(ev.world())
+        self.length = {leg["name"]: _dist(self.world0[leg["thigh"]], self.world0[leg["shin"]])
+                       + float(by[leg["shin"]].get("length") or 0.0) for leg in legs}
+
+    def pose_of(self, move, leg=None, amount=0.0, dx=0.0):
+        """Absolute local values: crouch (hips down `amount` px, sideways
+        dx), step (leg's target sideways `amount` px, the hips half way
+        and lowered until both legs reach), lift (leg's target up `amount`)."""
+        b = self.by
+        hips = self.legs[0]["hips"]
+        hx, hy = b[hips]["x"], b[hips]["y"]
+        pose = {}
+        if move == "crouch":
+            pose[hips] = {"x": hx + dx, "y": hy - amount}
+        elif move == "step":
+            t = b[leg["target"]]
+            pose[leg["target"]] = {"x": t["x"] + amount, "y": t["y"]}
+            sx = 0.5 * amount
+            pose[hips] = {"x": hx + sx, "y": hy - self._lower_for_reach(leg, amount, sx)}
+        elif move == "lift":
+            t = b[leg["target"]]
+            pose[leg["target"]] = {"x": t["x"], "y": t["y"] + amount}
+        else:
+            raise ValueError(f"move must be one of {IK_MOVES}")
+        return pose
+
+    def _lower_for_reach(self, moved, amount, sx):
+        """How far the hips must drop (moved sideways by sx) for every leg
+        to span at most IK_REACH of its length (`moved` leg's target moved
+        `amount` px in world x; root-parented targets assumed)."""
+        need = 0.0
+        for leg in self.legs:
+            hip = np.asarray(self.world0[leg["thigh"]][4:6], float) + [sx, 0.0]
+            ank = np.asarray(self.world0[leg["target"]][4:6], float)
+            if leg is moved:
+                ank = ank + [amount, 0.0]
+            r = IK_REACH * self.length[leg["name"]]
+            dxl = abs(ank[0] - hip[0])
+            if dxl >= r:
+                return float("inf")
+            need = max(need, (hip[1] - ank[1]) - math.sqrt(r * r - dxl * dxl))
+        return max(0.0, need)
+
+    def judge(self, pose):
+        """Gates on one pose: {"soft", "hard" (the whole pose), "soft_by",
+        "hard_by", "limits", "joints": {joint: {"soft": [labels], "hard":
+        [labels]}} (the gates that name a leg joint: its G2/G4/G6a, and G1
+        folds nearest it), "global": {"soft", "hard"} (G5 holes and G6b paint
+        ghosts, which name no joint), "valid" (every ankle within
+        IK_DISLOCATE px of its foot: a pose the IK can make), "turns" {joint:
+        deg}, "dislocated_px", "values"}. soft = G1 G2 G4 G5 G6; hard = G1 G4
+        G5 (budget's theta_hard)."""
+        if any(not np.all(np.isfinite([v for v in p.values()])) for p in pose.values()):
+            return None
+        world = self.ev.world(pose)
+        fr = self.r.frame(world=world, slots=self.slots)
+        g = {"fold": ag.folds(fr, slots=self.slots, rest=self.rest), "hole": ag.holes(self.rest, fr),
+             "ghost_paint": ag.ghost_paint(self.rest, fr, visibility=True)}
+        per = {j["name"]: {"soft": [], "hard": []} for j in self.joints}
+        glob = {"soft": [], "hard": []}
+        if not g["fold"]["pass"]:
+            for n, slots in self._fold_joints(fr).items():
+                lab = f"fold@{max(slots, key=slots.get)}"
+                per[n]["soft"].append(lab)
+                per[n]["hard"].append(lab)
+        if not g["hole"]["pass"]:
+            glob["soft"].append(_label("hole", g["hole"], None))
+            glob["hard"].append(glob["soft"][-1])
+        if not g["ghost_paint"]["pass"]:
+            glob["soft"].append(_label("ghost_paint", g["ghost_paint"], None))
+        for j in self.joints:
+            jr = self.jrs[j["name"]]
+            for key, fn in (("seam", ag.seam_gap), ("ghost_band", ag.ghost_band), ("area", ag.band_area_ratio)):
+                res = fn(self.rest, fr, j)
+                g[f"{key}:{j['name']}"] = res
+                if not res["pass"]:
+                    lab = _label(key, res, jr)
+                    per[j["name"]]["soft"].append(lab)
+                    if key == "seam":
+                        per[j["name"]]["hard"].append(lab)
+        wd = self.ev.world_dict(world)
+        disl = 0.0
+        for leg in self.legs:
+            if leg["foot"]:
+                tip = _tip(wd[leg["shin"]], float(self.by[leg["shin"]].get("length") or 0.0))
+                disl = max(disl, _dist((0, 0, 0, 0, *tip), wd[leg["foot"]]))
+        fails = [f"{x}#{n}" for n, e in per.items() for x in e["soft"]] + glob["soft"]
+        hard = [f"{x}#{n}" for n, e in per.items() for x in e["hard"]] + glob["hard"]
+        return {"soft": not fails, "hard": not hard, "soft_by": fails[0] if fails else None,
+                "hard_by": hard[0] if hard else None, "limits": fails, "joints": per, "global": glob,
+                "valid": disl <= IK_DISLOCATE, "turns": self.turns(wd), "dislocated_px": round(disl, 3),
+                "values": {k: _num(v["value"]) for k, v in g.items()}}
+
+    def _fold_joints(self, fr):
+        """{joint: {slot: folded triangles}}: each folded triangle goes to the
+        nearest joint (centre now) among the joints whose parts hold its slot."""
+        refs = self.ev.fold_references()
+        cen = {n: np.asarray(ag.center_now(self.rest, fr, jr.j), float) for n, jr in self.jrs.items()}
+        out = {}
+        for sname, g in fr.geoms.items():
+            if g.att["type"] not in ("mesh", "linkedmesh"):
+                continue
+            m = lbs.fold_mask(g.xy, g.uv, g.tris, reference=refs.get((sname, id(g.att)), -1))
+            g0 = self.rest.geoms.get(sname)
+            if g0 is not None:
+                m &= ~lbs.fold_mask(g0.xy, g0.uv, g0.tris, reference=refs.get((sname, id(g.att)), -1))
+            # the joints this slot is a part of (upper or lower), nearest first
+            mine = [n for n, jr in self.jrs.items() if sname in jr.upper_slots or sname in jr.lower_slots] or list(cen)
+            for t in np.asarray(g.tris)[m]:
+                c = g.xy[t].mean(0)
+                n = min(mine, key=lambda n: float(np.linalg.norm(cen[n] - c)))
+                out.setdefault(n, {}).setdefault(sname, 0)
+                out[n][sname] += 1
+        return out
+
+    def turns(self, wd):
+        """{joint name: deg} each leg joint's turn from setup (its bone's
+        world angle relative to its upper bone's, minus the same at setup)."""
+        out = {}
+        for j in self.joints:
+            jr = self.jrs[j["name"]]
+            lo, up = jr.j["lower"], jr.j["upper"]
+            a = _ang(wd[lo]) - _ang(wd[up]) - (_ang(self.world0[lo]) - _ang(self.world0[up]))
+            out[j["name"]] = round((a + 180.0) % 360.0 - 180.0, 2)
+        return out
+
+
+def _subtree_names(ir, root):
+    kids = {}
+    for b in ir["bones"]:
+        kids.setdefault(b["parent"], []).append(b["name"])
+    out, todo = set(), [root]
+    while todo:
+        n = todo.pop()
+        out.add(n)
+        todo += kids.get(n, [])
+    return out
+
+
+def _ang(m):
+    return math.degrees(math.atan2(m[2], m[0]))
+
+
+def _tip(m, length):
+    return m[4] + m[0] * length, m[5] + m[2] * length
+
+
+def _dist(m1, m2):
+    return float(math.hypot(m1[4] - m2[4], m1[5] - m2[5]))
+
+
+def ik_sweep(probe, make, amounts):
+    """Judge every amount (increasing): {"poses": [{"amount", "valid",
+    "soft", "hard", "by", "joints", "global", "turns", "values"}],
+    "soft", "hard" (the last amount up to which every valid pose held, the
+    whole pose), "soft_by", "hard_by", "per_joint": {joint: {"soft",
+    "hard", "soft_by", "hard_by"}} (the same, that joint's own gates),
+    "first_valid"}. Poses the IK cannot make (an ankle off its foot) are
+    listed and skipped: a crouch shifted 40 px is only reachable once the
+    hips are low enough."""
+    poses = []
+    for a in amounts:
+        res = probe.judge(make(a))
+        if res is None:
+            poses.append({"amount": round(a, 3), "valid": False})
+            continue
+        poses.append({"amount": round(a, 3), "valid": res["valid"], "soft": res["soft"], "hard": res["hard"],
+                      "by": res["soft_by"], "hard_by": res["hard_by"], "joints": res["joints"],
+                      "global": res["global"], "turns": res["turns"], "dislocated_px": res["dislocated_px"],
+                      "values": res["values"]})
+    valid = [p for p in poses if p["valid"]]
+
+    def limit(ok, by):
+        last, first = 0.0, None
+        for p in valid:
+            if not ok(p):
+                first = p
+                break
+            last = p["amount"]
+        return last, (by(first) if first else None)
+    out = {"poses": poses, "first_valid": valid[0]["amount"] if valid else None}
+    out["soft"], out["soft_by"] = limit(lambda p: p["soft"], lambda p: p["by"])
+    out["hard"], out["hard_by"] = limit(lambda p: p["hard"], lambda p: p["hard_by"])
+    out["per_joint"] = {}
+    for n in probe.jrs:
+        e = {}
+        for kind in ("soft", "hard"):
+            e[kind], e[f"{kind}_by"] = limit(lambda p: not p["joints"][n][kind],
+                                             lambda p: p["joints"][n][kind][0])
+        out["per_joint"][n] = e
+    return out
+
+
+def ik_scan(ir, images, joints, skin=None, canvas=None, shifts=IK_SHIFTS, depth_step=IK_DEPTH_STEP,
+            depth_max=IK_DEPTH_MAX, move_step=IK_MOVE_STEP, move_max=IK_MOVE_MAX, progress=None, keep_trace=False):
+    """The legs' budget in the poses legs make: {"moves": {...}, "joints":
+    {...}, "meta": {...}} (budget.json "ik"), or None without leg IK.
+
+    WHY (P2 open issue 6): the per-joint sweep turns ONE bone with IK off,
+    so turning a thigh or shin while the foot stays on its IK target pulls
+    the ankle out of the boot: the hip / knee / ankle numbers it gives are
+    for poses no leg ever makes. Legs move through their IK: a crouch (the
+    hips down, optionally shifted sideways: one leg takes the weight), a
+    step (one foot target sideways, the hips half way and down so both legs
+    reach) and a lifted foot (one target up, the knee folds). Each is
+    walked in steps of H to its maximum, judged on the leg slots and the
+    trunk (LegProbe) with every leg joint's G2/G4/G6a, G1 (blamed on the
+    nearest joint), G5 and G6b; a pose whose ankle leaves its foot by >
+    IK_DISLOCATE px is one the IK cannot make and is skipped. Amounts are
+    px (and *_H: fractions of H): crouch depth, step and lift distance.
+    The walk does not stop at the first failure: one joint failing (the
+    monkey's crotch seam at 0.02 H) must not hide where the others fail.
+
+    "moves" {name: {"soft", "hard" (the whole pose holds up to), "per_joint"
+    {joint: {"soft", "hard", "soft_by", "hard_by"}}, ...}}.
+    "joints" {joint: {"+"|"-": {"soft", "soft_move", "soft_by",
+    "soft_fails_at", "soft_fails_move", and the same for hard}}}: per
+    direction of the joint's turn from setup (+ counter-clockwise, as
+    budget's sweeps), the turn the joint reached in poses up to its own
+    soft (hard) limit in some move (soft_move), capped by the smallest turn
+    at which a move's first pose past that limit failed it (soft_fails_at,
+    in soft_fails_move, by gate soft_by). This is the joint's usable limit
+    in IK: every scanned pose that turned it less held."""
+    legs = ik_legs(ir)
+    if not legs:
+        return None
+    t0 = time.time()
+    joints = load_joints(joints)
+    probe = LegProbe(ir, images, joints, legs, skin, canvas)
+    H = probe.H
+    moves = {}
+
+    def steps(step, mx):
+        n = int(round(mx / step))
+        return [round(k * step * H, 6) for k in range(1, n + 1)]
+
+    def run(key, make, amounts, **extra):
+        m = ik_sweep(probe, make, amounts)
+        m.update(extra)
+        m["soft_H"], m["hard_H"] = round(m["soft"] / H, 4), round(m["hard"] / H, 4)
+        for e in m["per_joint"].values():
+            e["soft_H"], e["hard_H"] = round(e["soft"] / H, 4), round(e["hard"] / H, 4)
+        moves[key] = m
+        if progress:
+            pj = ", ".join(f"{n} {e['soft_H']:g}/{e['hard_H']:g}" for n, e in m["per_joint"].items())
+            progress(f"{key}: soft {m['soft_H']:g}H hard {m['hard_H']:g}H ({m['soft_by']}; hard {m['hard_by']}); "
+                     f"per joint soft/hard H: {pj}")
+
+    for dx in shifts:
+        run(f"crouch dx{dx:+g}", lambda a, dx=dx: probe.pose_of("crouch", amount=a, dx=dx),
+            steps(depth_step, depth_max), move="crouch", dx=dx)
+    for leg in legs:
+        for sign in (1, -1):
+            run(f"step {leg['side']}{'+' if sign > 0 else '-'}",
+                lambda a, leg=leg, sign=sign: probe.pose_of("step", leg, sign * a), steps(move_step, move_max),
+                move="step", leg=leg["name"], dir=sign)
+        run(f"lift {leg['side']}", lambda a, leg=leg: probe.pose_of("lift", leg, a), steps(move_step, move_max),
+            move="lift", leg=leg["name"])
+    out_j = {}
+    for n in probe.jrs:
+        e = {}
+        for sign, key in ((1, "+"), (-1, "-")):
+            d = {}
+            for kind in ("soft", "hard"):
+                reach, rmove, fail = 0.0, None, None
+                for mk, m in moves.items():
+                    lim = m["per_joint"][n][kind]
+                    for p in m["poses"]:
+                        if not p["valid"]:
+                            continue
+                        t = p["turns"][n] * sign
+                        if p["amount"] <= lim + 1e-9:
+                            if t > reach:
+                                reach, rmove = t, mk
+                        elif p["joints"][n][kind]:
+                            # the first pose of this move past the joint's limit: it failed here
+                            if t > 0 and (fail is None or t < fail[0]):
+                                fail = (t, mk, p["joints"][n][kind][0])
+                            break
+                d[kind] = round(min(reach, fail[0]) if fail else reach, 2)
+                d[f"{kind}_move"] = (fail[1] if fail and fail[0] <= reach else rmove)
+                d[f"{kind}_by"] = fail[2] if fail else None
+                d[f"{kind}_fails_at"] = round(fail[0], 2) if fail else None
+                d[f"{kind}_fails_move"] = fail[1] if fail else None
+            e[key] = d
+        out_j[n] = e
+    if not keep_trace:
+        for m in moves.values():
+            for p in m["poses"]:
+                p.pop("values", None)
+    return {"moves": moves, "joints": out_j,
+            "meta": {"H": H, "legs": [l["name"] for l in legs], "slots": probe.slots,
+                     "depth_step_H": depth_step, "move_step_H": move_step, "shifts_px": list(shifts),
+                     "reach": IK_REACH, "dislocate_px": IK_DISLOCATE, "seconds": round(time.time() - t0, 2)}}
+
+
 # ---------------------------------------------------------------- contact sheet
 
 OVERLAY = {"seam": (255, 0, 255), "ghost_band": (255, 200, 0), "ghost_paint": (0, 200, 255), "hole": (255, 0, 0)}
@@ -664,6 +1022,8 @@ def main(argv=None):
     ap.add_argument("--skin", default=None)
     ap.add_argument("--trace", action="store_true", help="keep every judged angle in meta")
     ap.add_argument("--artreq", default=None, help="also write the art requests as spinegen-artreq/1 here")
+    ap.add_argument("--no-ik-poses", action="store_true",
+                    help="skip the legs' IK-pose scan (ik_scan: crouch, step, lifted foot) budget.json \"ik\"")
     a = ap.parse_args(argv)
     ir = raster.load_rig(a.rig)
     images = raster.load_images(a.images)
@@ -671,6 +1031,15 @@ def main(argv=None):
     only = set(a.only.split(",")) if a.only else None
     budget = scan(ir, images, joints, a.step, a.max_angle, a.scale, not a.no_verify, a.skin, only,
                   progress=lambda m: print(m, file=sys.stderr), keep_trace=a.trace)
+    legs = {n for leg in ik_legs(ir) for n in (leg["thigh"], leg["shin"], leg["foot"])}
+    if not a.no_ik_poses and any(j["bone"] in legs and (not only or j["name"] in only) for j in joints):
+        canvas = raster.Canvas(budget["meta"]["canvas"]["origin"], budget["meta"]["canvas"]["size"], 1.0)
+        budget["ik"] = ik_scan(ir, images, joints, a.skin, canvas, progress=lambda m: print(m, file=sys.stderr),
+                               keep_trace=a.trace)
+        for n, e in budget["ik"]["joints"].items():
+            print(f"{n} in IK poses: " + "; ".join(
+                f"{k} soft {v['soft']:g} ({v['soft_move']}; {v['soft_by']}) hard {v['hard']:g}"
+                for k, v in e.items()), file=sys.stderr)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as f:
         json.dump(budget, f, indent=1)
