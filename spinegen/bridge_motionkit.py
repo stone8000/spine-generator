@@ -2,7 +2,7 @@
 
     python -m spinegen.bridge_motionkit <rig.json> <atlas> -o <outdir>
         [--presets fighter-idle-bounce,punch,celebrate,hit-react] [--facing 1|-1]
-        [--name NAME] [--arm-softness 0.1] [--no-qa]
+        [--name NAME] [--arm-softness 0.1] [--leg-softness 0.15] [--no-ik-guard] [--no-qa]
 
 WHY
   spinegen builds rigs that hold big angles (meshes across the joints,
@@ -23,11 +23,27 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
      half-angle helpers and physics read the solved arm. bend direction
      from the SETUP elbow (the sign of the forearm's local angle, which is
      what keeps the setup pose; an arm drawn straight takes the template's
-     outward rule); softness = `arm_softness` x arm length, capped under the
-     setup slack like the legs (rigbuild SOFT_GUARD) so the setup pose does
-     not move. The rig's own animations are dropped: they were keyed FK and
-     an arm IK at mix 1 would pin those arms (the kit's presets replace
-     them).
+     outward rule); softness = `arm_softness` x arm length. The rig's own
+     animations are dropped: they were keyed FK and an arm IK at mix 1 would
+     pin those arms (the kit's presets replace them).
+  1b. LEG softness: every two-bone leg IK of the rig gets `leg_softness` x
+     leg length (default 0.15, the kit's own LEG_SOFTNESS) when the rig has
+     less. rigbuild caps leg softness under the setup slack, which on legs
+     drawn almost straight leaves almost none (the monkey: 0 and 3.6 px of
+     the 36-38 px the kit uses), and then the kit's hip bounce snaps the
+     knee straight.
+     SOFTNESS WITHOUT MOVING THE SETUP (arms and legs alike): a softened
+     solve stops short of its target, so the target is pushed out along the
+     chain root -> target until the softened solve lands exactly where the
+     drawn chain ended (soft_target inverts spine-core's softness ease; the
+     kit's autorig does the same, motionkit/src/autorig.ts softTarget). The
+     solver then gets the very same softened point at setup, so the setup
+     pose is unchanged whatever the solver branch; bones hanging from the
+     target (a planted foot) get the opposite offset and stay where drawn.
+     A target that carries art or that another constraint reads is not
+     moved (and that chain keeps the rig's softness), and every softening
+     is checked: one that moves any other bone at setup by more than
+     SETUP_TOL is undone.
   2. emit.spine43 -> <name>.rig43.json, with the atlas and its page copied
      beside it.
   3. A recipe from the TEMPLATE ROLES (not the kit's name guessing):
@@ -45,7 +61,9 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
   5. qa/run.mjs check --runtime 4.3 with an IR summary (counts, constraint
      order, planted feet for M1: the kit never lifts a foot target, so every
      preset animation plants both feet for its whole length).
-  bridge.json in <outdir> holds every number of every step.
+  bridge.json in <outdir> holds every number of every step, including the
+  setup pose of the bridged 4.3 file against the plain 4.3 emit, both played
+  by spine-core 4.3.13 (`setup_vertices_43_px`).
 """
 import argparse
 import json
@@ -56,7 +74,7 @@ import subprocess
 import sys
 
 from . import ir as irmod
-from . import lbs
+from . import lbs, oracle
 from .emit import spine43
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -65,8 +83,133 @@ QA_RUN = os.path.join(REPO, "qa", "run.mjs")
 DEFAULT_PRESETS = ("fighter-idle-bounce", "punch", "celebrate", "hit-react")
 ANIM_NAMES = {"fighter-idle-bounce": "idle", "fighter-idle-weave": "idle_weave", "punch": "punch",
               "celebrate": "celebrate", "hit-react": "hit", "breathe": "breathe", "jump": "jump"}
-SOFT_GUARD = 0.999  # as rigbuild: softness stays this fraction under the setup slack
-SETUP_TOL = 0.01    # px: the arm IK may not move the setup pose more than this
+SETUP_TOL = 0.01    # px: the bridge's IK changes may not move the setup pose more than this
+LEG_SOFTNESS = 0.15  # fraction of leg length; the kit's own value (motionkit/src/autorig.ts)
+_IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+# ---------------------------------------------------------------- softness without moving the setup
+
+def soft_reached(td, reach, s):
+    """Distance a two-bone IK aims at when its target is `td` from the chain root.
+
+    spine-core's softness ease (IkConstraint 2-bone apply, the same in
+    4.2.120 and 4.3.13): within `s` of full reach the target is pulled in
+    quadratically, so the chain never snaps straight. `reach` and `s` are
+    the runtime's own (l1 + l2*psx, softness*psx*(csx+1)/2)."""
+    if s <= 0:
+        return td
+    sd = td - reach + s
+    if sd <= 0:
+        return td
+    p = min(1.0, sd / (s * 2)) - 1
+    return td - (sd - s * (1 - p * p))
+
+
+def soft_target(d, reach, s):
+    """Target distance at which the softened solve aims at `d` (the inverse of soft_reached).
+
+    WHY: pushing the target out to this distance lets an IK keep its
+    softness and still land on the drawn joint at setup (motionkit's autorig
+    softTarget does the same for its legs). soft_reached rises monotonically
+    from d to `reach` at reach + s, so bisection finds it; a `d` past what
+    the softened chain can aim at gets reach + s, the straight chain."""
+    if s <= 0 or soft_reached(d, reach, s) >= d - 1e-12:
+        return d
+    lo, hi = d, reach + s
+    for _ in range(200):
+        m = (lo + hi) / 2
+        if soft_reached(m, reach, s) < d:
+            lo = m
+        else:
+            hi = m
+    return (lo + hi) / 2
+
+
+def _readers(ir, bone):
+    """Names of the constraints that read or write `bone` (as a constrained bone,
+    source, target or physics bone)."""
+    out = []
+    for _, c in irmod.constraints(ir):
+        names = set(c.get("bones") or [])
+        for k in ("bone", "source", "target"):
+            if isinstance(c.get(k), str):
+                names.add(c[k])
+        if bone in names:
+            out.append(c["name"])
+    return out
+
+
+def soften_ik(out, c, frac):
+    """Give two-bone IK `c` (a constraint of `out`, changed in place) softness
+    `frac` x chain reach without moving the setup pose (module doc, 1b).
+
+    Returns a report dict, or None when `c` already has at least that much.
+    Raises ValueError when the target cannot be moved safely (the caller
+    keeps the rig's softness and notes why)."""
+    if len(c["bones"]) != 2:
+        raise ValueError("not a two-bone IK")
+    bones = {b["name"]: b for b in out["bones"]}
+    upper, fore, target = bones[c["bones"][0]], bones[c["bones"][1]], bones[c["target"]]
+    if fore["parent"] != upper["name"]:
+        raise ValueError(f"{fore['name']} is not a child of {upper['name']}")
+    on_target = [s["name"] for s in out["slots"] if s["bone"] == target["name"]]
+    if on_target:
+        raise ValueError(f"target {target['name']} carries slots ({', '.join(on_target)}); moving it moves art")
+    readers = [n for n in _readers(out, target["name"]) if n != c["name"]]
+    if readers:
+        raise ValueError(f"target {target['name']} is read by {', '.join(readers)}")
+    bind = lbs.bind_pose(out)
+    # the solver's own frame: the upper bone's parent, positions relative to the upper's local x/y
+    pp = bind[upper["parent"]] if upper["parent"] is not None else _IDENTITY
+    sx, sy = upper["x"], upper["y"]
+    ex, ey = lbs.to_local(pp, *bind[fore["name"]][4:6])
+    tx, ty = lbs.to_local(pp, *bind[target["name"]][4:6])
+    psx, csx = abs(upper["scale_x"]), abs(fore["scale_x"])
+    l1 = math.hypot(ex - sx, ey - sy)
+    reach = l1 + fore["length"] * csx * psx
+    d = math.hypot(tx - sx, ty - sy)
+    if d < 1e-9 or reach < 1e-9:
+        raise ValueError("degenerate chain or target on the chain root")
+    eff = psx * (csx + 1) * 0.5  # the runtime scales softness by this
+    old, new = float(c.get("softness", 0.0)), frac * reach
+    if new <= old:
+        return None
+    aim = soft_reached(d, reach, old * eff)  # where the rig's own solve aims now
+    td = soft_target(aim, reach, new * eff)
+    nx, ny = sx + (tx - sx) * td / d, sy + (ty - sy) * td / d
+    wx, wy = lbs.to_world(pp, nx, ny)
+    tpar = bind[target["parent"]] if target["parent"] is not None else _IDENTITY
+    m_old = bind[target["name"]]
+    target["x"], target["y"] = lbs.to_local(tpar, wx, wy)
+    # the target's linear part does not depend on its own x/y: children keep their world place
+    m_new = (*m_old[:4], wx, wy)
+    kids = [b for b in out["bones"] if b["parent"] == target["name"]]
+    for k in kids:
+        k["x"], k["y"] = lbs.to_local(m_new, *bind[k["name"]][4:6])
+    c["softness"] = new
+    return {"softness": round(new, 4), "softness_before": round(old, 4), "reach": round(reach, 3),
+            "target_distance": round(d, 3), "pushed_to": round(td, 3), "push_px": round(math.hypot(wx - m_old[4], wy - m_old[5]), 3),
+            "target_xy": [wx, wy], "children_kept": [k["name"] for k in kids]}
+
+
+def _soften_checked(out, c, frac, base, keep, notes):
+    """soften_ik on a copy, kept only if the setup pose stays within SETUP_TOL of `base`."""
+    trial = irmod.clone(out)
+    tc = next(x for x in trial["ik"] if x["name"] == c["name"])
+    try:
+        rep = soften_ik(trial, tc, frac)
+    except ValueError as e:
+        notes.append(f"{c['name']}: softness left at {c.get('softness', 0):.2f} ({e})")
+        return out, None
+    if rep is None:
+        return out, None
+    err = setup_error(base, trial, skip=keep | {c["target"]})
+    rep["setup_error_px"] = err
+    if err > SETUP_TOL:
+        notes.append(f"{c['name']}: softening moved the setup by {err:.4f} px; left at {c.get('softness', 0):.2f}")
+        return out, None
+    return trial, rep
 
 
 # ---------------------------------------------------------------- arm IK
@@ -80,10 +223,11 @@ def _wrap(deg):
 
 
 def add_arm_ik(ir, softness=0.1):
-    """A copy of `ir` with a two-bone IK per arm (see the module doc, step 1).
+    """A copy of `ir` with a two-bone IK per arm (module doc, step 1).
 
-    Returns (ir, report): report["arms"][side] = {upper, fore, target, target_xy,
-    bend_positive, softness, softness_wanted, slack, setup_error_px}."""
+    Returns (ir, report): report["arms"][side] = {upper, fore, target,
+    wrist_xy (the drawn fist), target_xy (pushed out for the softness),
+    bend_positive, softness, softness_frac, push_px, ...}."""
     out = irmod.clone(ir)
     roles = _by_role(out)
     root = next(b["name"] for b in out["bones"] if b["parent"] is None)
@@ -106,12 +250,6 @@ def add_arm_ik(ir, softness=0.1):
             report["notes"].append(f"side {side}: {target} already exists; no arm IK")
             continue
         tip = lbs.to_world(bind[fore], bf["length"], 0.0)
-        shoulder = bind[upper][4:6]
-        l1 = math.hypot(*(lbs.to_world(bind[upper], 0, 0)[k] - bind[fore][4 + k] for k in (0, 1)))
-        l2 = bf["length"] * bf["scale_x"]
-        slack = max(0.0, l1 + l2 - math.hypot(tip[0] - shoulder[0], tip[1] - shoulder[1]))
-        want = softness * (l1 + l2)
-        soft = min(want, slack * SOFT_GUARD)
         # the forearm's local angle IS the IK's a2 (child offset on the parent's x axis); a mirrored
         # parent turns it the other way
         flip = (1 if bu["scale_x"] >= 0 else -1) * (1 if bu["scale_y"] >= 0 else -1)
@@ -120,12 +258,11 @@ def add_arm_ik(ir, softness=0.1):
         out["bones"].append(irmod.new_bone(target, root, *lbs.to_local(bind[root], *tip), role="ik_target"))
         names.add(target)
         new_ik.append({"name": f"arm_ik_{side}", "order": 0, "runs": True, "skin_required": False,
-                       "bones": [upper, fore], "target": target, "mix": 1.0, "softness": soft,
+                       "bones": [upper, fore], "target": target, "mix": 1.0, "softness": 0.0,
                        "bend_positive": bool(bend), "compress": False, "stretch": False, "uniform": False})
-        report["arms"][side] = {"upper": upper, "fore": fore, "target": target, "target_xy": [tip[0], tip[1]],
-                                "bend_positive": bool(bend), "elbow_local_deg": round(a2, 3),
-                                "softness": round(soft, 4), "softness_wanted": round(want, 3),
-                                "slack": round(slack, 4), "arm_length": round(l1 + l2, 3)}
+        report["arms"][side] = {"upper": upper, "fore": fore, "target": target, "wrist_xy": [tip[0], tip[1]],
+                                "target_xy": [tip[0], tip[1]], "bend_positive": bool(bend),
+                                "elbow_local_deg": round(a2, 3), "softness": 0.0, "softness_frac": softness}
     if not new_ik:
         return out, report
     # right after the last IK that runs: the helpers and physics then read the solved arm
@@ -135,20 +272,51 @@ def add_arm_ik(ir, softness=0.1):
     out["ik"] += new_ik
     for i, c in enumerate(seq):
         c["order"] = i
+    if softness > 0:
+        for side, arm in report["arms"].items():
+            c = next(x for x in out["ik"] if x["name"] == f"arm_ik_{side}")
+            out, srep = _soften_checked(out, c, softness, ir, set(), report["notes"])
+            if srep:
+                arm.update(softness=srep["softness"], target_xy=srep["target_xy"], push_px=srep["push_px"],
+                           arm_length=srep["reach"], wrist_distance=srep["target_distance"])
     report["setup_error_px"] = setup_error(ir, out)
     if report["setup_error_px"] > SETUP_TOL:
         report["notes"].append(f"arm IK moves the setup pose by {report['setup_error_px']:.4f} px")
     return out, report
 
 
-def setup_error(a, b):
-    """Largest setup-pose world move of any bone `a` has, constraints on (lbs, 4.2 semantics;
-    equiv43 shows 4.3 agrees on these rigs)."""
+def soften_legs(ir, frac=LEG_SOFTNESS):
+    """A copy of `ir` whose two-bone leg IK (chains of `leg_<s>.*` bones) has
+    `frac` x leg length softness, targets pushed to keep the setup (module doc, 1b).
+
+    Returns (ir, report): report["legs"][ik name] = soften_ik's numbers."""
+    out = irmod.clone(ir)
+    report = {"legs": {}, "notes": [], "frac": frac}
+    role = {b["name"]: b.get("role") or "" for b in out["bones"]}
+    moved = set()
+    if frac > 0:
+        for c in list(out["ik"]):
+            if len(c["bones"]) == 2 and all(role[b].startswith("leg_") for b in c["bones"]):
+                out, srep = _soften_checked(out, c, frac, ir, moved, report["notes"])
+                if srep:
+                    moved.add(c["target"])
+                    report["legs"][c["name"]] = srep
+    report["moved_targets"] = sorted(moved)
+    report["setup_error_px"] = setup_error(ir, out, skip=moved)
+    return out, report
+
+
+def setup_error(a, b, skip=()):
+    """Largest setup-pose world move of any bone `a` has (bar `skip`: IK targets the
+    bridge pushed out on purpose), constraints on (lbs, 4.2 semantics; run() also
+    checks the 4.3.13 vertices)."""
     wa = lbs.Evaluator(a).world()
     eb = lbs.Evaluator(b)
     wb = eb.world_dict(eb.world())
     worst = 0.0
     for i, bone in enumerate(a["bones"]):
+        if bone["name"] in skip:
+            continue
         m, n = wa[i], wb[bone["name"]]
         worst = max(worst, math.hypot(m[4] - n[4], m[5] - n[5]),
                     100 * max(abs(m[k] - n[k]) for k in range(4)))  # matrix entries as px at 100 px
@@ -190,7 +358,7 @@ def roles_from_template(ir, arm_report, facing=1):
     bind = lbs.bind_pose(ir)
     fists = [a["target"] for a in arm_report["arms"].values()]
     if fists:
-        xs = {a["target"]: a["target_xy"][0] for a in arm_report["arms"].values()}
+        xs = {a["target"]: a.get("wrist_xy", a["target_xy"])[0] for a in arm_report["arms"].values()}
         fists.sort(key=lambda f: -facing * xs[f])
         roles["fists"] = fists
         roles["fist"] = roles["fistFront"] = fists[0]
@@ -217,14 +385,14 @@ def roles_from_template(ir, arm_report, facing=1):
     return roles, notes
 
 
-def make_recipe(roles, presets, size, facing=1):
+def make_recipe(roles, presets, size, facing=1, ik_guard=True):
     anims = []
     for p in presets:
         a = {"name": ANIM_NAMES.get(p, p.replace("-", "_")), "preset": p}
         if p.startswith("fighter-idle"):
             a["params"] = {"hair": "keys" if roles.get("hair") else "none"}
         anims.append(a)
-    return {"fps": 30, "facing": facing, "size": size, "ikGuard": True, "roles": roles, "animations": anims}
+    return {"fps": 30, "facing": facing, "size": size, "ikGuard": bool(ik_guard), "roles": roles, "animations": anims}
 
 
 # ---------------------------------------------------------------- node steps
@@ -268,6 +436,22 @@ def qa_ir(ir, motion_json):
             **{k: [{"name": c["name"], "order": c["order"]} for c in ir[k]] for k in ("ik", "transform", "path", "physics")}}
 
 
+def setup_vertices_43(plain43, rig43, atlas):
+    """Largest setup-pose world-vertex distance between the plain 4.3 emit and the
+    bridged 4.3 file, both posed by spine-core 4.3.13: the proof that the arm IK
+    and the pushed soft targets leave the drawn pose where it was."""
+    fa = oracle.dump(plain43, atlas, runtime="4.3")["frames"][0]["slots"]
+    fb = oracle.dump(rig43, atlas, runtime="4.3")["frames"][0]["slots"]
+    worst = 0.0
+    for slot, sa in fa.items():
+        va, vb = sa["vertices"] or [], fb[slot]["vertices"] or []
+        if len(va) != len(vb):
+            return float("inf")
+        for i in range(0, len(va), 2):
+            worst = max(worst, math.hypot(va[i] - vb[i], va[i + 1] - vb[i + 1]))
+    return worst
+
+
 def qa_check(motion_json, atlas, ir_summary_path, out_path):
     p = subprocess.run(["node", QA_RUN, "check", "--runtime", "4.3", "--skeleton", motion_json, "--atlas", atlas,
                         "--ir", ir_summary_path, "--out", out_path], capture_output=True, text=True)
@@ -279,15 +463,19 @@ def qa_check(motion_json, atlas, ir_summary_path, out_path):
 
 # ---------------------------------------------------------------- the bridge
 
-def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, arm_softness=0.1, qa=True):
+def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, arm_softness=0.1, qa=True,
+        leg_softness=LEG_SOFTNESS, ik_guard=True):
     ir = irmod.load(rig_path)
     name = name or ir.get("name") or "rig"
     os.makedirs(out_dir, exist_ok=True)
     rep = {"input": {"rig": os.path.abspath(rig_path), "atlas": os.path.abspath(atlas)}, "name": name,
            "presets": list(presets), "facing": facing}
 
-    bridged, arms = add_arm_ik(ir, arm_softness)
+    legged, legs = soften_legs(ir, leg_softness)
+    rep["leg_ik"] = legs
+    bridged, arms = add_arm_ik(legged, arm_softness)
     rep["arm_ik"] = arms
+    rep["setup_error_px"] = setup_error(ir, bridged, skip=set(legs["moved_targets"]))
     dropped = [a["name"] for a in bridged.get("animations", [])]
     bridged["animations"] = []
     rep["dropped_animations"] = dropped
@@ -301,11 +489,15 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
     shutil.copyfile(atlas, atlas_out)
     for page in _atlas_pages(atlas):
         shutil.copyfile(os.path.join(os.path.dirname(atlas), page), os.path.join(out_dir, page))
+    if oracle.available("4.3")[0]:
+        plain43 = os.path.join(out_dir, f"{name}.plain43.json")
+        spine43.write(dict(irmod.clone(ir), animations=[]), plain43)
+        rep["setup_vertices_43_px"] = setup_vertices_43(plain43, rig43, atlas_out)
 
     ensure_kit()
     size, guessed = kit_size(rig43)
     roles, notes = roles_from_template(bridged, arms, facing)
-    recipe = make_recipe(roles, presets, size, facing)
+    recipe = make_recipe(roles, presets, size, facing, ik_guard)
     recipe_path = os.path.join(out_dir, f"{name}.recipe.json")
     with open(recipe_path, "w") as f:
         json.dump(recipe, f, indent=1, ensure_ascii=False)
@@ -353,16 +545,23 @@ def main(argv=None):
     ap.add_argument("--presets", default=",".join(DEFAULT_PRESETS))
     ap.add_argument("--facing", type=int, default=1, choices=(1, -1))
     ap.add_argument("--name", default=None)
-    ap.add_argument("--arm-softness", type=float, default=0.1)
+    ap.add_argument("--arm-softness", type=float, default=0.1, help="arm IK softness, fraction of arm length")
+    ap.add_argument("--leg-softness", type=float, default=LEG_SOFTNESS,
+                    help="leg IK softness, fraction of leg length (0 keeps the rig's)")
+    ap.add_argument("--no-ik-guard", action="store_true", help="recipe ikGuard false (the kit's 85-95%% reach guard off)")
     ap.add_argument("--no-qa", action="store_true")
     args = ap.parse_args(argv)
     rep = run(args.rig, args.atlas, args.out, [p.strip() for p in args.presets.split(",") if p.strip()],
-              args.facing, args.name, args.arm_softness, not args.no_qa)
+              args.facing, args.name, args.arm_softness, not args.no_qa, args.leg_softness, not args.no_ik_guard)
     for side, a in rep["arm_ik"]["arms"].items():
         print(f"arm IK {side}: {a['upper']} -> {a['fore']} onto {a['target']}, bendPositive {a['bend_positive']}, "
-              f"softness {a['softness']} (wanted {a['softness_wanted']}, slack {a['slack']})")
-    print(f"setup moved by the arm IK: {rep['arm_ik'].get('setup_error_px', 0):.2e} px")
-    for n in rep["arm_ik"]["notes"] + rep["recipe"]["notes"]:
+              f"softness {a['softness']} (target pushed {a.get('push_px', 0)} px past the wrist)")
+    for n, g in rep["leg_ik"]["legs"].items():
+        print(f"leg IK {n}: softness {g['softness_before']} -> {g['softness']} (target pushed {g['push_px']} px)")
+    print(f"setup moved by the bridge (lbs): {rep['setup_error_px']:.2e} px"
+          + (f"; 4.3.13 setup vertices vs the plain 4.3 emit: {rep['setup_vertices_43_px']:.2e} px"
+             if "setup_vertices_43_px" in rep else ""))
+    for n in rep["leg_ik"]["notes"] + rep["arm_ik"]["notes"] + rep["recipe"]["notes"]:
         print("note:", n)
     print(f"recipe: size {rep['recipe']['size']}, roles {json.dumps(rep['recipe']['roles'], ensure_ascii=False)}")
     for s in rep["smoothness"]:

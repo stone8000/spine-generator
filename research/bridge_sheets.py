@@ -17,7 +17,9 @@ Each drawn frame is also judged by spinegen.art_gates (G1 folds, G4 seam
 gap per joint, G5 holes, G6 ghosts) against the rig's setup frame, and the
 ankle gap (shin tip to foot origin: a planted foot hangs from its IK
 target, so a leg that cannot reach leaves the boot behind) is measured on
-every frame. --all-frames runs the art gates on every 30 fps frame instead
+every frame, and the elbow / knee bend away from the drawn setup (frame 0
+and max: a preset that does not start in the drawn pose bends at frame 0).
+--all-frames runs the art gates on every 30 fps frame instead
 of the peaks only.
 
 Writes <anim>.png (rows rigid / joint, one column per peak frame),
@@ -48,9 +50,11 @@ QA_RUN = os.path.join(REPO, "qa", "run.mjs")
 BG = (236, 236, 232)
 
 
-def dump43(skeleton, atlas, anim, fps=30):
-    p = subprocess.run(["node", QA_RUN, "dump", "--runtime", "4.3", "--skeleton", skeleton, "--atlas", atlas,
-                        "--anim", anim, "--fps", str(fps)], capture_output=True, text=True)
+def dump43(skeleton, atlas, anim=None, fps=30):
+    """Frames of one animation (or the setup pose when `anim` is None) from spine-core 4.3.13."""
+    extra = ["--anim", anim, "--fps", str(fps)] if anim else []
+    p = subprocess.run(["node", QA_RUN, "dump", "--runtime", "4.3", "--skeleton", skeleton, "--atlas", atlas, *extra],
+                       capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(p.stderr)
     return json.loads(p.stdout)["frames"]
@@ -76,6 +80,7 @@ class Rig:
         self.roles = self.rep["recipe"]["roles"]
         self.facing = self.rep["facing"]
         self.dumps = {a: dump43(self.files["motion"], self.files["atlas"], a) for a in self.anims}
+        self.setup = dump43(self.files["motion"], self.files["atlas"])[0]
         self.r = None
 
     def setup_canvas(self, canvas):
@@ -113,6 +118,26 @@ class Rig:
                 q = f["bones"][foot]
                 worst = max(worst, math.hypot(tip[0] - q["x"], tip[1] - q["y"]))
         return worst
+
+
+def _bend(f, chain):
+    """World angle (deg) from a 2-bone chain's upper bone to its lower bone in one dumped frame."""
+    u, l = (f["bones"][b] for b in chain)
+    return math.degrees(math.atan2(l["c"], l["a"]) - math.atan2(u["c"], u["a"]))
+
+
+def bends(rig, anim):
+    """Per IK chain (arms and legs): how far the elbow / knee is bent away from
+    the drawn setup at frame 0 and at most over the animation (deg). WHY: a
+    preset that does not start in the drawn pose shows up as a frame-0 bend."""
+    out = {}
+    for ik in rig.ir["ik"]:
+        if len(ik["bones"]) != 2:
+            continue
+        b0 = _bend(rig.setup, ik["bones"])
+        d = [abs((_bend(f, ik["bones"]) - b0 + 180) % 360 - 180) for f in rig.dumps[anim]]
+        out[ik["name"]] = {"t0": round(d[0], 1), "max": round(max(d), 1)}
+    return out
 
 
 def peaks(rig, anim):
@@ -230,7 +255,7 @@ def main(argv=None):
             frames = rig.dumps[anim]
             gaps = [rig.ankle_gap(f) for f in frames]
             r_rec = {"ankle_gap_max_px": round(max(gaps), 2), "ankle_gap_t": frames[int(np.argmax(gaps))]["t"],
-                     "peaks": []}
+                     "bends_deg": bends(rig, anim), "peaks": []}
             judged = range(len(frames)) if args.all_frames else [i for i, _ in picks]
             fail_frames, worst = 0, {}
             drawn = {}
@@ -284,6 +309,8 @@ def main(argv=None):
         print(f"{anim}: " + "; ".join(f"{n} ankle gap {r['ankle_gap_max_px']} px, {r['failing_frames']}/"
                                        f"{r['judged_frames']} frames fail art gates {r['worst']}"
                                        for n, r in rec["rigs"].items()))
+        print("  bend from setup, frame 0 / max (deg): " + ", ".join(
+            f"{k} {v['t0']}/{v['max']}" for k, v in rec["rigs"]["joint"]["bends_deg"].items()))
     with open(os.path.join(args.out, "sheets.json"), "w") as f:
         json.dump(report, f, indent=1)
     return 0

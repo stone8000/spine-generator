@@ -1,14 +1,17 @@
 """spinegen rig -> Spine 4.3 -> motion kit -> QA on 4.3.13 (spinegen.bridge_motionkit).
 
-WHY: the bridge adds arm IK the rig did not have and hands the kit roles
-read from the template, so the tests pin what must hold whatever the
-character: the arm IK leaves the setup pose where it was drawn, runs after
-the rig's other IK and before the half-angle helpers, bends the way the
-drawn elbow bends, and the roles the kit gets are the template's bones.
+WHY: the bridge adds arm IK the rig did not have, softens arm and leg IK
+by pushing their targets out, and hands the kit roles read from the
+template, so the tests pin what must hold whatever the character: the IK
+keeps its full softness and still leaves the setup pose where it was drawn
+(planted feet included), runs after the rig's other IK and before the
+half-angle helpers, bends the way the drawn elbow bends, and the roles the
+kit gets are the template's bones.
 Synthetic rigs only (spinegen.synth_art); the end-to-end test needs Node,
 motionkit/ and qa43/ installed and skips otherwise.
 """
 import json
+import math
 import os
 import shutil
 
@@ -20,7 +23,8 @@ from spinegen import ir as irmod
 from spinegen import lbs, oracle, synth_art
 
 ROLES = {"hip": "hips", "torso": "torso", "head": "head", "upperarm_l": "arm_l.shoulder",
-         "forearm_l": "arm_l.elbow", "upperarm_r": "arm_r.shoulder", "forearm_r": "arm_r.elbow"}
+         "forearm_l": "arm_l.elbow", "upperarm_r": "arm_r.shoulder", "forearm_r": "arm_r.elbow",
+         "thigh_l": "leg_l.hip", "calf_l": "leg_l.knee", "thigh_r": "leg_r.hip", "calf_r": "leg_r.knee"}
 
 
 def biped(bend_l=0.0, bend_r=0.0, accessory=False):
@@ -47,20 +51,115 @@ def biped(bend_l=0.0, bend_r=0.0, accessory=False):
     return ir, images, joints
 
 
-def test_arm_ik_keeps_the_setup_and_reaches_the_wrists():
-    ir, _, _ = biped()
+def with_legs(ir, foot_slot=False, reader=False, drop=0.0):
+    """Leg IK onto targets under the root at the calf tips (`drop` px lower: a
+    leg that cannot quite reach), each with a planted foot bone under it."""
+    bind = lbs.bind_pose(ir)
+    for side in ("l", "r"):
+        calf = next(b for b in ir["bones"] if b["name"] == f"calf_{side}")
+        x, y = lbs.to_world(bind[calf["name"]], calf["length"], 0)
+        ir["bones"].append(irmod.new_bone(f"ik_foot_{side}", "root", x, y - drop, role="ik_target"))
+        ir["bones"].append(irmod.new_bone(f"foot_{side}", f"ik_foot_{side}", 0, 0, 0, 60, role=f"leg_{side}.ankle"))
+        ir["ik"].append({"name": f"leg_ik_{side}", "order": 0, "runs": True, "skin_required": False,
+                         "bones": [f"thigh_{side}", f"calf_{side}"], "target": f"ik_foot_{side}", "mix": 1.0,
+                         "softness": 1.0, "bend_positive": side == "l", "compress": False, "stretch": False,
+                         "uniform": False})
+    if foot_slot:  # art on the target itself: moving the target would move it
+        ir["slots"].append(dict(next(s for s in ir["slots"] if s["name"] == "calf_l"), name="boot_l", bone="ik_foot_l"))
+    if reader:
+        ir["physics"].append({"name": "foot_phys", "order": 99, "runs": True, "skin_required": False,
+                              "bone": "ik_foot_r", "x": 1, "y": 1, "rotate": 0, "scale_x": 0, "shear_x": 0,
+                              "limit": 5000, "fps": 60, "inertia": 0.5, "strength": 100, "damping": 0.85, "mass": 1,
+                              "wind": 0, "gravity": 0, "mix": 1, "global": {}, "spring": None})
+    for i, (_, c) in enumerate(irmod.constraints(ir)):
+        c["order"] = i
+    return ir
+
+
+def solved_world(ir):
+    ev = lbs.Evaluator(ir)
+    return ev.world_dict(ev.world())
+
+
+@pytest.mark.parametrize("x, reach, s", [(0.0, 100.0, 10.0), (95.0, 100.0, 10.0), (99.9, 100.0, 15.0),
+                                         (100.0, 100.0, 15.0), (91.0, 100.0, 15.0), (50.0, 100.0, 0.0)])
+def test_soft_target_inverts_the_runtime_ease(x, reach, s):
+    td = bm.soft_target(x, reach, s)
+    assert td >= x and td <= reach + s + 1e-9
+    assert abs(bm.soft_reached(td, reach, s) - x) < 1e-6
+    if x <= reach - s:  # outside the ease the target is already exact
+        assert td == x
+
+
+def test_arm_ik_keeps_full_softness_and_the_setup():
+    """softness = 0.1 x arm length, not capped by the drawn slack: the target is
+    pushed past the wrist so the softened solve lands on the drawn wrist."""
+    for bend in (0.0, 12.0):  # a straight arm sits at the very end of the ease
+        ir, _, _ = biped(bend_l=bend, bend_r=-bend)
+        out, rep = bm.add_arm_ik(ir)
+        assert set(rep["arms"]) == {"l", "r"}
+        assert rep["setup_error_px"] <= bm.SETUP_TOL
+        bind = lbs.bind_pose(out)
+        w = solved_world(out)
+        hard, _ = bm.add_arm_ik(ir, 0.0)  # the same arm IK without softness, target on the wrist
+        wh = solved_world(hard)
+        for side, arm in rep["arms"].items():
+            fore = next(b for b in out["bones"] if b["name"] == f"forearm_{side}")
+            drawn = lbs.to_world(bind[fore["name"]], fore["length"], 0)
+            solved = lbs.to_world(w[fore["name"]], fore["length"], 0)
+            # the softened solve lands where the hard one does; both sit within the solver's own
+            # rounding of the drawn wrist (acos near a straight arm: ~4e-5 px even without softness)
+            assert math.dist(solved, lbs.to_world(wh[fore["name"]], fore["length"], 0)) < 1e-6
+            assert math.dist(drawn, solved) < 1e-4
+            assert math.dist(drawn, arm["wrist_xy"]) < 1e-9
+            c = next(x for x in out["ik"] if x["name"] == f"arm_ik_{side}")
+            assert c["softness"] == pytest.approx(0.1 * arm["arm_length"]) and c["softness"] > 0
+            t = bind[arm["target"]][4:6]
+            sh = bind[f"upperarm_{side}"][4:6]
+            assert math.dist(t, drawn) == pytest.approx(arm["push_px"], abs=1e-3) and arm["push_px"] > 1
+            assert math.dist(sh, t) > math.dist(sh, drawn)  # pushed out along the chain
+            assert next(b for b in out["bones"] if b["name"] == arm["target"])["parent"] == "root"
+        assert irmod.validate(out) == []
+
+
+def test_arm_ik_softness_with_mirrored_upper_arms():
+    """The runtime solves with |scaleX| and scales softness by it: a mirrored
+    upper arm (scaleX -1, as a flipped build has) keeps the setup too."""
+    ir, _, _ = biped(bend_l=15.0, bend_r=-15.0)
+    for b in ir["bones"]:
+        if b["name"].startswith("upperarm_"):
+            b["scale_x"] = -1.0
+            b["rotation"] = 0.0
     out, rep = bm.add_arm_ik(ir)
-    assert set(rep["arms"]) == {"l", "r"}
-    assert rep["setup_error_px"] <= bm.SETUP_TOL
-    bind = lbs.bind_pose(out)
-    for side, arm in rep["arms"].items():
-        fore = next(b for b in out["bones"] if b["name"] == f"forearm_{side}")
-        tip = lbs.to_world(bind[fore["name"]], fore["length"], 0)
-        t = bind[arm["target"]]
-        assert abs(t[4] - tip[0]) < 1e-6 and abs(t[5] - tip[1]) < 1e-6
-        assert next(b for b in out["bones"] if b["name"] == arm["target"])["parent"] == "root"
-        assert arm["softness"] <= arm["slack"] + 1e-9  # capped: the setup pose does not move
+    assert rep["setup_error_px"] <= bm.SETUP_TOL and all(a["softness"] > 0 for a in rep["arms"].values())
+
+
+def test_legs_soften_and_planted_feet_stay():
+    ir = with_legs(biped(bend_l=10.0, bend_r=-10.0)[0], drop=0.5)
+    out, rep = bm.soften_legs(ir, 0.15)
+    assert sorted(rep["legs"]) == ["leg_ik_l", "leg_ik_r"] and rep["moved_targets"] == ["ik_foot_l", "ik_foot_r"]
+    assert rep["setup_error_px"] <= bm.SETUP_TOL  # every bone but the two targets, feet included
+    wa, wb = solved_world(ir), solved_world(out)
+    for side in ("l", "r"):
+        c = next(x for x in out["ik"] if x["name"] == f"leg_ik_{side}")
+        g = rep["legs"][c["name"]]
+        assert c["softness"] == pytest.approx(0.15 * g["reach"]) and g["softness_before"] == 1.0
+        assert math.dist(wa[f"foot_{side}"][4:6], wb[f"foot_{side}"][4:6]) < 1e-6
+        assert math.dist(wa[f"ik_foot_{side}"][4:6], wb[f"ik_foot_{side}"][4:6]) == pytest.approx(g["push_px"], abs=1e-3)
+        # the leg could not quite reach at setup; it still stops where the rig's own solve stopped
+        assert math.dist(wa[f"calf_{side}"][4:6], wb[f"calf_{side}"][4:6]) < 1e-6
     assert irmod.validate(out) == []
+    again, rep2 = bm.soften_legs(out, 0.1)  # less than the IK has: left alone
+    assert rep2["legs"] == {} and rep2["moved_targets"] == []
+
+
+def test_legs_with_art_or_readers_on_the_target_are_left_alone():
+    ir = with_legs(biped()[0], foot_slot=True, reader=True)
+    out, rep = bm.soften_legs(ir, 0.15)
+    assert rep["legs"] == {}
+    assert any("boot_l" in n for n in rep["notes"]) and any("foot_phys" in n for n in rep["notes"])
+    assert [c["softness"] for c in out["ik"]] == [1.0, 1.0]
+    assert bm.setup_error(ir, out) == 0.0
 
 
 def test_arm_ik_runs_after_ik_and_before_the_helpers():
@@ -132,7 +231,11 @@ def test_bridge_end_to_end(tmp_path):
         motion = json.load(f)
     assert motion["skeleton"]["spine"].startswith("4.3.")
     assert set(motion["animations"]) == {"punch", "hit"}
-    assert [c["name"] for c in motion["constraints"] if c["type"] == "ik"] == ["arm_ik_l", "arm_ik_r"]
+    iks = [c for c in motion["constraints"] if c["type"] == "ik"]
+    assert [c["name"] for c in iks] == ["arm_ik_l", "arm_ik_r"]
+    assert all(c["softness"] > 10 for c in iks)  # 0.1 x 420 px arms, not a sliver under the slack
+    # the pushed targets leave the drawn pose where it was in the 4.3.13 runtime itself
+    assert rep["setup_vertices_43_px"] <= bm.SETUP_TOL
     assert {s["name"] for s in rep["smoothness"]} == {"punch", "hit"}
     assert all(s["errors"] == 0 for s in rep["smoothness"])
     gates = rep["qa"]["gates"]
