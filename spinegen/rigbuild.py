@@ -4,10 +4,13 @@
         [--joints joints.json] [--name monkey] [--no-source] [--mesh lean|refined]
         [--joint-modes modes.json | --joint-modes rigid_budget.json --need 90]
         [--bands bands.json] [--fit-reach 'elbow_l,elbow_r=2,2.25,2.5,3,3.5' [--fit-need 90]]
+        [--fit-crouch 'knee_{s}.lower=1.5,3;ankle_{s}.power=0.8,0.85,0.9,0.95,1,1.1,1.2']
+        [--no-accessory-copies] [--no-physics-match]
 
 writes rig.json + motion.json (IR), <name>.json (Spine 4.2, spinegen.emit.spine42),
 <name>.atlas + <name>.png (spinegen.atlas.pack), joints.json (the budget scanner's
-joints, world coordinates) and build_report.json (band_fit.json with --fit-reach);
+joints, world coordinates) and build_report.json (band_fit.json with --fit-reach /
+--fit-crouch); physics mixes matched to the source's swing (match_physics);
 then a crouch check in the official runtime (crouch(): knees by the template's
 rule, planted feet <= 1 px), after the accessory check (accessory_check).
 
@@ -185,6 +188,8 @@ KNEE_SYM_DEG = 10.0   # crouch(): two legs' end bends agree this closely (mirror
 SHIN_ROWS = 10.0      # px: crouch() reports the slide of the bottom this many px of the shin's art
 M1_PX = 1.0           # px: SOTA §5 M1, the most a planted foot vertex may move (the CLI's crouch check)
 ACC_TAPER = 1.0       # halfwidths over which an accessory's share tapers to 0 toward a vertex with no room for it
+FIT_DEPTHS = (0.05, 0.07, 0.08, 0.10, 0.12, 0.13)  # fit_crouch's crouch grid: hips down, fractions of H
+FIT_SHIFTS = (-40.0, -30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0, 40.0)  # ... and sideways, px
 PHYS_MATCH_FPS = 60   # match_physics measures the physics swing at this rate (the source's physics fps)
 PHYS_MATCH_TOL = 0.1  # match_physics leaves a constraint alone when it swings at most this much more than the source
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
@@ -213,7 +218,7 @@ class Canvas:
 
 # ---------------------------------------------------------------- public
 
-BAND_KEYS = ("reach", "rows", "row_points", "overlap", "compose")  # what `bands` may set per joint
+BAND_KEYS = ("reach", "rows", "row_points", "overlap", "compose", "power")  # what `bands` may set per joint
 FIT_STEP = 2.0        # deg: fit_reach's budget scans (the budget's own default step)
 
 
@@ -348,6 +353,98 @@ def fit_reach(layers_dir, joints=None, template="biped_mascot", candidates=None,
         chosen[j] = float(enough[0] if enough else max(vals, key=lambda v: (rows[v]["min"], -float(v))))
     return ({j: {"reach": {"upper": v}} for j, v in chosen.items()},
             {"need": need, "step": step, "table": table, "chosen": chosen})
+
+
+def fit_crouch(layers_dir, joints=None, template="biped_mascot", candidates=None, depths=FIT_DEPTHS,
+               shifts=FIT_SHIFTS, progress=None, bands=None, **build_kw):
+    """Per leg, the leg joints' band shape with the fewest folds over a
+    crouch grid. `candidates` {template joint ("knee_{s}"): {band key:
+    [values]}} (keys: "power", or "lower"/"upper" for the reach in
+    halfwidths), e.g. {"knee_{s}": {"lower": [1.5, 3]}, "ankle_{s}":
+    {"power": [0.9, 1, 1.1]}}: every combination is built once (both sides
+    alike) and each side keeps its own best. Returns ({joint: band spec}
+    for build's `bands`, {"table": {side: {combo: folds}}, "chosen": {side:
+    combo}, "depths", "shifts"}).
+
+    The grid: the hips (the leg IK thighs' parent) lowered by depth x H and
+    moved dx px sideways, legs on IK (the R2 crouch); folds are lbs's G1
+    (pinned to spine-core by C1) on the layers that carry the side's leg
+    bands. The two legs do not interact. Ties go to the combination closest
+    to the template (its own reach, power 1).
+
+    WHY (P2 open issue: deep-crouch folds): where a calf folds depends on
+    where its art sits off the ramps' axes, and two calves of one character
+    differ. The monkey's right hem flares 80-93 px off the ankle's axis just
+    above the ankle and wants the foot's ramp gentle there (power < 1) and
+    the knee's ramp run down the whole calf; its left calf reaches 70-77 px
+    off the knee's axis on the inner side and wants the opposite (in the
+    continuum, det J over the art's pixels at 0.13 H with the hips 40 px
+    over, power 0.9 lifts the right calf from -0.06 to +0.02 and takes the
+    left from +0.02 to -0.22). The synthetic flared calf of the tests folds
+    more with the knee run down the whole calf (139 against 84 over 0.10-
+    0.16 H). One template value cannot serve them all, so each leg is
+    fitted, as fit_reach fits each elbow."""
+    import itertools
+    t = tmpl.load(template) if isinstance(template, str) else template
+    raw = {k: v for k, v in (candidates or {}).items()}
+    axes = [(jn, key, [float(v) for v in vals]) for jn, spec in raw.items() for key, vals in spec.items()]
+    sides = sorted({j.rsplit("_", 1)[-1] for j in t["joints"] for jn in raw
+                    if "{s}" in jn and jn.replace("{s}", j.rsplit("_", 1)[-1]) == j})
+
+    def default(jn, key, side):
+        spec = t["joints"].get(jn.replace("{s}", side), {})
+        if key == "power":
+            return float(spec.get("power", 1.0))
+        return float((spec.get("reach") or {}).get(key, mesh.BAND_EXTENT))
+
+    table = {s: {} for s in sides}
+    for combo in itertools.product(*[vals for _, _, vals in axes]):
+        bb = json.loads(json.dumps(bands or {}))
+        for (jn, key, _), v in zip(axes, combo):
+            for side in sides:
+                j = jn.replace("{s}", side)
+                e = bb.setdefault(j, {})
+                if key == "power":
+                    e["power"] = v
+                else:
+                    e["reach"] = dict(e.get("reach") or {}, **{key: v})
+        res = build(layers_dir, joints, t, bands=bb, **build_kw)
+        ir = res["ir"]
+        ev = lbs.Evaluator(ir)
+        b = irmod.by_name(ir["bones"])
+        hips = b[ir["ik"][0]["bones"][0]]["parent"]
+        layers = {side: {L for jn, _, _ in axes for L in res["report"]["bands"].get(jn.replace("{s}", side),
+                                                                                   {}).get("layers", [])}
+                  for side in sides}
+        folds = {side: 0 for side in sides}
+        for d in depths:
+            for dx in shifts:
+                per = ev.folds(pose={hips: {"x": b[hips]["x"] + dx, "y": b[hips]["y"] - d * ir["H"]}})["slots"]
+                for side in sides:
+                    folds[side] += sum(per.get(L, 0) for L in layers[side])
+        key = ", ".join(f"{jn} {k} {v:g}" for (jn, k, _), v in zip(axes, combo))
+        for side in sides:
+            table[side][key] = {"folds": folds[side], "combo": list(combo)}
+        if progress:
+            progress(f"fit crouch {key}: folds " + ", ".join(f"{s} {folds[s]}" for s in sides))
+    chosen, out = {}, {}
+    for side in sides:
+        def cost(item, side=side):
+            _, r = item
+            dev = sum(abs(math.log(v / default(jn, k, side))) for (jn, k, _), v in zip(axes, r["combo"]))
+            return (r["folds"], dev)
+        key, r = min(table[side].items(), key=cost)
+        chosen[side] = key
+        for (jn, k, _), v in zip(axes, r["combo"]):
+            if abs(v - default(jn, k, side)) < 1e-12:
+                continue
+            j = jn.replace("{s}", side)
+            e = out.setdefault(j, {})
+            if k == "power":
+                e["power"] = v
+            else:
+                e["reach"] = dict(e.get("reach") or {}, **{k: v})
+    return out, {"table": table, "chosen": chosen, "depths": list(depths), "shifts": list(shifts)}
 
 
 def write(outdir, res):
@@ -737,7 +834,8 @@ class _Builder:
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
                             "kind": kind, "budget": spec.get("budget"),
                             "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0)),
-                            "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper")}
+                            "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper"),
+                            "power": float(spec.get("power", 1.0))}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
@@ -1031,14 +1129,21 @@ class _Builder:
             s, lat = weights.band_coords(m["verts"], _weight_joint(b), bones)
             up, lo = (r * b["halfwidth"] + weights.END_TOL for r in b["reach"])
             near = lat <= b["lateral"] * b["halfwidth"]
-            for side, keep, drop in ((s > lo, b["lower"], (b["upper"], b["helper"])),
+            # past the lower end the bones of the band above on the chain go
+            # too (an "overlap" band composes with them): below a planted
+            # ankle the knee's ramp, which runs down the whole calf along the
+            # knee's own axis, can reach a hem vertex the ankle's axis puts
+            # past the ankle (P2: a 0.023 knee-helper weight slid the
+            # monkey's left hem 1.4 px in a 0.05 H crouch)
+            above = tuple(n for o in bands if o["lower"] == b["upper"] for n in (o["upper"], o["helper"]) if n)
+            for side, keep, drop in ((s > lo, b["lower"], (b["upper"], b["helper"]) + above),
                                      (s < -up, b["upper"], (b["lower"], b["helper"]))):
                 rows = side & near
                 for n in drop:
                     if n:
                         M[rows, col[keep]] += M[rows, col[n]]
                         M[rows, col[n]] = 0.0
-        return weights.prune_weights(M, names)
+        return weights.prune_weights(M, names, prune=weights.KEEP)  # compute pruned them (PRUNING)
 
     def _carry_accessories(self, L, m, bands, w):
         """Source weights of accessory bones (a cuff on a sleeve hem),
@@ -1112,7 +1217,7 @@ class _Builder:
                     "vertices": int(((M[:, [names.index(c) for _, c in chain]]) > 0).any(1).sum()),
                     "mass": round(float(M[:, [names.index(c) for _, c in chain]].sum()), 3),
                     "copies": {c: k for c, k in n.items() if c != a and k}}
-        return weights.prune_weights(M, names)
+        return weights.prune_weights(M, names, prune=weights.KEEP)  # compute pruned them (PRUNING)
 
     def _accessory_chain(self, acc, bands):
         """[(bone, accessory bone)]: the accessory's parent and the accessory,
@@ -1675,7 +1780,7 @@ def _weight_joint(b):
     return {"center": tuple(b["center"]), "upper": b["upper"], "helper": b["helper"], "lower": b["lower"],
             "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "reach": tuple(b["reach"]),
             "lateral": b.get("lateral", weights.LATERAL), "exclusive": True, "overlap": bool(b.get("overlap")),
-            "compose": b.get("compose", "upper")}
+            "compose": b.get("compose", "upper"), "power": b.get("power", 1.0)}
 
 
 def _chained(a, b):
@@ -1699,7 +1804,8 @@ def _round_band(b):
             "reach": [round(float(v), 4) for v in b["reach"]],
             "window": [round(float(v), 4) for v in b.get("window", b["reach"])],
             "lateral": round(b.get("lateral", weights.LATERAL), 3), "upper": b["upper"],
-            "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"]}
+            "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"],
+            "power": float(b.get("power", 1.0))}
 
 
 def _totals(stats):
@@ -1854,6 +1960,10 @@ def main(argv=None):
                          "'elbow_l,elbow_r=2,2.25,2.5,3,3.5'; the chosen reaches go into the build and "
                          "<out>/band_fit.json")
     ap.add_argument("--fit-need", type=float, default=90.0, help="degrees --fit-reach tries to hold both ways")
+    ap.add_argument("--fit-crouch", default=None, metavar="SPEC",
+                    help="fit each leg's band shapes by the crouch grid's folds (fit_crouch), e.g. "
+                         "'knee_{s}.lower=1.5,3;ankle_{s}.power=0.8,0.9,1,1.1,1.2'; the choice goes into the "
+                         "build and <out>/band_fit.json")
     ap.add_argument("--no-physics-match", action="store_true",
                     help="keep every physics mix as the source has it (default: match_physics scales down "
                          "a constraint that swings harder than in the source)")
@@ -1889,8 +1999,27 @@ def main(argv=None):
             bands[j] = dict(bands.get(j, {}), **spec)
         for j, v in fit["chosen"].items():
             print(f"  fit {j}: upper reach {v:g} halfwidths")
+    pfit = None
+    if a.fit_crouch:
+        cands = {}
+        for part in a.fit_crouch.split(";"):
+            name, vals = part.split("=", 1)
+            jn, key = name.strip().rsplit(".", 1)
+            cands.setdefault(jn, {})[key] = [float(v) for v in vals.split(",")]
+        fitted, pfit = fit_crouch(a.layers_dir, a.joints, a.template, cands, progress=lambda m: print("  " + m),
+                                  bands=bands, mode=a.mode, source=None if a.no_source else "auto", name=a.name,
+                                  joint_modes=modes, mesh_profile=a.mesh, recenter=not a.keep_joints)
+        bands = json.loads(json.dumps(bands or {}))
+        for j, spec in fitted.items():
+            e = bands.setdefault(j, {})
+            for k, v in spec.items():
+                e[k] = dict(e.get(k) or {}, **v) if k == "reach" else v
+        for side, key in pfit["chosen"].items():
+            print(f"  fit crouch, leg {side}: {key}")
     res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name, modes, a.mesh,
                 not a.keep_joints, bands, accessory_copies=not a.no_accessory_copies)
+    if pfit is not None:
+        res["report"]["fit_crouch"] = pfit
     if fit is not None:
         res["report"]["fit_reach"] = fit
     paths = write(a.out, res)
@@ -1900,8 +2029,8 @@ def main(argv=None):
             if r["mix"] != r["mix_source"]:
                 print(f"  physics {n}: swings {r['px']:.1f} px here, {r['source_px']:.1f} px in the source: "
                       f"mix {r['mix_source']:g} -> {r['mix']:g}")
-    if fit is not None:
-        _dump(os.path.join(a.out, "band_fit.json"), {"bands": bands, "fit": fit})
+    if fit is not None or pfit is not None:
+        _dump(os.path.join(a.out, "band_fit.json"), {"bands": bands, "fit": fit, "fit_crouch": pfit})
     tot = res["report"]["totals"]
     ir = res["ir"]
     print(f"{paths['skeleton']}: {len(ir['bones'])} bones, {len(ir['slots'])} slots, {len(ir['ik'])} ik, "

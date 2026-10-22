@@ -758,6 +758,33 @@ def test_crouch_with_the_weight_shifted_does_not_fold_the_flared_calf(flared):
             **{"ankle_{s}": dict(ANKLE_UPPER_24["ankle_{s}"], compose="take")}))
 
 
+def test_fit_crouch_fits_each_leg_and_keeps_the_template_where_it_holds(flared):
+    """P2 open issue (deep-crouch folds): where a calf folds in a deep
+    crouch depends on where its art sits off the knee's and ankle's ramps,
+    so fit_crouch builds every combination of the candidate band shapes
+    (knee reach down the calf x ankle ramp power) and each leg keeps the
+    one with the fewest folds over the crouch grid, the template's own on a
+    tie. The synthetic flared calf is symmetric: both legs take the same
+    shape, it folds no more than the template's, and the knee keeps the
+    template's 1.5 halfwidths (the whole calf folds more here; on the
+    monkey's right leg it is the whole calf and power 0.9, 22 -> 0 folds)."""
+    cands = {"knee_{s}": {"lower": [1.5, 3.0]}, "ankle_{s}": {"power": [0.9, 1.0, 1.1]}}
+    depths, shifts = (0.10, 0.12, 0.14), (-40.0, 0.0, 40.0)
+    bands, info = rigbuild.fit_crouch(flared, candidates=cands, depths=depths, shifts=shifts, mode="joint")
+    tab, chosen = info["table"], info["chosen"]
+    assert set(tab) == {"l", "r"} and all(len(t) == 6 for t in tab.values())
+    for side in "lr":
+        best = min(r["folds"] for r in tab[side].values())
+        assert tab[side][chosen[side]]["folds"] == best
+        assert best <= tab[side]["knee_{s} lower 1.5, ankle_{s} power 1"]["folds"]
+    assert chosen["l"] == chosen["r"] and chosen["l"].startswith("knee_{s} lower 1.5")
+    assert all("reach" not in bands.get(f"knee_{s}", {}) for s in "lr")
+    # what it returns is what build takes
+    res = rigbuild.build(flared, mode="joint", bands=bands)
+    for side in "lr":
+        assert res["report"]["bands"][f"ankle_{side}"].get("power", 1.0) == tab[side][chosen[side]]["combo"][1]
+
+
 def test_straighten_moves_the_joint_the_template_names(layers_dir, kinked):
     """ik "straighten": which joint goes onto the hip-ankle line when the
     setup leg is kinked against the knee rule (default the knee; the A2

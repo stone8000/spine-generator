@@ -1,6 +1,6 @@
 """Skinning weights for a layer mesh: 2D bone heat plus joint-band ramps.
 
-    compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=3, prune=0.02)
+    compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=3, prune=PRUNE)
         -> [[(bone name, weight), ...] per vertex]
 
 WHY TWO METHODS (SOTA §2 權重)
@@ -90,7 +90,19 @@ BONE HEAT IN 2D (Pinocchio; Blender meshlaplacian.cc heat_bone_weighting)
 
 PRUNING
   Each vertex keeps at most `max_influences` bones (SOTA: 3), drops any under
-  `prune` (0.02), and is renormalised to sum 1.
+  `prune` (PRUNE 0.02; PRUNE_BAND 0.005 in a joint band), and is
+  renormalised to sum 1. WHY lower in the bands: a dropped weight is a jump
+  between two neighbouring vertices, one with the bone and one without.
+  Under chain composition the knee helper's share fades to 0.02-0.03 down
+  a whole calf to the ankle (P2 open issue: deep-crouch folds), and on the
+  monkey's flared right hem those jumps flipped the small triangles at the
+  hem's tip: with the knee's ramp run down the whole calf, spine-core folds
+  over the crouch grid (6 depths x 15 shifts) were 43 at 0.02 and 7 at
+  0.005, the same 7 at 0.001 and 0.0001 (the continuum's own limit).
+  WHY not everywhere: outside the bands the weights come from heat
+  diffusion, which leaks a percent or so round a crotch to the other leg;
+  0.02 is what cuts that off (test_left_leg_never_gets_right_leg_weight).
+  L8's three bones are untouched.
 
 COORDINATES
   Canvas pixels (y down), the same space as mesh.build's verts; nothing here
@@ -110,13 +122,16 @@ LATERAL = 1.6        # a joint band reaches this many halfwidths sideways from t
 END_TOL = 0.5        # px: mesh.build puts a vertex row on each band end; a vertex this close to an
                      # end belongs to the band (pinned to the ramp's end value) but is not "inside"
                      # it for B2 (it carries one influence by design)
+PRUNE = 0.02          # weights under this are dropped (PRUNING) ...
+PRUNE_BAND = 0.005    # ... or under this one in a joint band, where the ramps made them
+KEEP = 1e-9           # any weight above this counts as a bone on the vertex (L8 room for an accessory)
 COMPOSE = ("upper", "row")  # how an "overlap" band composes with the band above (CHAIN COMPOSITION)
 B2_MIN = 0.9         # SOTA §5 B2: >= 90% of joint-band vertices have >= 2 influences
 
 
 # ---------------------------------------------------------------- public
 
-def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=3, prune=0.02,
+def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=3, prune=None,
             visibility=True):
     """Per-vertex weights (see the module docstring).
 
@@ -136,7 +151,8 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
               "overlap" (True: the band may run into the band of the joint
               above it on the same chain, whose lower bone is this joint's
               upper bone; there its ramp splits that bone's share, CHAIN
-              COMPOSITION)}]; every bone a
+              COMPOSITION), "power" (a band without a helper: its ramp is
+              t ** power, default 1)}]; every bone a
               joint names must be in `bones`
     mode      "auto": heat + joint ramps; "heat": heat only; "rigid": every vertex
               100% on bones[0] (the old cut-out, for comparison)
@@ -155,7 +171,14 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
     n = len(verts)
     if mode == "rigid":
         return [[(names[0], 1.0)] for _ in range(n)]
-    W = weight_matrix(verts, tris, outline, bones, joints if mode == "auto" else (), visibility)
+    js = joints if mode == "auto" else ()
+    W = weight_matrix(verts, tris, outline, bones, js, visibility)
+    if prune is None:
+        # PRUNING: ramp-made weights in a joint band keep down to PRUNE_BAND
+        inband = np.zeros(n, bool)
+        for j in js:
+            inband |= band_mask(np.asarray(verts, float).reshape(-1, 2), j, bones)
+        prune = np.where(inband, PRUNE_BAND, PRUNE)
     return prune_weights(W, names, max_influences, prune)
 
 
@@ -230,13 +253,15 @@ def chain_order(joints):
     return out
 
 
-def prune_weights(W, names, max_influences=3, prune=0.02):
-    """Keep each vertex's top `max_influences` weights >= `prune` (the
-    largest always survives), renormalised; sorted heaviest first."""
+def prune_weights(W, names, max_influences=3, prune=None):
+    """Keep each vertex's top `max_influences` weights >= `prune` (a number
+    or one per vertex; default PRUNE; the largest always survives),
+    renormalised; sorted heaviest first."""
+    prune = np.broadcast_to(np.asarray(PRUNE if prune is None else prune, float), (len(W),))
     out = []
     order = np.argsort(-W, axis=1, kind="stable")[:, :max_influences]
-    for row, idx in zip(W, order):
-        keep = [i for i in idx if row[i] >= prune] or [idx[0]]
+    for row, idx, p in zip(W, order, prune):
+        keep = [i for i in idx if row[i] >= p] or [idx[0]]
         s = float(sum(row[i] for i in keep))
         out.append([(names[i], float(row[i] / s)) for i in keep])
     return out
@@ -258,8 +283,8 @@ def accessory_split(M, names, acc, parent, share, max_influences=3, prune=0.02):
     x[x < prune] = 0.0                       # too little for the accessory: all stays on the parent
     whole = (x > 0) & (wp - x < prune)       # too little left on the parent: all to the accessory
     x[whole] = wp[whole]
-    used = (M >= prune).sum(1)
-    no_room = (x > 0) & (x < wp) & (M[:, a] < prune) & (used + 1 > max_influences)
+    used = (M > KEEP).sum(1)
+    no_room = (x > 0) & (x < wp) & (M[:, a] <= KEEP) & (used + 1 > max_influences)
     x[no_room] = 0.0
     return x, no_room
 
@@ -328,8 +353,8 @@ def accessory_chain_split(M, names, chain, share, max_influences=3, prune=0.02):
         take[whole] = W[whole, k]
         X[:, k] = take
         rem = np.maximum(rem - take, 0.0)
-    used = (M >= prune).sum(1)
-    added = sum(((X[:, k] > 0) & (M[:, col[a]] < prune)).astype(int) for k, (_, a) in enumerate(chain))
+    used = (M > KEEP).sum(1)
+    added = sum(((X[:, k] > 0) & (M[:, col[a]] <= KEEP)).astype(int) for k, (_, a) in enumerate(chain))
     gone = sum(((X[:, k] > 0) & (X[:, k] >= W[:, k])).astype(int) for k in range(len(chain)))
     no_room = (X.sum(1) > 0) & (used + added - gone > max_influences)
     X[no_room] = 0.0
@@ -458,7 +483,7 @@ def joint_ramp(verts, joint, bones):
         a = np.clip((s + up) / up, 0, 1)
         b = np.clip(s / lo, 0, 1)
         return m, np.stack([1 - a, b, a - b], 1)
-    t = np.clip((s + up) / (up + lo), 0.0, 1.0)
+    t = np.clip((s + up) / (up + lo), 0.0, 1.0) ** float(joint.get("power", 1.0))
     return m, np.stack([1 - t, t], 1)
 
 
