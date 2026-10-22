@@ -14,7 +14,7 @@
 |---|---|---|
 | 研究：量化基準、節拍表、外部最佳做法 | ✅ | `research/FINDINGS.md`、`research/beat_table.json`、`research/SOTA.md` |
 | P1 裁判與輸出骨幹 | ✅ 6 項驗收全過，兩輪反查後修正 | `research/P1_REPORT.md`、`qa/README.md` |
-| P2 讓圖撐得住（猴子現有的圖） | 下一步 | `research/SOTA.md` §7 |
+| P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②④ 通過，⑤ 部分通過，①③ 未過（① 剛性掃描比 README 手量嚴；③ G2 加上單一三角形規則後肘只有 58–78°）。審查 F1–F6 已修：膝蓋依解剖往外彎、整隻腳釘地、θ_hard 含 G4、畫布與掃描範圍無關、G6b 兩側判斷 | `research/P2_REPORT.md` |
 
 P1 的東西：
 - `qa/`：Node 裁判，精確鎖定官方 `@esotericsoftware/spine-core@4.2.120`（與 `spine-canvaskit@4.2.120`），
@@ -23,9 +23,17 @@ P1 的東西：
   `spinegen/lbs.py`（numpy 版 Spine 4.2 骨骼與蒙皮，C1 與官方 runtime 差 ≤ 5e-5 px）。
 - `spinegen/oracle_check.py`（C1）、`spinegen/reemit_check.py`（讀進來再輸出，與原檔差 ≤ 1e-5 px）。
 
+P2 的東西：
+- `spinegen/mesh.py`（貼著圖的 CDT 網格、關節帶列、lean 設定）、`spinegen/weights.py`（bone heat 加分段 ramp）、
+  `spinegen/rigbuild.py`（模板骨架、半角輔助骨、腿 IK、逐關節 rigid／ramp／helper）、`spinegen/ingest_spine.py`、
+  `spinegen/atlas.py`、`templates/biped_mascot.json`。
+- `spinegen/raster.py`、`spinegen/art_gates.py`（G1 G2 G4 G5 G6）、`spinegen/budget.py`（逐關節 θ_soft／θ_hard，
+  加上 artreq 項目與對照表）。
+- `research/p2_sheets.py`（rigid／joint 對照表）、`research/p2_crouch_view.py`（蹲下的對照圖）：P2_REPORT 看圖用。
+
 ```bash
 cd qa && npm ci && npm test        # 55 tests
-python3 -m pytest tests -q         # 106 tests（第三方檔案不存在時自動跳過）
+python3 -m pytest tests -q         # 223 tests（第三方檔案不存在時自動跳過）
 ```
 
 ## 目前的發現

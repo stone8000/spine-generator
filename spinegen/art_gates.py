@@ -24,11 +24,24 @@ WHERE THE DEFINITIONS COME FROM
     of a skinned one; a limb that swings whole carries every point back
     to where it was, so motion alone never reads as a tear.
   G4 SEAM GAP counts pixels inside the convex hull of the band as both parts
-  carry it into the frame, within the disk of radius 1.5 x halfwidth around
-  the (posed) joint, eroded by 1 px, that the two parts together leave below
-  alpha 0.5 and that at least one part, carried back, finds drawn at setup.
-  The hull is the joint's own extent (the far end of a swinging limb never
-  counts); the rest test keeps a notch the art already had from counting.
+  carry it into the frame (each part carrying the band pixels it drew
+  itself), within the disk of radius 1.5 x halfwidth around the (posed)
+  joint, eroded by 1 px, that the two parts together leave below alpha 0.5
+  and that at least one part, carried back, finds drawn at setup and not on
+  the rest drawing's 1 px rim. The hull is the joint's own extent (the far
+  end of a swinging limb, or the crook of a bent one, never counts); the
+  rest test keeps a notch the art already had from counting, and the rim
+  erosion keeps an anti-aliased outline that recedes by a pixel from
+  reading as a tear. A jagged outline (fur) that turns still opens real
+  1 px wide notches inside the hull.
+  CALIBRATION (SOTA §5 gives "0 px" as a starting value, §8.3 asks for it
+  to be calibrated): the count keeps only gap components (8-connected) of
+  at least 4 px, the area of a 2 x 2 block (G4_MIN_PX, scaled by the
+  frame's scale squared); the threshold stays 0 such pixels. A 1-3 px speck
+  where a jagged (fur) or anti-aliased outline turns is not visible at 1:1;
+  a crack that is visible, even a 1 px hairline across a limb, is longer
+  than that. "raw_px" keeps the count before the rule; P2_REPORT has the
+  monkey's first failures before and after.
   G6 GHOST (a) takes the pixels only one part draws whose own carry-back
   lands in the band but whose partner's carry-back finds nothing drawn at
   setup: the overlap swung clear of its partner. Its LENGTH is how far it
@@ -44,6 +57,24 @@ WHERE THE DEFINITIONS COME FROM
   with what O showed there at rest by normalised cross-correlation of
   mean-free RGB; NCC > 0.3 means U's paint repeats the occluder (an arm left
   in the torso paint by a flat-image cut).
+  The correlation cannot say WHICH layer holds the copy, and only one case
+  shows: an arm copy in the torso is revealed as a second arm, but a shard
+  of trousers cut into the hand image reveals trousers where trousers were
+  (the hand carries the copy away, and it shows only where it lands on
+  something else). When a pair correlates, duplicates() finds the copy at
+  rest (the occluder's paint matches the paint under it, CIELAB distance
+  < 10) and gives it an owner by reading the seam on BOTH sides: a copy is
+  CARRIED by the occluder only if it continues the underlay's visible paint
+  across the occluder's edge (that is why it is invisible at rest) AND
+  continues it better, by at least SEAM_MARGIN, than it continues the
+  occluder's own paint around it (a shard is foreign to the layer that
+  holds it). One side alone is not evidence: in a same-coloured body with
+  no outline a ghost meets the underlay seamlessly too (P2 review F5).
+  A carried pair leaves the G6(b) judgement and is reported as "carried"
+  (budget.json turns it into an art request: clean the shard out of that
+  layer), so G6(b) limits a joint only by a duplicate that is visible
+  where it is revealed. Where the shard itself shows (over background or
+  over paint it does not match) is carried_visible()'s count.
   G5 HOLES are background pixels (>= 16 px per component) that one group
   of slots encloses on its own art, the slots that did not move or the
   ones that did, and that something covered at rest: a moved arm baring an
@@ -54,8 +85,12 @@ WHERE THE DEFINITIONS COME FROM
   lies in the joint band (+-1.25 halfwidths along the limb, +-1.6 across,
   as spinegen.weights draws it), oriented by each mesh's setup winding, so
   a fold subtracts: posed / rest >= 0.9 (the budget's soft limit; SOTA
-  allows 0.85 outside holds). The single-triangle ratio range [0.3, 3] is
-  reported and enforced only with strict_tris.
+  allows 0.85 outside holds), AND every one of those triangles keeps its
+  own posed / rest area within [0.3, 3] (SOTA §5 G2 names both). The sum
+  alone let a band hide a crushed or stretched triangle behind the others
+  (P2 review F3: the monkey's elbows read 98-110 deg on the sum while
+  single band triangles left the range from 60-80 deg); strict_tris=False
+  keeps the old sum-only reading for comparison.
   G1 FOLDS is lbs' count (the same definition as qa/run.mjs G1).
 
 UNITS
@@ -72,9 +107,10 @@ import math
 import numpy as np
 
 from . import lbs
-from .raster import COVER, QUAD_TRIS
+from .raster import COVER
 
 DISK = 1.5             # G4 disk radius, in limb halfwidths
+G4_MIN_PX = 4.0        # G4 counts a gap component only from this many px (a 2 x 2 block; scale 1; module doc)
 BAND_EXTENT = 1.25     # G2 band half-length along the limb, halfwidths (= spinegen.mesh/weights)
 BAND_LATERAL = 1.6     # G2 band half-width across the limb, halfwidths (= spinegen.weights)
 MIN_BAND_RATIO = 0.9   # G2 soft (hold) limit
@@ -82,8 +118,14 @@ TRI_RANGE = (0.3, 3.0)  # G2 single-triangle ratio range
 HOLE_MIN_AREA = 16.0   # G5, px at scale 1
 GHOST_MAX_LEN = 0.25   # G6(a), x limb width
 GHOST_MAX_NCC = 0.3    # G6(b)
-NCC_MIN_PX = 16.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1)
+NCC_MIN_PX = 64.0      # G6(b) evaluates a (slot, occluder) pair from this many px (scale 1; see ghost_paint)
 NCC_ERODE = 2.0        # G6(b) correlates only revealed pixels this far (px, scale 1) inside the revealed patch
+DUP_DE = 10.0          # G6(b) duplicates(): CIELAB distance under which two layers' paint is "the same"
+SEAM_REACH = 3.0       # G6(b) duplicates(): px (scale 1) across the occluder's edge where a copy's owner is read
+SEAM_MIN_PX = 8.0      # G6(b) duplicates(): px of contact with visible underlay paint needed to call a copy carried
+SEAM_MARGIN = 2.5      # G6(b) duplicates(): CIELAB, ~1 just-noticeable difference (2.3): the underlay side must
+                       # continue the copy at least this much better than the occluder's own paint does
+DUP_MIN_PX = 16.0      # G6(b) duplicates(): smallest duplicate component, px (scale 1)
 
 
 # ---------------------------------------------------------------- joints
@@ -93,7 +135,8 @@ def as_joint(joint):
     lower, halfwidth[, axis, extent, name, slots]} or the budget form
     {name, bone, dirs, band: {...}}. Coordinates are WORLD (y up)."""
     band = dict(joint.get("band") or {})
-    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots"):
+    for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "other_limbs",
+              "band_center"):
         if k not in band and k in joint:
             band[k] = joint[k]
     band["name"] = joint.get("name") or band.get("name") or f"{band.get('upper')}-{band.get('lower')}"
@@ -107,7 +150,7 @@ def as_joint(joint):
 def resolve_joint(rest, joint):
     """as_joint plus what can be derived from the rig at rest: the upper
     bone (the lower bone's parent), the center (the lower bone's setup
-    origin), the axis (the lower bone's x axis) and the halfwidth
+    origin), the axis (_limb_axis) and the halfwidth
     (estimate_halfwidth). Raises if a named bone does not exist or the
     halfwidth is not positive."""
     j = as_joint(joint)
@@ -123,8 +166,7 @@ def resolve_joint(rest, joint):
     if j.get("center") is None:
         j["center"] = [m[4], m[5]]
     if j.get("axis") is None:
-        n = math.hypot(m[0], m[2]) or 1.0
-        j["axis"] = [m[0] / n, m[2] / n]
+        j["axis"] = _limb_axis(ev, rest.world, li)
     j["center"] = [float(j["center"][0]), float(j["center"][1])]
     if j.get("halfwidth") is None:
         j["halfwidth"] = estimate_halfwidth(rest, j)
@@ -132,6 +174,22 @@ def resolve_joint(rest, joint):
     if not j["halfwidth"] > 0:
         raise ValueError(f"joint {j['name']}: halfwidth must be > 0 (got {j['halfwidth']})")
     return j
+
+
+def _limb_axis(ev, world, li):
+    """Unit world direction the limb leaves the joint in: the lower bone's
+    x axis when it has a length, else toward its first child's origin (a
+    cut-out rig like the monkey's leaves every bone at length 0 and
+    rotation 0, so its x axis says nothing about the limb), else world x."""
+    m = world[li]
+    if (ev.bones[li].get("length") or 0.0) <= 1e-6:
+        for ci in ev.children[li]:
+            d = np.array([world[ci][4] - m[4], world[ci][5] - m[5]])
+            n = float(np.hypot(*d))
+            if n > 1e-6:
+                return [float(d[0] / n), float(d[1] / n)]
+    n = math.hypot(m[0], m[2])
+    return [m[0] / n, m[2] / n] if n > 1e-9 else [1.0, 0.0]
 
 
 def estimate_halfwidth(rest, j, reach=40.0):
@@ -187,7 +245,10 @@ def joint_parts(rest, j):
     the lower bone's subtree; the upper side the upper bone's subtree minus
     that (the upper bone, its helper and cuff bones, ...). Upper-side slots
     count only if their art reaches into the joint disk at rest, so the
-    head is not part of a shoulder because it hangs off the torso.
+    head is not part of a shoulder because it hangs off the torso, and
+    slots on OTHER limbs (`j["other_limbs"]`: the root bones of the other
+    joints' lower sides, which budget.scan fills in) never count: a hand
+    hanging next to the thigh is not part of the hip.
     `j["slots"] = {"upper": [...], "lower": [...]}` overrides."""
     if j.get("slots"):
         names = set(rest.geoms)
@@ -195,6 +256,9 @@ def joint_parts(rest, j):
     ev = rest.renderer.ev
     low = _subtree(ev, j["lower"])
     up = _subtree(ev, j["upper"]) - low
+    for b in j.get("other_limbs") or ():
+        if b in ev.index and ev.index[j["lower"]] not in _subtree(ev, b):
+            up -= _subtree(ev, b)
     upper = []
     disk = _disk_mask(rest.canvas, j["center"], DISK * j["halfwidth"])
     for s in rest.slots:
@@ -342,6 +406,10 @@ class JointRest:
         self.U0 = union_alpha(rest, self.upper_slots) >= COVER
         self.L0 = union_alpha(rest, self.lower_slots) >= COVER
         self.drawn0 = self.U0 | self.L0
+        # G4's "1 px erosion" applied to what the parts drew at rest: a pixel
+        # on the rest silhouette's rim is not a place a tear can open, only a
+        # place where the outline recedes by a pixel as a piece turns
+        self.drawn0_in = cv2.erode(self.drawn0.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
         # where the two drawings overlap or MEET (1 px): a cut-out whose
         # pieces only abut has a seam line and no overlap, and tears too
         k = np.ones((3, 3), np.uint8)
@@ -352,21 +420,28 @@ class JointRest:
         self.band = band
         ii, jj = np.nonzero(band)
         self.band_world = c.to_world(np.stack([jj + 0.5, ii + 0.5], 1))
-        self.band_up = self.upper.locate(self.upper.rest_tris, self.band_world)
-        self.band_lo = self.lower.locate(self.lower.rest_tris, self.band_world)
+        # each part carries only the band pixels it drew itself: a rim pixel
+        # only the forearm drew is not the sleeve's to hold in place, and
+        # carrying it with the sleeve would read the forearm's outline moving
+        # by a pixel as a tear
+        self.band_mine_up = self.U0[ii, jj]
+        self.band_mine_lo = self.L0[ii, jj]
+        self.band_up = self.upper.locate(self.upper.rest_tris, self.band_world[self.band_mine_up])
+        self.band_lo = self.lower.locate(self.lower.rest_tris, self.band_world[self.band_mine_lo])
 
     @property
     def readable(self):
         """A joint with no band (the parts do not meet at rest) is a SKIP."""
         return bool(self.band.any()) and bool(self.upper_slots) and bool(self.lower_slots)
 
-    def rest_drawn(self, world_pts):
-        """Did either part draw these setup-pose world points at rest?"""
+    def rest_drawn(self, world_pts, interior=False):
+        """Did either part draw these setup-pose world points at rest?
+        interior=True: and not on the drawing's 1 px rim."""
         c = self.rest.canvas
         px = np.floor(c.to_px(world_pts)).astype(np.int64)
         ok = (px[:, 0] >= 0) & (px[:, 0] < c.W) & (px[:, 1] >= 0) & (px[:, 1] < c.H)
         out = np.zeros(len(px), bool)
-        out[ok] = self.drawn0[px[ok, 1], px[ok, 0]]
+        out[ok] = (self.drawn0_in if interior else self.drawn0)[px[ok, 1], px[ok, 0]]
         return out
 
     def in_band(self, world_pts):
@@ -471,7 +546,14 @@ def folds(frame, slots=None, rest=None):
 
 def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
     """[(slot, triangle indices)] of the part meshes whose setup centroid is
-    inside the joint band (axis-aligned with the joint's axis)."""
+    inside the joint band (axis-aligned with the joint's axis).
+
+    The band is centred on j["band_center"] when the joint gives one, else
+    on the joint: a one-sided band (a planted ankle, whose band runs up
+    the shin from the pivot so the boot stays 100% foot) bends about the
+    pivot but deforms only on one side, and a window centred on the pivot
+    would count half rigid boot, whose area never changes, and read the
+    band too lenient."""
     j = jr.j
     ext = float(j.get("extent") or extent) * jr.hw
     lat = lateral * jr.hw
@@ -483,7 +565,7 @@ def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
         g = rest.geoms[s]
         if g.att["type"] not in ("mesh", "linkedmesh"):
             continue
-        cen = g.xy[g.tris].mean(1) - np.asarray(j["center"])
+        cen = g.xy[g.tris].mean(1) - np.asarray(j.get("band_center") or j["center"], float)
         a, b = cen @ ax, cen @ nrm
         k = np.nonzero((np.abs(a) <= ext) & (np.abs(b) <= lat))[0]
         if len(k):
@@ -491,14 +573,21 @@ def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
     return out
 
 
-def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=False):
+def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=True):
     """G2: posed / rest signed area of the joint band's triangles (each mesh
-    oriented by its setup winding, so folded triangles subtract)."""
+    oriented by its setup winding, so folded triangles subtract) >=
+    min_ratio, and, with strict_tris (default, SOTA §5), every band
+    triangle's own ratio inside tri_range. "by" says which part failed
+    ("band", "tris" or both); `worst` is the slot with the lowest ratio when
+    the band fails, else the slot with the most triangles out of range;
+    "tri_worst" names that slot's most extreme triangle (index into its
+    mesh, ratio)."""
     jr = joint_rest(rest, joint)
     ev = rest.renderer.ev
     refs = ev.fold_references()
     num = den = 0.0
     tri_min, tri_max, bad, per = math.inf, -math.inf, 0, {}
+    extreme = {}
     for s, k in band_triangles(rest, jr):
         g0, g1 = rest.geoms[s], frame.geoms.get(s)
         if g1 is None:
@@ -508,31 +597,50 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
         a0 = lbs.signed_areas(g0.xy, g0.tris[k]) * su * ref
         a1 = lbs.signed_areas(g1.xy, g1.tris[k]) * su * ref
         ok = a0 > 1e-9
-        a0, a1 = a0[ok], a1[ok]
+        a0, a1, kk = a0[ok], a1[ok], k[ok]
         if not len(a0):
             continue
         num += a1.sum()
         den += a0.sum()
         r = a1 / a0
         tri_min, tri_max = min(tri_min, r.min()), max(tri_max, r.max())
-        nb = int(((r < tri_range[0]) | (r > tri_range[1])).sum())
+        out = (r < tri_range[0]) | (r > tri_range[1])
+        nb = int(out.sum())
         bad += nb
         per[s] = {"ratio": float(a1.sum() / a0.sum()), "tris": int(len(a0)), "tri_out_of_range": nb}
+        if nb:
+            # most extreme = furthest outside the range on a log scale
+            dist = np.maximum(np.log(tri_range[0] / np.maximum(r, 1e-9)), np.log(np.maximum(r, 1e-9) / tri_range[1]))
+            i = int(np.argmax(np.where(out, dist, -np.inf)))
+            extreme[s] = (int(kk[i]), float(r[i]))
     if den <= 0:
         return _result("G2_AREA", 1.0, True, None, joint=jr.name, note="no mesh triangles in the band")
     ratio = num / den
-    ok = ratio >= min_ratio and (bad == 0 or not strict_tris)
-    worst = None if ok else min(per, key=lambda s: per[s]["ratio"])
-    return _result("G2_AREA", float(ratio), ok, worst, joint=jr.name, min=min_ratio,
-                   tri_min=float(tri_min), tri_max=float(tri_max), tri_out_of_range=bad, slots=per)
+    band_ok = ratio >= min_ratio
+    tris_ok = bad == 0 or not strict_tris
+    by = [n for n, good in (("band", band_ok), ("tris", tris_ok)) if not good]
+    worst = tri_worst = None
+    if not band_ok:
+        worst = min(per, key=lambda s: per[s]["ratio"])
+    elif not tris_ok:
+        worst = max(per, key=lambda s: per[s]["tri_out_of_range"])
+    if bad:
+        w = worst if worst in extreme else max(extreme, key=lambda s: per[s]["tri_out_of_range"])
+        tri_worst = {"slot": w, "tri": extreme[w][0], "ratio": extreme[w][1]}
+    return _result("G2_AREA", float(ratio), band_ok and tris_ok, worst, joint=jr.name, min=min_ratio,
+                   tri_min=float(tri_min), tri_max=float(tri_max), tri_out_of_range=bad, tri_range=list(tri_range),
+                   strict_tris=bool(strict_tris), by=by, tri_worst=tri_worst, slots=per)
 
 
 # ---------------------------------------------------------------- G4
 
-def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False):
+def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False, min_px=None):
     """G4: background opened inside the joint (see the module doc).
+    The value counts only gap components of at least min_px pixels
+    (default G4_MIN_PX, scale 1; "raw_px" is the count before that rule).
     masks=True adds "masks": {"box": (i0, i1, j0, j1), "gap", "hull"}."""
     import cv2
+    min_px = G4_MIN_PX if min_px is None else min_px
     jr = joint_rest(rest, joint, disk)
     pair = "|".join(jr.upper_slots[-1:] + jr.lower_slots[-1:]) or jr.name
     if not jr.readable:
@@ -561,16 +669,30 @@ def seam_gap(rest, frame, joint, disk=DISK, erode=1, masks=False):
     if cand.any():
         ci, cj = np.nonzero(cand)
         pts = _box_world(c, box, ci, cj)
-        hit = jr.rest_drawn(jr.upper.carry_back(frame, pts, posed_u)) | \
-            jr.rest_drawn(jr.lower.carry_back(frame, pts, posed_l))
+        hit = jr.rest_drawn(jr.upper.carry_back(frame, pts, posed_u), interior=erode > 0) | \
+            jr.rest_drawn(jr.lower.carry_back(frame, pts, posed_l), interior=erode > 0)
         gap[ci[hit], cj[hit]] = True
+    raw = int(gap.sum())
+    gap = drop_specks(gap, min_px * c.scale ** 2)
     n = int(gap.sum())
     out = _result("G4_SEAM_GAP", n, n == 0, pair if n else None, joint=jr.name,
                   area=n / c.scale ** 2, box=_bbox_world(c, box, gap), hull_px=int((region > 0).sum()),
-                  depth=_depth(gap) / c.scale)
+                  depth=_depth(gap) / c.scale, raw_px=raw, min_px=min_px)
     if masks:
         out["masks"] = {"box": box, "gap": gap, "hull": region > 0}
     return out
+
+
+def drop_specks(mask, min_px):
+    """The mask without its 8-connected components of fewer than min_px
+    pixels. G4's calibration rule, see G4_MIN_PX."""
+    import cv2
+    if min_px <= 1 or not mask.any():
+        return mask
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    keep = st[:, cv2.CC_STAT_AREA] >= min_px
+    keep[0] = False
+    return keep[lab]
 
 
 def _depth(mask):
@@ -599,7 +721,7 @@ def _closed_background(solid):
     return lab, stats, np.nonzero(keep)[0].tolist()
 
 
-def holes(rest, frame, min_area=HOLE_MIN_AREA):
+def holes(rest, frame, min_area=HOLE_MIN_AREA, masks=False):
     """G5: background that the art itself encloses and that was covered at
     rest: >= min_area px (scale 1) per 8-connected component.
 
@@ -656,8 +778,15 @@ def holes(rest, frame, min_area=HOLE_MIN_AREA):
                           "enclosed_by": "static" if group is static else "moved"})
     found.sort(key=lambda f: -f["area"])
     worst = found[0]["slot"] if found else None
-    return _result("G5_HOLES", len(found), not found, worst, holes=found[:10],
-                   area=float(sum(f["area"] for f in found)))
+    out = _result("G5_HOLES", len(found), not found, worst, holes=found[:10],
+                  area=float(sum(f["area"] for f in found)))
+    if masks:
+        keep = np.zeros((H, W), bool)
+        if hole.any():
+            big = np.nonzero(stats[:, 4] >= min_area * c.scale ** 2)[0]
+            keep = np.isin(lab, big[big > 0])
+        out["masks"] = {"holes": keep}
+    return out
 
 
 def _pix_box_world(c, ii, jj):
@@ -755,11 +884,27 @@ def _top_slot(frame, box, ii, jj, slots):
     return max(set(owners), key=owners.count) if owners else slots[-1]
 
 
-def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None):
+def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=None, erode=None, masks=False,
+                visibility=False):
     """G6(b): newly revealed pixels of an underlying slot vs what its
     occluder showed there at rest (texel identity; see the module doc).
     The value is the highest NCC over (revealed slot, occluder) pairs with
-    at least min_px pixels (scale 1)."""
+    at least min_px pixels (scale 1); `worst` is "revealed|occluder".
+
+    The correlation is symmetric: it is as high when the OCCLUDER's image
+    carries a copy of the underlay (a flat-image cut that left a shard of
+    trousers in the hand layer) as when the underlay carries a copy of the
+    occluder (an arm left in the torso paint). Only the second shows where
+    the pixels are revealed: the first reveals trousers where trousers were.
+    So a pair that correlates is checked for who holds the copy: if most
+    of its revealed pixels that lie in a duplicate (duplicates()) lie in
+    one the OCCLUDER carries, the pair is listed under "carried" instead of
+    judged: the shard is the occluder layer's fault, goes to the art
+    request list (budget.json "artreq"), and is not a limit of the joint. visibility=True adds, per carried pair, "visible_px": the
+    shard pixels now drawn over background or over paint that does not
+    match them (carried_visible()).
+    masks=True adds "masks": {"revealed": (H, W) bool of the judged pixels
+    of the worst pair}."""
     import cv2
     c = frame.canvas
     H, W = c.shape
@@ -795,22 +940,229 @@ def ghost_paint(rest, frame, max_ncc=GHOST_MAX_NCC, min_px=NCC_MIN_PX, slots=Non
         for o in np.unique(occ):
             k = occ == o
             pairs[(uname, rest_names[o])] = (p[k], q[k])
-    best, items = (0.0, None), []
-    need = min_px * c.scale ** 2
+    best, items, carried = (0.0, None, None), [], []
+    need = max(min_px * c.scale ** 2, 4)
     for (u, o), (p, q) in pairs.items():
         m = np.zeros(H * W, np.uint8)
         m[p] = 1
         inner = cv2.erode(m.reshape(H, W), _disk_kernel(erode * c.scale)).reshape(-1)
         k = inner[p] > 0
-        if k.sum() < max(need, 4):
+        if k.sum() < need:
             continue
         v = ncc(img_now[p[k], :3], img_rest[q[k], :3])
+        if v > max_ncc:
+            # a duplicate: which layer holds it? (only asked once the
+            # pattern correlates: two layers sharing a palette agree pixel
+            # by pixel by chance, which duplicates() alone would take for a
+            # copy)
+            dup = duplicates(rest, u, o)
+            lab = dup["labels"][q[k]]
+            mine = dup["carried"][q[k]]
+            if (lab > 0).any() and mine.sum() >= 0.5 * (lab > 0).sum():
+                it = {"slot": u, "occluder": o, "px": int(k.sum()), "ncc": v,
+                      "components": sorted(int(x) for x in np.unique(lab[mine]))}
+                if visibility:
+                    it["visible_px"] = carried_visible(rest, frame, u, o, it["components"])
+                carried.append(it)
+                continue
         items.append({"slot": u, "occluder": o, "px": int(k.sum()), "ncc": v})
         if v > best[0]:
-            best = (v, u)
+            best = (v, f"{u}|{o}", p[k])
     items.sort(key=lambda it: -it["ncc"])
     ok = best[0] <= max_ncc
-    return _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10])
+    out = _result("G6B_GHOST_PAINT", float(best[0]), ok, None if ok else best[1], max=max_ncc, pairs=items[:10],
+                  carried=carried)
+    if masks:
+        m = np.zeros(H * W, bool)
+        if best[2] is not None:
+            m[best[2]] = True
+        out["masks"] = {"revealed": m.reshape(H, W)}
+    return out
+
+
+def _lab(rgb):
+    """CIELAB (L 0-100) of straight RGB in [0, 1], (n, 3) float32."""
+    import cv2
+    x = np.clip(np.asarray(rgb, np.float32), 0, 1).reshape(-1, 1, 3)
+    return cv2.cvtColor(x, cv2.COLOR_RGB2LAB).reshape(-1, 3)
+
+
+def _straight(premult):
+    a = premult[:, 3:4]
+    return premult[:, :3] / np.maximum(a, 1e-6)
+
+
+def _seam_de(comp, under_vis, lab, reach):
+    """How the copy meets the underlay's visible paint across the
+    occluder's edge: for every visible-underlay pixel within `reach` px of
+    the component, the colour distance to the nearest component pixel
+    (both (h, w) masks of one box; lab (h, w, 3) CIELAB of the rest frame).
+    Returns (median distance, number of such pixels); (inf, 0) if the copy
+    never meets visible underlay paint."""
+    from scipy import ndimage
+    dist, (iy, ix) = ndimage.distance_transform_edt(~comp, return_indices=True)
+    near = under_vis & (dist <= reach)
+    n = int(near.sum())
+    if not n:
+        return math.inf, 0
+    a = lab[near]
+    b = lab[iy[near], ix[near]]
+    return float(np.median(np.linalg.norm(a - b, axis=1))), n
+
+
+def duplicates(rest, under, occluder):
+    """Where the occluder's paint at rest repeats the paint of the slot
+    under it, and which of the two layers carries the copy. Cached.
+
+    A DUPLICATE pixel is one the occluder covers at rest while `under`
+    draws beneath it (alpha >= 0.5) with nearly the same colour (CIELAB
+    distance < DUP_DE); duplicate pixels are grouped into 8-connected
+    components of >= DUP_MIN_PX px. A component's OWNER is read off its
+    seams with both layers' visible paint, each the median colour distance
+    between the paint within SEAM_REACH px of the copy and its nearest copy
+    pixel (_seam_de):
+      seam_de    with the UNDERLAY's visible paint (across the occluder's
+                 edge);
+      seam_o_de  with the OCCLUDER's own paint (its drawn pixels that are
+                 no duplicate: across the copy's boundary inside it).
+    A shard of the underlay cut into the occluder (trousers in the hand
+    image) continues the underlay seamlessly and breaks against the hand's
+    own paint; a copy of the occluder left in the underlay (the arm in the
+    torso) IS the occluder's paint where it shows, so it continues the
+    occluder and meets the underlay at the occluder's outline. Owner
+    "occluder" (carried) when seam_de < DUP_DE over >= SEAM_MIN_PX px of
+    contact AND seam_o_de - seam_de >= SEAM_MARGIN. A copy that touches no
+    paint of the occluder's own is an island in its image: carried when
+    the occluder has own paint elsewhere (an island cut out with the hand),
+    not when the copy is all the occluder shows (a patch layer, or a whole
+    occluder baked into the underlay: a ghost). Everything else is owner
+    "under", which G6b keeps judging: a doubt never hides a ghost.
+    WHY both sides (P2 review F5): reading only the underlay's side called
+    a real ghost carried whenever the occluder and the underlay share a
+    colour and the art has no outline (skin on skin: seam_de 5.2 < 10),
+    and the ghost passed G6b. Two layers with one palette (a striped
+    sleeve over a striped shirt) now go by which side the copy continues
+    better; the monkey's sleeve carries a torso stripe that continues the
+    torso (0.5) better than the sleeve (5.2).
+
+    Returns {"labels": (H*W,) int32 component id (0 none), "carried": (H*W,)
+    bool pixels of occluder-owned components, "components": {id: {"px",
+    "owner", "seam_de", "seam_px", "seam_o_de", "seam_o_px", "why"}}}."""
+    import cv2
+    cache = rest.cache.setdefault("duplicates", {})
+    key = (under, occluder)
+    if key in cache:
+        return cache[key]
+    c = rest.canvas
+    H, W = c.shape
+    n = H * W
+    rank = {s: k for k, s in enumerate(rest.slots)}
+    labels = np.zeros(n, np.int32)
+    carried = np.zeros(n, bool)
+    comps = {}
+    fu = rest.frags.get(under)
+    if fu is None or occluder not in rank or under not in rank:
+        cache[key] = {"labels": labels, "carried": carried, "components": comps}
+        return cache[key]
+    top = rest.top.reshape(-1)
+    ua = np.zeros(n, np.float32)
+    ua[fu.idx] = fu.alpha
+    ov = np.nonzero((top == rank[occluder]) & (ua >= COVER))[0]
+    img = rest.image.reshape(-1, 4)
+    ucol = np.zeros((n, 3), np.float32)
+    ucol[fu.idx] = _straight(fu.rgba)
+    dup = np.zeros(n, np.uint8)
+    if len(ov):
+        de = np.linalg.norm(_lab(_straight(img[ov])) - _lab(ucol[ov]), axis=1)
+        dup[ov[de < DUP_DE]] = 1
+    nl, lab, st, _ = cv2.connectedComponentsWithStats(dup.reshape(H, W), connectivity=8)
+    lab = lab.reshape(-1)
+    under_vis = (top == rank[under]).reshape(H, W)
+    occ_own = ((top == rank[occluder]) & (dup == 0)).reshape(H, W)   # the occluder's own paint
+    own_total = int(occ_own.sum())
+    reach = max(2.0, SEAM_REACH * c.scale)
+    need = SEAM_MIN_PX * c.scale
+    pad = int(math.ceil(reach)) + 2
+    for i in range(1, nl):
+        if st[i, cv2.CC_STAT_AREA] < DUP_MIN_PX * c.scale ** 2:
+            continue
+        x0, y0, bw, bh = st[i, cv2.CC_STAT_LEFT], st[i, cv2.CC_STAT_TOP], st[i, cv2.CC_STAT_WIDTH], st[i, cv2.CC_STAT_HEIGHT]
+        i0, i1, j0, j1 = max(0, y0 - pad), min(H, y0 + bh + pad), max(0, x0 - pad), min(W, x0 + bw + pad)
+        comp = lab.reshape(H, W)[i0:i1, j0:j1] == i
+        box_lab = _lab(_straight(img.reshape(H, W, 4)[i0:i1, j0:j1].reshape(-1, 4))).reshape(i1 - i0, j1 - j0, 3)
+        de, n_seam = _seam_de(comp, under_vis[i0:i1, j0:j1], box_lab, reach)
+        de_o, n_o = _seam_de(comp, occ_own[i0:i1, j0:j1], box_lab, reach)
+        if n_seam < need or de >= DUP_DE:
+            owner, why = "under", "does not continue the underlay's paint"
+        elif n_o >= need:
+            better = de_o - de >= SEAM_MARGIN
+            owner = "occluder" if better else "under"
+            why = ("continues the underlay, breaks against the occluder's own paint" if better else
+                   "continues the occluder's own paint as well as the underlay's (no evidence: judged)")
+        elif own_total >= DUP_MIN_PX * c.scale ** 2:
+            owner, why = "occluder", "an island in the occluder's image, apart from its own paint"
+        else:
+            owner, why = "under", "the copy is all the occluder shows (no evidence: judged)"
+        full = lab == i
+        labels[full] = i
+        if owner == "occluder":
+            carried[full] = True
+        comps[i] = {"px": int(comp.sum()), "owner": owner, "seam_de": de, "seam_px": n_seam,
+                    "seam_o_de": de_o, "seam_o_px": n_o, "why": why}
+    cache[key] = {"labels": labels, "carried": carried, "components": comps}
+    return cache[key]
+
+
+def carried_texels(rest, under, occluder, components):
+    """The occluder's texels (flat texture indices) that make up the given
+    duplicate components, and their bbox in the occluder's image
+    (x0, y0, x1, y1)."""
+    dup = duplicates(rest, under, occluder)
+    pix = np.nonzero(np.isin(dup["labels"], list(components)))[0]
+    tex = np.unique(rest.top_texel.reshape(-1)[pix])
+    tex = tex[tex >= 0]
+    g = rest.geoms[occluder]
+    t = rest.renderer.texture(g.tex_key)
+    if not len(tex):
+        return tex, None
+    ty, tx = np.divmod(tex, t.w)
+    return tex, (int(tx.min()), int(ty.min()), int(tx.max()) + 1, int(ty.max()) + 1)
+
+
+def carried_visible(rest, frame, under, occluder, components, min_de=DUP_DE):
+    """How many pixels of a shard the occluder carries show in `frame`: the
+    shard's texels drawn on top there, over background (what is under them
+    has alpha < 0.5) or over paint whose colour differs by >= min_de. At
+    rest (and wherever the shard still lies over matching paint) this is 0:
+    the shard is camouflaged until it moves over something else."""
+    tex, _ = carried_texels(rest, under, occluder, components)
+    f = frame.frags.get(occluder)
+    if f is None or not len(tex) or occluder not in frame.slots:
+        return 0
+    io = frame.slots.index(occluder)
+    top = frame.top.reshape(-1)
+    on = np.isin(f.texel, tex) & (f.alpha >= COVER)
+    pix = f.idx[on]
+    sel = top[pix] == io
+    pix, col = pix[sel], f.rgba[on][sel]
+    if not len(pix):
+        return 0
+    n = frame.canvas.H * frame.canvas.W
+    where = np.full(n, -1, np.int64)
+    where[pix] = np.arange(len(pix))
+    under_img = np.zeros((len(pix), 4), np.float32)
+    for s in frame.slots[:io]:   # what is drawn below the occluder there, composited
+        g = frame.frags.get(s)
+        if g is None or frame.geoms[s].blend == "additive":
+            continue
+        k = where[g.idx]
+        hit = k >= 0
+        if hit.any():
+            dst = under_img[k[hit]]
+            under_img[k[hit]] = g.rgba[hit] + dst * (1 - g.rgba[hit][:, 3:4])
+    bare = under_img[:, 3] < COVER
+    de = np.linalg.norm(_lab(_straight(col)) - _lab(_straight(np.maximum(under_img, 1e-6))), axis=1)
+    return int((bare | (de >= min_de)).sum())
 
 
 def _disk_kernel(r):

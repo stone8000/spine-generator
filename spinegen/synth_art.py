@@ -2,7 +2,7 @@
 and the budget scanner that are ours to publish.
 
     python -m spinegen.synth_art OUTDIR [--mode rigid|joint] [--arms 1|2] [--legs 0|2]
-        [--overlap PX] [--ghost] [--hole] [--no-helper] [--scale S]
+        [--overlap PX] [--ghost] [--hole] [--shard] [--skin] [--no-helper] [--scale S]
 
 WHY
   The art gates (SOTA §5 G4 seam gap, G5 holes, G6 ghost) judge PIXELS, so
@@ -19,7 +19,14 @@ WHY
       (G6a);
     * `ghost` paints the arm's own pattern into the torso under the arm
       (G6b), `hole` leaves a transparent disc inside the torso under the
-      upper arm that only a moved arm reveals (G5).
+      upper arm that only a moved arm reveals (G5);
+    * `shard` is the opposite cut: the torso paint inside the forearm image
+      where it lies over the torso, which correlates exactly as a ghost does
+      but is carried away by the forearm (G6b "carried", an art request);
+    * `skin` paints every piece in ONE palette (two skin tones; the stripe
+      directions still differ) with no outline: a same-coloured body, where
+      a ghost's or a shard's edge carries no colour step at all (the P2
+      review's counter-example to reading G6b's owner off colour alone).
   `mode` decides the weights: "rigid" binds every piece 100% to its own bone
   (the old cut-out, the RIGID comparison mode); "joint" gives the pieces the
   same piecewise ramp across each joint band (upper -> half-angle helper ->
@@ -59,6 +66,7 @@ ARM_LO_A, ARM_LO_B = (30, 150, 80), (235, 240, 200)
 LEG_UP_A, LEG_UP_B = (90, 60, 140), (220, 210, 240)
 LEG_LO_A, LEG_LO_B = (150, 100, 40), (240, 220, 170)
 HEAD_A, HEAD_B = (120, 80, 50), (230, 190, 150)
+SKIN_A, SKIN_B = (226, 172, 136), (212, 158, 122)  # skin=True: every piece, no outline (CIELAB 5.2 apart)
 OUTLINE = (25, 25, 30)
 STRIPE = 18          # stripe period, px
 ROW_STEP = 16.0      # mesh row spacing along a limb, px
@@ -135,13 +143,13 @@ class Piece:
         return np.stack([xy[:, 0] - self.x0, self.y0 - xy[:, 1]], 1)
 
 
-def limb_piece(name, bone, ax, y_top, y_bot, hw, colors, round_top=True, round_bot=True, pad=2):
+def limb_piece(name, bone, ax, y_top, y_bot, hw, colors, round_top=True, round_bot=True, pad=2, outline=2.5):
     """A vertical limb piece centred on world x = ax from y_top down to y_bot."""
     w = int(math.ceil(2 * hw)) + 2 * pad
     h = int(math.ceil(y_top - y_bot)) + 2 * pad
     cx = w / 2.0
     cover = _supersampled(h, w, _stadium(cx, pad, h - pad, hw, round_top, round_bot))
-    img = _paint(cover, colors[0], colors[1], _stripe_index(h, w, horizontal=True))
+    img = _paint(cover, colors[0], colors[1], _stripe_index(h, w, horizontal=True), outline)
     return Piece(name, bone, img, ax - cx, y_top + pad)
 
 
@@ -262,7 +270,7 @@ def _region_attachment(builder, piece):
 
 
 def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, helper=True, head=None,
-          scale=1.0, arm_hw=40.0, leg_hw=45.0, round_ends=None):
+          scale=1.0, arm_hw=40.0, leg_hw=45.0, round_ends=None, shard=False, skin=False):
     """(ir, images, joints) of a synthetic character; see the module doc.
 
     mode       "rigid" (each piece 100% on its bone) or "joint" (ramps)
@@ -270,9 +278,13 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
     overlap    px each limb piece runs past a joint under its partner
     ghost      paint the arm pattern into the torso under the arm
     hole       a transparent disc in the torso under the upper arm
+    shard      paint the torso into the forearm wherever the forearm lies over
+               it (the opposite flat-image cut: the occluder carries a piece
+               of the underlay, like a hand cut with the trousers behind it)
     helper     half-angle helper bones at elbows and knees (joint mode)
     scale      multiplies every length (1.0: ~600 px tall, ~920 with legs)
     round_ends rounded piece ends at the joints (default: overlap > 0)
+    skin       one skin palette for every piece, no outlines (module doc)
     """
     if mode not in ("rigid", "joint"):
         raise ValueError("mode must be rigid or joint")
@@ -283,6 +295,10 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
     ov = overlap * s
     ahw, lhw = arm_hw * s, leg_hw * s
     B = _Builder(f"synth_art_{mode}")
+    pal = {k: ((SKIN_A, SKIN_B) if skin else v) for k, v in (
+        ("torso", (TORSO_A, TORSO_B)), ("arm_up", (ARM_UP_A, ARM_UP_B)), ("arm_lo", (ARM_LO_A, ARM_LO_B)),
+        ("leg_up", (LEG_UP_A, LEG_UP_B)), ("leg_lo", (LEG_LO_A, LEG_LO_B)), ("head", (HEAD_A, HEAD_B)))}
+    line = 0.0 if skin else 2.5
     images, joints, slots_back, slots_front, atts = {}, [], [], [], {}
 
     # torso
@@ -291,7 +307,7 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
     B.bone("root", None, 0, 0, 0)
     B.bone("hip", "root", 0, hip_y, 0)
     B.bone("torso", "hip", 0, hip_y, 90, th)
-    torso = _torso_piece(tw, th, hip_y)
+    torso = _torso_piece(tw, th, hip_y, pal["torso"], line)
     sides = ["l", "r"][:arms]
 
     # arms: axis just inside the torso edge so the upper arm covers torso paint
@@ -312,10 +328,10 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
         sh = _joint(f"shoulder_{side}", up, "torso", None, up, (ax, y_sh), ahw)
         el = _joint(f"elbow_{side}", lo, up, hp, lo, (ax, y_el), ahw)
         joints += [sh, el]
-        p_up = limb_piece(f"upper_arm_{side}", up, ax, y_sh + ahw, y_el - ov, ahw, (ARM_UP_A, ARM_UP_B),
-                          round_bot=round_ends)
-        p_lo = limb_piece(f"forearm_{side}", lo, ax, y_el + ov, y_wr, ahw * 0.9, (ARM_LO_A, ARM_LO_B),
-                          round_top=round_ends)
+        p_up = limb_piece(f"upper_arm_{side}", up, ax, y_sh + ahw, y_el - ov, ahw, pal["arm_up"],
+                          round_bot=round_ends, outline=line)
+        p_lo = limb_piece(f"forearm_{side}", lo, ax, y_el + ov, y_wr, ahw * 0.9, pal["arm_lo"],
+                          round_top=round_ends, outline=line)
         bands = [sh["band"], el["band"]]
         for p in (p_lo, p_up):  # forearm under the sleeve
             rows = limb_rows(p.y0, p.y0 - p.h, [b["center"][1] for b in bands], ahw)
@@ -326,6 +342,8 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
         if ghost:
             _bake(torso, p_up)
             _bake(torso, p_lo)
+        if shard:
+            _bake(p_lo, torso)
         if hole:
             _cut_hole(torso, ax + sg * -4 * s, y_sh - 110 * s, 14 * s)
 
@@ -347,10 +365,10 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
         hj = _joint(f"hip_{side}", up, "hip", None, up, (ax, y_hp), lhw)
         kn = _joint(f"knee_{side}", lo, up, hp, lo, (ax, y_kn), lhw)
         joints += [hj, kn]
-        p_up = limb_piece(f"thigh_{side}", up, ax, y_hp + 60 * s, y_kn - ov, lhw, (LEG_UP_A, LEG_UP_B),
-                          round_bot=round_ends)
-        p_lo = limb_piece(f"calf_{side}", lo, ax, y_kn + ov, y_an - 20 * s, lhw * 0.9, (LEG_LO_A, LEG_LO_B),
-                          round_top=round_ends)
+        p_up = limb_piece(f"thigh_{side}", up, ax, y_hp + 60 * s, y_kn - ov, lhw, pal["leg_up"],
+                          round_bot=round_ends, outline=line)
+        p_lo = limb_piece(f"calf_{side}", lo, ax, y_kn + ov, y_an - 20 * s, lhw * 0.9, pal["leg_lo"],
+                          round_top=round_ends, outline=line)
         bands = [hj["band"], kn["band"]]
         for p in (p_lo, p_up):
             rows = limb_rows(p.y0, p.y0 - p.h, [b["center"][1] for b in bands], lhw)
@@ -365,7 +383,7 @@ def build(mode="joint", arms=1, legs=0, overlap=24.0, ghost=False, hole=False, h
     order = slots_back + [(torso.name, "torso")]
     if head:
         B.bone("head", "torso", 0, hip_y + th, 90, 150 * s)
-        hd = _head_piece(80 * s, hip_y + th - 10 * s)
+        hd = _head_piece(80 * s, hip_y + th - 10 * s, pal["head"], line)
         images[hd.name] = hd.image
         atts[hd.name] = _region_attachment(B, hd)
         order.append((hd.name, "head"))
@@ -411,7 +429,7 @@ def _limb_weight_fn(bands, own, root_upper=None):
     return fn
 
 
-def _torso_piece(tw, th, hip_y, pad=2):
+def _torso_piece(tw, th, hip_y, colors=(TORSO_A, TORSO_B), outline=2.5, pad=2):
     w, h = int(math.ceil(2 * tw)) + 2 * pad, int(math.ceil(th)) + 2 * pad
     r = min(tw, th) * 0.25
 
@@ -421,15 +439,15 @@ def _torso_piece(tw, th, hip_y, pad=2):
         corner = (x > tw - r) & (y < r)
         return ok & (~corner | ((x - (tw - r)) ** 2 + (y - r) ** 2 <= r * r))
     cover = _supersampled(h, w, inside)
-    img = _paint(cover, TORSO_A, TORSO_B, _stripe_index(h, w, horizontal=False))
+    img = _paint(cover, colors[0], colors[1], _stripe_index(h, w, horizontal=False), outline)
     return Piece("torso", "torso", img, -w / 2.0, hip_y + th + pad)
 
 
-def _head_piece(r, y_base, pad=2):
+def _head_piece(r, y_base, colors=(HEAD_A, HEAD_B), outline=2.5, pad=2):
     d = int(math.ceil(2 * r)) + 2 * pad
     c = d / 2.0
     cover = _supersampled(d, d, lambda X, Y: (X - c) ** 2 + (Y - c) ** 2 <= r * r)
-    img = _paint(cover, HEAD_A, HEAD_B, _stripe_index(d, d, horizontal=True, period=STRIPE * 2))
+    img = _paint(cover, colors[0], colors[1], _stripe_index(d, d, horizontal=True, period=STRIPE * 2), outline)
     return Piece("head", "head", img, -c, y_base + d)
 
 
@@ -492,11 +510,13 @@ def main(argv=None):
     ap.add_argument("--overlap", type=float, default=24.0)
     ap.add_argument("--ghost", action="store_true")
     ap.add_argument("--hole", action="store_true")
+    ap.add_argument("--shard", action="store_true")
+    ap.add_argument("--skin", action="store_true")
     ap.add_argument("--no-helper", action="store_true")
     ap.add_argument("--scale", type=float, default=1.0)
     a = ap.parse_args(argv)
     for p in write(a.outdir, mode=a.mode, arms=a.arms, legs=a.legs, overlap=a.overlap, ghost=a.ghost,
-                   hole=a.hole, helper=not a.no_helper, scale=a.scale):
+                   hole=a.hole, helper=not a.no_helper, scale=a.scale, shard=a.shard, skin=a.skin):
         print(p)
 
 

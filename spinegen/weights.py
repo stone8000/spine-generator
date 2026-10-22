@@ -89,7 +89,10 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
     joints    [{"center", "upper", "helper" (name or None), "lower", "halfwidth",
                optional "axis" (default: mean direction of the upper and lower
                bones), "extent" (band half-length in halfwidths, default
-               mesh.BAND_EXTENT; give the mesh band the same)}]; every bone a
+               mesh.BAND_EXTENT; give the mesh band the same), "lateral" (band
+              reach sideways in halfwidths, default LATERAL; see band_mask),
+              "exclusive" (True: band vertices carry only the joint's bones; by
+              default other bones keep the heat weight they had there)}]; every bone a
               joint names must be in `bones`
     mode      "auto": heat + joint ramps; "heat": heat only; "rigid": every vertex
               100% on bones[0] (the old cut-out, for comparison)
@@ -129,7 +132,11 @@ def weight_matrix(verts, tris, outline, bones, joints=(), visibility=True):
         for j in joints:
             m, ramp = joint_ramp(V, j, bones)
             cols = [index[j["upper"]], index[j["lower"]]] + ([index[j["helper"]]] if j.get("helper") else [])
-            mass = target[m][:, cols].sum(1, keepdims=True)
+            if j.get("exclusive"):
+                target[m] = 0.0  # the band belongs to its joint's bones alone
+                mass = np.ones((int(m.sum()), 1))
+            else:
+                mass = target[m][:, cols].sum(1, keepdims=True)
             target[np.ix_(m, cols)] = 0.0
             target[np.ix_(m, cols[:2])] += mass * ramp[:, :2]
             if j.get("helper"):
@@ -198,11 +205,16 @@ def band_coords(verts, joint, bones):
 def band_mask(verts, joint, bones, strict=False):
     """Vertices in the joint band: |s| <= half-length + END_TOL (with
     `strict`: |s| < half-length - END_TOL, which leaves out the rows on the
-    band's ends) and within LATERAL halfwidths of the joint's bones."""
+    band's ends) and within the joint's "lateral" (default LATERAL)
+    halfwidths of its bones. The lateral limit keeps a band from claiming
+    unrelated art beside the limb; a caller whose mesh holds only the limb
+    (the rig builder's per-layer meshes) passes a larger one, because a limb
+    wider than LATERAL x halfwidth (a flared hem) would otherwise leave its
+    outer vertices on heat weights next to ramped ones, and fold there."""
     s, lat = band_coords(verts, joint, bones)
     _, _, hw, ext = joint_frame(joint, bones)
     along = np.abs(s) < ext - END_TOL if strict else np.abs(s) <= ext + END_TOL
-    return along & (lat <= LATERAL * hw)
+    return along & (lat <= float(joint.get("lateral", LATERAL)) * hw)
 
 
 def joint_ramp(verts, joint, bones):
