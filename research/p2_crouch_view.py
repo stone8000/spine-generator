@@ -1,9 +1,10 @@
 """A crouch to look at: the setup legs, then two rigs' crouch, side by side.
 
-    python research/p2_crouch_view.py <rig dir before> <rig dir after> -o crouch.png [--depth 0.05]
+    python research/p2_crouch_view.py <rig dir before> <rig dir after> -o crouch.png [--depth 0.05] [--dx 0]
 
 Each rig dir is a spinegen.rigbuild output (rig.json, motion.json, <name>.atlas).
-The hips (the leg IK thighs' parent) drop by `depth` x H with the leg IK on;
+The hips (the leg IK thighs' parent) drop by `depth` x H with the leg IK on,
+and move `dx` px sideways (P2 review R2: a crouch with the weight shifted);
 the legs' joints are marked (red = the "l" leg, blue = "r"), and the image is
 cropped from just above the hips down.
 
@@ -27,7 +28,7 @@ from spinegen import raster  # noqa: E402
 MARK = {"l": (255, 0, 0), "r": (0, 0, 255)}
 
 
-def frames(d, depth):
+def frames(d, depth, dx=0.0):
     """[setup, crouch] PIL images of the rig in dir `d`, cropped to the legs."""
     ir = irmod.load(os.path.join(d, "rig.json"), os.path.join(d, "motion.json"))
     atlas = glob.glob(os.path.join(d, "*.atlas"))[0]
@@ -35,7 +36,7 @@ def frames(d, depth):
     b = irmod.by_name(ir["bones"])
     hips = b[ir["ik"][0]["bones"][0]]["parent"]
     out = []
-    for pose in (None, {hips: {"y": b[hips]["y"] - depth * ir["H"]}}):
+    for pose in (None, {hips: {"x": b[hips]["x"] + dx, "y": b[hips]["y"] - depth * ir["H"]}}):
         fr = r.frame(pose)
         w = r.ev.world_dict(r.ev.world(pose))
         rgba = fr.rgba()
@@ -59,9 +60,11 @@ def main(argv=None):
     ap.add_argument("after")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--depth", type=float, default=0.05, help="hips drop, fraction of H")
+    ap.add_argument("--dx", type=float, default=0.0, help="hips moved sideways, px (world x)")
     a = ap.parse_args(argv)
-    before, after = frames(a.before, a.depth), frames(a.after, a.depth)
-    tiles = [(before[0], "setup"), (before[1], f"crouch {a.depth:g}H, before"), (after[1], f"crouch {a.depth:g}H, after")]
+    before, after = frames(a.before, a.depth, a.dx), frames(a.after, a.depth, a.dx)
+    what = f"crouch {a.depth:g}H" + (f" dx {a.dx:+g}" if a.dx else "")
+    tiles = [(before[0], "setup"), (before[1], f"{what}, before"), (after[1], f"{what}, after")]
     W, H = sum(t.width for t, _ in tiles), max(t.height for t, _ in tiles)
     sheet = Image.new("RGB", (W, H + 20), (255, 255, 255))
     x = 0
