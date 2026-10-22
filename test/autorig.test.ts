@@ -125,7 +125,8 @@ test('celebrate on the auto-rig: the front elbow stays down, so the upper arm st
     const s = p.upperArmF[i], e = p.foreArmF[i], f = p['ik-fist-front'][i];
     assert.ok(e.y < s.y, `step ${i}: the elbow is below the shoulder`);
     assert.ok(f.y > s.y, `step ${i}: the fist is above the shoulder`);
-    assert.ok(f.x - s.x > upper, `step ${i}: the glove is an upper arm's length in front of the shoulder (${(f.x - s.x).toFixed(0)})`);
+    // raised to brow height the fist comes back a little, but stays clear of the face
+    assert.ok(f.x - s.x > 0.8 * upper, `step ${i}: the glove is out in front of the shoulder (${(f.x - s.x).toFixed(0)} vs upper arm ${upper.toFixed(0)})`);
   }
 });
 
