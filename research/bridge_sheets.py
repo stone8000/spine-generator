@@ -16,8 +16,9 @@ rigs with spinegen.raster, using the WORLD VERTICES the 4.3 runtime dumped
 Each drawn frame is also judged by spinegen.art_gates (G1 folds, G4 seam
 gap per joint, G5 holes, G6 ghosts) against the rig's setup frame, and the
 ankle gap (shin tip to foot origin: a planted foot hangs from its IK
-target, so a leg that cannot reach leaves the boot behind) is measured on
-every frame, and the elbow / knee bend away from the drawn setup (frame 0
+target, so a leg that cannot reach leaves the boot behind, and a softened
+knee that bends less than the hip drops pushes the shin past it) is
+measured on every frame, signed as well, and the elbow / knee bend away from the drawn setup (frame 0
 and max: a preset that does not start in the drawn pose bends at frame 0).
 --all-frames runs the art gates on every 30 fps frame instead
 of the peaks only.
@@ -70,7 +71,8 @@ class Rig:
         self.name = name
         ir = irmod.load(os.path.join(bridge_dir, f"{name}.bridge_rig.json"))
         self.ir = spine43.prepare(ir)  # hull-first meshes: the order the runtime dumps vertices in
-        self.files = self.rep["files"]
+        # the files beside bridge.json (bridge.json stores absolute paths; a moved output dir still reads its own)
+        self.files = {k: os.path.join(bridge_dir, os.path.basename(v)) for k, v in self.rep["files"].items()}
         self.images = raster.load_atlas_images(self.files["atlas"])
         joints_path = os.path.join(os.path.dirname(self.rep["input"]["rig"]), "joints.json")
         self.joints = budget.load_joints(joints_path) if os.path.exists(joints_path) else []
@@ -118,6 +120,26 @@ class Rig:
                 q = f["bones"][foot]
                 worst = max(worst, math.hypot(tip[0] - q["x"], tip[1] - q["y"]))
         return worst
+
+    def ankle_along(self, f):
+        """Signed shin-tip to foot-origin distance along each shin, worst two ends of a frame:
+        (most short of the foot, most past it). Short (< 0): the leg cannot reach (hip up);
+        past (> 0): a softened knee did not bend as far as the hip dropped, so the shin
+        pushes on into the boot."""
+        lo, hi = 0.0, 0.0
+        for ik in self.ir["ik"]:
+            feet = [b["name"] for b in self.ir["bones"] if b["parent"] == ik["target"]]
+            if not feet or not ik["name"].startswith("leg"):
+                continue
+            shin = ik["bones"][-1]
+            b = f["bones"][shin]
+            L = next(x["length"] for x in self.ir["bones"] if x["name"] == shin)
+            n = math.hypot(b["a"], b["c"])
+            for foot in feet:
+                q = f["bones"][foot]
+                v = ((b["x"] + b["a"] * L - q["x"]) * b["a"] + (b["y"] + b["c"] * L - q["y"]) * b["c"]) / n
+                lo, hi = min(lo, v), max(hi, v)
+        return lo, hi
 
 
 def _bend(f, chain):
@@ -208,7 +230,7 @@ def limb_box(rig, fr, limbs="arms", pad=30):
 
 def sheet(rows, labels, captions, cell, title):
     """rows: [[PIL image per column] per row]; one label per row, one caption per column."""
-    left, top = 70, 46
+    left, top = max(70, 7 * max(len(s) for s in labels) + 12), 46  # room for the row labels
     W = left + len(captions) * cell[0]
     H = top + len(rows) * (cell[1] + 18)
     out = Image.new("RGB", (W, H), (255, 255, 255))
@@ -256,6 +278,9 @@ def main(argv=None):
             gaps = [rig.ankle_gap(f) for f in frames]
             r_rec = {"ankle_gap_max_px": round(max(gaps), 2), "ankle_gap_t": frames[int(np.argmax(gaps))]["t"],
                      "bends_deg": bends(rig, anim), "peaks": []}
+            along = [rig.ankle_along(f) for f in frames]
+            r_rec["ankle_short_px"] = round(-min(a for a, _ in along), 2)
+            r_rec["ankle_past_px"] = round(max(b for _, b in along), 2)
             judged = range(len(frames)) if args.all_frames else [i for i, _ in picks]
             fail_frames, worst = 0, {}
             drawn = {}
@@ -309,6 +334,8 @@ def main(argv=None):
         print(f"{anim}: " + "; ".join(f"{n} ankle gap {r['ankle_gap_max_px']} px, {r['failing_frames']}/"
                                        f"{r['judged_frames']} frames fail art gates {r['worst']}"
                                        for n, r in rec["rigs"].items()))
+        print("  ankle short of / past the foot (px): " + "; ".join(
+            f"{n} {r['ankle_short_px']} / {r['ankle_past_px']}" for n, r in rec["rigs"].items()))
         print("  bend from setup, frame 0 / max (deg): " + ", ".join(
             f"{k} {v['t0']}/{v['max']}" for k, v in rec["rigs"]["joint"]["bends_deg"].items()))
     with open(os.path.join(args.out, "sheets.json"), "w") as f:
