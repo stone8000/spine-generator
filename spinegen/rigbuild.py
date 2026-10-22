@@ -82,10 +82,13 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            rigid where the cut-out already holds what the motion needs.
   weights  "joint": weights.compute (bone heat + the joint ramps); then the
            source's own accessory weights (a sleeve hem on a cuff bone) are
-           carried over by interpolating the source mesh, faded out over the
-           inner half of every band so an accessory cannot hold a joint
-           open. "rigid": every vertex 100% on the layer's bone, the cut-out
-           for comparison.
+           carried over by interpolating the source mesh, each as a share
+           of its parent bone's weight here (weights.compose_accessory:
+           exact at rest, so the bands bend the same and nothing has to be
+           faded near a joint). The build fails by name when a physics
+           bone that moved source vertices moves none here
+           (accessory_check). "rigid": every vertex 100% on the layer's
+           bone, the cut-out for comparison.
   physics  the source's constraints, renamed, every field explicit (the IR
            already is), ordered after the transforms.
   motion   the source's animations where bones map: rotate deltas as they
@@ -140,7 +143,6 @@ LIFT_FULL = 8.0       # px of lift over which a lifted target starts following t
 BAKE_TOL = 0.25       # px: a baked key is dropped when its neighbours interpolate it this closely
 AXIS_SNAP = 10.0      # deg: scale keys swap x/y when a bone now points 90 +- this from its source
 AXIS_MEAN_MAX = 45.0  # deg: a "both" band runs along the mean of its bones only when they are this close
-ACC_FADE = (0.5, 2.0) # accessory weight: 0 inside 0.5 band half-lengths of a joint, full beyond 2.0
 KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
 KNEE_TEST = 0.1       # the bend test lowers the hips by this fraction of the leg's length
 KNEE_TOL = 0.5        # px: a setup knee this close to the hip-ankle line counts as straight
@@ -148,6 +150,7 @@ SETUP_TOL = 1e-3      # px: the chosen bend must reproduce the setup leg this cl
 KNEE_SYM_DEG = 10.0   # crouch(): two legs' end bends agree this closely (mirror symmetry)
 SHIN_ROWS = 10.0      # px: crouch() reports the slide of the bottom this many px of the shin's art
 M1_PX = 1.0           # px: SOTA §5 M1, the most a planted foot vertex may move (the CLI's crouch check)
+ACC_TAPER = 1.0       # halfwidths over which an accessory's share tapers to 0 toward a vertex with no room for it
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
 
 
@@ -276,6 +279,7 @@ class _Builder:
         self.order = []      # bone names, parents first
         self._art = {}
         self.straightened = {}  # knee joint -> px moved onto the hip-ankle line (_align_knees)
+        self.acc_report = {}    # accessory -> what it carried from the source (_carry_accessories)
 
     # ---- orchestration
 
@@ -304,7 +308,7 @@ class _Builder:
                   "mesh_profile": self.mesh_profile, "joint_modes": {j: b["kind"] for j, b in self.bands.items()},
                   "template": self.t["name"], "layers": stats, "ik": self.ik_report,
                   "bands": {j: _round_band(b) for j, b in self.bands.items()},
-                  "totals": _totals(stats), "notes": self.notes}
+                  "totals": _totals(stats), "accessories": self.accessory_check(), "notes": self.notes}
         return {"ir": self.ir, "images": images, "joints": self.budget_joints(), "report": report}
 
     # ---- skeleton (canvas)
@@ -629,14 +633,23 @@ class _Builder:
         # between them, half each, except that a band reaching less than its
         # half leaves the rest to the other (a short shoulder band lets a long
         # elbow band run up the sleeve; two default bands still meet halfway).
-        # A band marked "overlap" and the band above it on its chain (the
-        # planted ankle and the knee) do not share: they overlap and compose
-        # (weights.py CHAIN COMPOSITION)
+        # A band marked "overlap" (the knee, the planted ankle) does not share
+        # with the band above it on its chain: it runs into it and composes
+        # (weights.py CHAIN COMPOSITION). The band above keeps the length its
+        # template asks for (the knee's 1.5 halfwidths down the calf, which
+        # the planted ankle overlaps); with no reach in the template it still
+        # stops at its half of the gap: grown to the full default (P2 A2: the
+        # hip band 1.14 -> 2.0 halfwidths, 118 of the thigh's 134 px) it put a
+        # third bone on most of the thigh and left the pant hem no room under
+        # L8's three influences (P2 review; the knee band still reaches its
+        # 100 px up the thigh, and the crouch folds did not change)
         new = {j: list(b["reach"]) for j, b in bands.items()}
         for a, ba in bands.items():
             for b, bb in bands.items():
-                if _chained(ba, bb):
-                    continue
+                if ba.get("overlap") and ba["upper"] == bb["lower"]:
+                    continue  # a runs into the band above it
+                if bb.get("overlap") and bb["upper"] == ba["lower"] and self.t["joints"][a].get("reach"):
+                    continue  # a asked for its length (the knee's 1.5 down the calf); b overlaps it
                 if a != b and set(ba["layers"]) & set(bb["layers"]):
                     d = float(np.linalg.norm(ba["center"] - bb["center"]))
                     ia = 1 if (bb["center"] - ba["center"]) @ ba["axis"] > 0 else 0  # a's half toward b
@@ -884,10 +897,22 @@ class _Builder:
 
     def _carry_accessories(self, L, m, bands, w):
         """Source weights of accessory bones (a cuff on a sleeve hem),
-        interpolated onto the new mesh and faded out across the inner half
-        of every band of this layer (module doc)."""
+        carried onto the new mesh as a share of the accessory's PARENT
+        bone (weights.compose_accessory): the source's accessory weight
+        over accessory + parent, interpolated from the source mesh. A
+        vertex 100% cuff in the source and 40% upper arm here gets 40%
+        cuff. Records what each accessory carried in self.acc_report.
+
+        WHY not a fade near the joints (the old rule, ACC_FADE, scaled by
+        each band's reach): once the elbow band ran 3.5 halfwidths up the
+        sleeve and the knee band 2 up the thigh (P2 A1/A2), the fade
+        covered every vertex the cuffs and pant hems held and their physics
+        moved nothing (review: cuffR 12 -> 0, pantL/pantR 8 -> 0 vertices;
+        in spine-core the left sleeve's physics-driven motion 8.3 -> 1.1 px
+        at 30 fps, the thighs' 7.6 / 4.4 -> 0). Composing with the parent
+        is exact at rest, so it needs no fade (weights.compose_accessory)."""
         accs = [b for b in L.get("src", {}).get("influences", [])
-                if b in self.bones and self.bones[b]["kind"] == "accessory"]
+                if b in self.bones and self.bones[b]["kind"] == "accessory" and b != L["role"]]
         if not accs or self.src is None:
             return w
         att = irmod.resolve_attachment(self.src, None, L["slot"], L["attachment"])
@@ -896,35 +921,81 @@ class _Builder:
         from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
         sv = np.asarray(att["vertices"], float).reshape(-1, 2)
         nv = self.cv.to_world(m["verts"])
-        fade = np.ones(len(nv))
-        bones = {n: {"name": n, "head": tuple(self.bones[n]["head"]), "tail": tuple(self.bones[n]["tail"])}
-                 for b in bands for n in (b["upper"], b["lower"], b["helper"]) if n}
-        for b in bands:
-            j = _weight_joint(b)
-            s, lat = weights.band_coords(m["verts"], j, list(bones.values()))
-            ext = np.where(s < 0, b["reach"][0], b["reach"][1]) * b["halfwidth"]  # this side's half
-            f = np.clip((np.abs(s) - ACC_FADE[0] * ext) / ((ACC_FADE[1] - ACC_FADE[0]) * ext), 0.0, 1.0)
-            f[lat > b["lateral"] * b["halfwidth"]] = 1.0
-            fade = np.minimum(fade, f)
-        add = np.zeros((len(nv), len(accs)))
-        for k, a in enumerate(accs):
-            vals = np.array([sum(inf[1] for inf in row if inf[0] == a) for row in att["weights"]])
+        rename = self._rename()
+
+        def carried(vals):
             lin = LinearNDInterpolator(sv, vals)(nv)
-            near = NearestNDInterpolator(sv, vals)(nv)
-            add[:, k] = np.where(np.isnan(lin), near, lin) * fade
-        out = []
-        names = list(dict.fromkeys([n for row in w for n, _ in row] + accs))
-        col = {n: i for i, n in enumerate(names)}
-        M = np.zeros((len(w), len(names)))
-        for v, row in enumerate(w):
-            for n, x in row:
-                M[v, col[n]] += x
-        tot = np.clip(add.sum(1, keepdims=True), 0.0, 1.0)
-        M *= 1.0 - tot
-        for k, a in enumerate(accs):
-            M[:, col[a]] += add[:, k]
-        out = weights.prune_weights(M, names)
-        return out
+            return np.where(np.isnan(lin), NearestNDInterpolator(sv, vals)(nv), lin)
+
+        names = list(dict.fromkeys([n for row in w for n, _ in row] + accs
+                                   + [self.bones[a]["parent"] for a in accs]))
+        M = weights.as_matrix(w, names)
+        for parent in dict.fromkeys(self.bones[a]["parent"] for a in accs):
+            mine = [a for a in accs if self.bones[a]["parent"] == parent]
+            src = {a: np.array([sum(inf[1] for inf in row if inf[0] == a) for row in att["weights"]])
+                   for a in mine}
+            par = np.array([sum(inf[1] for inf in row if rename.get(inf[0]) == parent) for row in att["weights"]])
+            got = {a: np.clip(carried(v), 0.0, 1.0) for a, v in src.items()}
+            tot = sum(got.values()) + np.clip(carried(par), 0.0, 1.0)
+            for k, a in enumerate(mine):
+                # shares of the parent's ORIGINAL weight: each later accessory
+                # takes its part of what the earlier ones left
+                left = 1.0 - sum(got[b] for b in mine[:k]) / np.maximum(tot, 1e-9)
+                share = np.where(tot > 1e-6, got[a] / np.maximum(tot, 1e-9), 0.0)
+                share = np.where(left > 1e-9, share / np.maximum(left, 1e-9), 0.0)
+                # a vertex with three bones already keeps its share on the
+                # parent (L8); the share tapers to 0 toward those vertices
+                # over ACC_TAPER halfwidths, so the physics motion of two
+                # neighbours never differs by a whole share (on the monkey's
+                # thigh a 0.47 jump between two outline vertices 11 px apart
+                # flipped the sliver triangle across the thigh in cheer)
+                _, stuck = weights.accessory_split(M, names, a, parent, share)
+                if stuck.any() and bands:
+                    hw = float(np.mean([b["halfwidth"] for b in bands]))
+                    d = np.linalg.norm(m["verts"][:, None, :] - m["verts"][stuck][None, :, :], axis=-1).min(1)
+                    share = share * np.clip(d / (ACC_TAPER * hw), 0.0, 1.0)
+                n = weights.compose_accessory(M, names, a, parent, share)
+                rep = self.acc_report.setdefault(a, {"parent": parent, "layers": {}})
+                rep["layers"][L["name"]] = {
+                    "source_vertices": int((src[a] > 0).sum()), "source_mass": round(float(src[a].sum()), 3),
+                    "vertices": n, "mass": round(float(M[:, names.index(a)].sum()), 3)}
+        return weights.prune_weights(M, names)
+
+    def accessory_check(self):
+        """What each physics-driven accessory bone moves, source vs this rig:
+        {"ok", "lost", "bones": {bone: {"physics", "source_vertices",
+        "source_mass", "vertices", "mass", "layers"}}}. "lost" names the
+        physics bones that moved source vertices and move none here; the
+        CLI fails on it (in "joint" mode; "rigid" carries no accessory
+        weights by definition).
+
+        WHY (P2 review): G1/M1/C1 cannot see it and P1 measures bone tips,
+        so a carry-over that strips a cuff's vertices leaves its physics
+        constraint running on a bone that moves nothing, silently."""
+        phys = {c["bone"] for c in self.ir.get("physics", [])}
+        counts = {}
+        for ir, key in ((self.src, "source"), (self.ir, "new")):
+            for sk in (ir or {}).get("skins", []):
+                for atts in sk["attachments"].values():
+                    for att in atts.values():
+                        for row in att.get("weights") or []:
+                            for inf in row:
+                                if inf[1] > 0 and inf[0] in self.bones and self.bones[inf[0]]["kind"] == "accessory":
+                                    c = counts.setdefault(inf[0], {"source": [0, 0.0], "new": [0, 0.0]})[key]
+                                    c[0] += 1
+                                    c[1] += float(inf[1])
+        bones = {}
+        for b, c in sorted(counts.items()):
+            bones[b] = {"physics": b in phys, "source_vertices": c["source"][0],
+                        "source_mass": round(c["source"][1], 3), "vertices": c["new"][0],
+                        "mass": round(c["new"][1], 3), "layers": self.acc_report.get(b, {}).get("layers", {})}
+        lost = [b for b, r in bones.items() if r["physics"] and r["source_vertices"] and not r["vertices"]]
+        if self.mode != "joint":
+            lost = []
+        for b in lost:
+            self.notes.append(f"accessory {b}: its physics moved {bones[b]['source_vertices']} source vertices "
+                              f"and moves none here")
+        return {"ok": not lost, "lost": lost, "bones": bones}
 
     # ---- slots and skin
 
@@ -1502,6 +1573,14 @@ def main(argv=None):
           f"{tot['vertices']} vertices ({tot['vertex_ratio']} of the 22 px grid), B2 {tot['b2']}")
     for n in res["report"]["notes"]:
         print("  note:", n)
+    acc = res["report"]["accessories"]
+    for b, r in acc["bones"].items():
+        if r["physics"]:
+            print(f"  accessory {b} (physics): {r['source_vertices']} -> {r['vertices']} vertices, weight "
+                  f"{r['source_mass']:g} -> {r['mass']:g}")
+    if not acc["ok"]:
+        raise SystemExit(f"accessory check failed: physics bones {', '.join(acc['lost'])} move no vertex "
+                         f"(rig written to {a.out} for inspection)")
     if a.crouch > 0 and ir["ik"]:
         from . import oracle
         ok, _ = oracle.available()

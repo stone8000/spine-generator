@@ -348,3 +348,34 @@ def test_chain_composition_of_overlapping_bands():
     # without "overlap" the ankle band takes its vertices whole
     W3 = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, dict(ja, overlap=False)])
     assert np.allclose(W3[idx, col["knee_mid"]], 0.0)
+
+
+def test_compose_accessory_takes_a_share_of_the_parent_only():
+    """P2 review: an accessory (a cuff hanging from the upper arm) takes its
+    share of the PARENT's weight, never of the helper's or another bone's,
+    so merging it back gives the original weights exactly (it moves like
+    its parent at rest); parts under the prune threshold go whole to one
+    bone, and a vertex that already has three bones keeps its share on the
+    parent (L8)."""
+    names = ["upper", "helper", "hips", "cuff"]
+    M = np.array([[0.6, 0.4, 0.0, 0.0],     # share 1: all of the upper arm's 0.6
+                  [0.6, 0.4, 0.0, 0.0],     # share 0.5: 0.3 each
+                  [0.03, 0.97, 0.0, 0.0],   # 0.015 is under the prune: stays on the parent
+                  [0.3, 0.7, 0.0, 0.0],     # 0.285 to the cuff leaves 0.015: all 0.3 go
+                  [0.5, 0.3, 0.2, 0.0],     # three bones already: no room
+                  [0.0, 1.0, 0.0, 0.0]])    # no parent weight: nothing to take
+    share = np.array([1.0, 0.5, 0.5, 0.95, 0.5, 1.0])
+    x, stuck = weights.accessory_split(M, names, "cuff", "upper", share)
+    assert stuck.tolist() == [False, False, False, False, True, False]
+    W = M.copy()
+    n = weights.compose_accessory(W, names, "cuff", "upper", share)
+    assert n == 3
+    assert np.allclose(W[:, 3], [0.6, 0.3, 0.0, 0.3, 0.0, 0.0])
+    assert np.allclose(W[:, :3].sum(1) + W[:, 3], 1.0)
+    assert np.allclose(W[:, 1:3], M[:, 1:3])               # helper and hips untouched
+    merged = W.copy()
+    merged[:, 0] += merged[:, 3]
+    merged[:, 3] = 0.0
+    assert np.allclose(merged, M)
+    assert ((W > 0) & (W < 0.02)).sum() == 0
+    assert ((W >= 0.02).sum(1) <= 3).all()

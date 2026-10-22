@@ -207,6 +207,59 @@ def prune_weights(W, names, max_influences=3, prune=0.02):
     return out
 
 
+def accessory_split(M, names, acc, parent, share, max_influences=3, prune=0.02):
+    """(x, no_room): the weight compose_accessory would move from `parent`
+    to `acc` per vertex, and the vertices that would need one bone more
+    than `max_influences` to take their share (they get x = 0).
+
+    The rules that keep it exact at rest: the accessory's part and the
+    parent's leftover are each either 0 or >= `prune` (a smaller part goes
+    to the other bone, which moves the same way at rest)."""
+    col = {n: i for i, n in enumerate(names)}
+    a, p = col[acc], col[parent]
+    share = np.clip(np.asarray(share, float), 0.0, 1.0)
+    wp = M[:, p].copy()
+    x = share * wp
+    x[x < prune] = 0.0                       # too little for the accessory: all stays on the parent
+    whole = (x > 0) & (wp - x < prune)       # too little left on the parent: all to the accessory
+    x[whole] = wp[whole]
+    used = (M >= prune).sum(1)
+    no_room = (x > 0) & (x < wp) & (M[:, a] < prune) & (used + 1 > max_influences)
+    x[no_room] = 0.0
+    return x, no_room
+
+
+def compose_accessory(M, names, acc, parent, share, max_influences=3, prune=0.02):
+    """Give accessory bone `acc` the fraction `share` (per vertex, 0..1) of
+    what its PARENT bone holds in M (N x B, columns `names`, rows summing
+    to 1), in place; returns the number of vertices that got any.
+
+    WHY (P2 review, ACCESSORIES): an accessory (a cuff, a pant hem: a
+    physics bone hanging from a limb bone) moves exactly like its parent
+    until physics or a key moves it, so weight moved from the parent to the
+    accessory changes nothing at rest or in any pose without physics: the
+    joint bands' fold and area guarantees hold whatever `share` is, and no
+    fade near a joint is needed for them. Taking the accessory's weight
+    from the whole vertex instead (helper and lower bone too) would pin
+    part of a band vertex to the upper bone and change how the joint bends,
+    which is why the old carry-over faded accessories out near every band;
+    scaled by the band's reach, that fade wiped the monkey's cuffs and pant
+    hems once the elbow and knee bands grew (A1/A2). Near a joint the
+    parent holds less, so the physics wiggle fades with the parent's share,
+    which is what the vertex follows.
+
+    Exact at rest by construction (accessory_split). A vertex never
+    exceeds `max_influences` (SOTA L8: 3): one with no room for another
+    bone keeps its share on the parent; a caller tapers the share toward
+    such vertices so the physics motion does not jump between neighbours
+    (rigbuild._carry_accessories)."""
+    x, _ = accessory_split(M, names, acc, parent, share, max_influences, prune)
+    col = {n: i for i, n in enumerate(names)}
+    M[:, col[acc]] += x
+    M[:, col[parent]] -= x
+    return int((x > 0).sum())
+
+
 def as_matrix(weights, names):
     """[[(name, w), ...]] -> (N, B) array in `names` order."""
     col = {n: i for i, n in enumerate(names)}
