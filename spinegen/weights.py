@@ -49,6 +49,29 @@ CHAIN COMPOSITION (P2 A2)
   px off the knee's axis on the inner side and 73 px off the ankle's on the
   outer hem: no split of 106 px between the two ramps keeps both positive
   (continuum), while two overlapping ramps of 70-80 and 85-100 px do.
+  Two ways to compose (the band's "compose", COMPOSE):
+  * "upper" (default): the band's ramp splits what its upper bone holds:
+    foot = t x shin share, and the knee's helper keeps its weight. Where
+    the knee's ramp is also taking the shin's weight away, the foot's
+    weight falls off at the sum of both slopes: on the monkey's right calf
+    (P2 A2's 92 px ankle band) up to 1.8x the ankle ramp's own slope just
+    above where the knee's ramp starts, where its hem flares 80-93 px off
+    the ankle's axis.
+  * "row": the band's own bones take their ramp values of the WHOLE row
+    and the bones already there keep theirs scaled by the rest: foot = t,
+    helper = h (1 - t), shin = (1 - h)(1 - t), the product of the two
+    ramps. The foot's weight falls off at 1 / length all the way up the
+    calf; a fold appears where sin D x y x |dt/ds| reaches ~1 - 0.56 (1 -
+    cos D), D the ankle's turn, y the art's distance off its axis.
+  Measured (P2 review: crouch with the hips also shifted sideways, which
+  bends one ankle 50-67 deg; spine-core folds summed over a grid of depths
+  and shifts): monkey, 6 depths x 15 shifts, upper 137 / row 22 (ankle band
+  over the whole calf; upper over the whole calf 98, row at 2.4 halfwidths
+  77); the synthetic short flared calf (tests), 5 x 9: upper 82 / row 26.
+  A third way, the band's own bones taking their ramp values out of the
+  upper bone's share only, was 11 on the monkey and 126 on the synthetic
+  calf: with the shin starved near the knee, the planted foot's weight
+  holds the upper calf back while the knee drops.
 
 BONE HEAT IN 2D (Pinocchio; Blender meshlaplacian.cc heat_bone_weighting)
   For each bone j solve  (L + D H) w_j = D H p_j  where
@@ -87,6 +110,7 @@ LATERAL = 1.6        # a joint band reaches this many halfwidths sideways from t
 END_TOL = 0.5        # px: mesh.build puts a vertex row on each band end; a vertex this close to an
                      # end belongs to the band (pinned to the ramp's end value) but is not "inside"
                      # it for B2 (it carries one influence by design)
+COMPOSE = ("upper", "row")  # how an "overlap" band composes with the band above (CHAIN COMPOSITION)
 B2_MIN = 0.9         # SOTA §5 B2: >= 90% of joint-band vertices have >= 2 influences
 
 
@@ -169,9 +193,20 @@ def weight_matrix(verts, tris, outline, bones, joints=(), visibility=True):
             target[new, cols[0]] = mass[:, 0]
             share = target[m, cols[0]].copy()[:, None]     # what the upper bone holds: all of it outside overlaps
             target[m, cols[0]] = 0.0
-            target[np.ix_(m, cols[:2])] += share * ramp[:, :2]
-            if j.get("helper"):
-                target[np.ix_(m, cols[2:])] += share * ramp[:, 2:]
+            if j.get("overlap") and j.get("compose", "upper") == "row":
+                # "row": the band's own bones take their ramp values of the
+                # WHOLE row and the bones already there (the upper bone, the
+                # band above) keep theirs, scaled by what is left (module
+                # doc, CHAIN COMPOSITION)
+                own = ramp[:, 1:]
+                rest = 1.0 - own.sum(1)
+                target[m] *= rest[:, None]
+                target[m, cols[0]] += share[:, 0] * rest
+                target[np.ix_(m, cols[1:])] += own
+            else:
+                target[np.ix_(m, cols[:2])] += share * ramp[:, :2]
+                if j.get("helper"):
+                    target[np.ix_(m, cols[2:])] += share * ramp[:, 2:]
             fixed |= m
         W = _solve(A, B, fixed, target[fixed]) if fixed.any() else W
     return _normalise(W, V, bones)

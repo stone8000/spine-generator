@@ -821,6 +821,16 @@ def _triangulate(loops, interior, min_angle, max_area, extra_edges=(), constrain
         n = len(lp)
         edges += [(base + i, base + (i + 1) % n) for i in range(n)]
         base += n
+    # one vertex per position: a hole whose outline touches the outer
+    # outline at a pixel corner (seen on the mirrored monkey's art) gives
+    # both loops the same point, and the CDT refuses duplicate vertices;
+    # the shared vertex is a pinch that both loops' edges use
+    pts, first, back = np.unique(pts, axis=0, return_index=True, return_inverse=True)
+    keep = np.argsort(first)                       # in first-seen order: the outline stays first
+    rank = np.empty(len(keep), np.int64)
+    rank[keep] = np.arange(len(keep))
+    pts, back = pts[keep], rank[back.ravel()]
+    edges = list(dict.fromkeys((int(back[a]), int(back[b])) for a, b in edges if back[a] != back[b]))
     if len(extra_edges):
         where = {tuple(p): i for i, p in enumerate(pts.tolist())}
         for a, b in extra_edges:

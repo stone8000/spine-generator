@@ -577,6 +577,33 @@ def test_band_above_an_overlap_keeps_its_share(layers_dir):
     assert hip["reach"] == pytest.approx([want, want], abs=1e-3) and want < 2.0
 
 
+ANKLE_UPPER_24 = {"ankle_{s}": {"band": "both", "budget": "leg_{s}.ankle", "reach": {"upper": 2.4, "lower": 2.4},
+                                 "overlap": True}}
+
+
+def test_crouch_with_the_weight_shifted_does_not_fold_the_flared_calf(flared):
+    """P2 review (A2_robust_to_weight_shift): a crouch that also moves the
+    hips sideways bends one ankle much more than the other (the monkey's
+    right ankle: 44 deg straight down at 0.10 H, 60 deg with the hips 40 px
+    over). The template's ankle runs the whole calf and composes by row
+    (weights CHAIN COMPOSITION: foot = the ankle ramp's t outright), so the
+    foot's weight falls off evenly up the flared calf. A2's ankle (2.4
+    halfwidths, foot = t x the shin's share) folds there."""
+    folds = {}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**ANKLE_UPPER_24))):
+        ir = rigbuild.build(flared, mode="joint", template=t)["ir"]
+        b = irmod.by_name(ir["bones"])
+        for f in (0.08, 0.10):
+            for dx in (-40.0, -20.0, 0.0, 20.0, 40.0):
+                pose = {"hips": {"x": b["hips"]["x"] + dx, "y": b["hips"]["y"] - f * ir["H"]}}
+                folds[name, f, dx] = lbs.Evaluator(ir).folds(pose=pose)["folds"]
+    assert all(v == 0 for (n, _, _), v in folds.items() if n == "new"), folds
+    assert sum(v for (n, _, _), v in folds.items() if n == "old") >= 5, folds
+    with pytest.raises(ValueError, match="compose"):
+        rigbuild.build(flared, mode="joint", template=_template(
+            **{"ankle_{s}": dict(ANKLE_UPPER_24["ankle_{s}"], compose="take")}))
+
+
 def test_straighten_moves_the_joint_the_template_names(layers_dir, kinked):
     """ik "straighten": which joint goes onto the hip-ankle line when the
     setup leg is kinked against the knee rule (default the knee; the A2

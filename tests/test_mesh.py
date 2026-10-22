@@ -372,3 +372,19 @@ def test_row_points_make_each_lean_row_a_chain_of_edges():
     plain = dict(band, row_points=0)
     ref = mesh.build(alpha, (0, 0), bands=[plain], **LEAN)
     assert ref["stats"]["vertices"] == ref["hull"]
+
+
+def test_hole_touching_the_outline_is_one_vertex():
+    """A hole whose outline touches the outer outline at one pixel corner
+    gives both loops the same point; the CDT refuses duplicate vertices
+    (it stopped the mirrored monkey's build, P2 review R2). The point is
+    kept once, as a pinch both loops' edges use, and the outer outline
+    keeps its order."""
+    outer = np.array([[0, 0], [10, 0], [10, 5], [10, 10], [0, 10]], float)
+    hole = np.array([[10, 5], [6, 4], [6, 6]], float)
+    v, t, _ = mesh._triangulate([outer, hole], np.zeros((0, 2)), 0.0, None, (), True)
+    assert len(v) == 7 and len(np.unique(v, axis=0)) == 7
+    assert np.allclose(v[:5], outer)
+    a, b = v[t[:, 1]] - v[t[:, 0]], v[t[:, 2]] - v[t[:, 0]]
+    area = 0.5 * np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]).sum()
+    assert area == pytest.approx(100.0 - 4.0)   # the square minus the triangular hole

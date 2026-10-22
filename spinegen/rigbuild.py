@@ -269,7 +269,8 @@ class _Builder:
         self.jxy = {k: np.asarray(v["xy"], float) for k, v in jdoc.get("joints", {}).items()}
         self.jsrc = {k: v.get("src", "") for k, v in jdoc.get("joints", {}).items()}
         self.layers = sorted(doc["layers"], key=lambda L: L["z"])
-        self.name = name or (src["name"] if src else os.path.basename(os.path.normpath(doc.get("name", "rig"))))
+        # never "rig": write() puts the IR in rig.json next to <name>.json
+        self.name = name or (src["name"] if src else os.path.basename(os.path.normpath(doc.get("name", "skeleton"))))
         self.notes = []
         self.spec = {b["name"]: b for b in t["bones"]}
         self.joint_modes = {}  # joint -> "rigid" | "ramp" | "helper" (build() sets it)
@@ -616,13 +617,15 @@ class _Builder:
                 kind = "ramp"
             if kind != "helper":
                 helper = None
+            if spec.get("compose", "upper") not in weights.COMPOSE:
+                raise ValueError(f"joint {jname}: compose must be one of {weights.COMPOSE}, not {spec['compose']!r}")
             want = spec.get("reach") or {}
             reach = [float(want.get("upper", mesh.BAND_EXTENT)), float(want.get("lower", mesh.BAND_EXTENT))]
             bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "reach": reach,
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
                             "kind": kind, "budget": spec.get("budget"),
                             "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0)),
-                            "overlap": bool(spec.get("overlap", False))}
+                            "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper")}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
@@ -1381,7 +1384,8 @@ def _mesh_band(b):
 def _weight_joint(b):
     return {"center": tuple(b["center"]), "upper": b["upper"], "helper": b["helper"], "lower": b["lower"],
             "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "reach": tuple(b["reach"]),
-            "lateral": b.get("lateral", weights.LATERAL), "exclusive": True, "overlap": bool(b.get("overlap"))}
+            "lateral": b.get("lateral", weights.LATERAL), "exclusive": True, "overlap": bool(b.get("overlap")),
+            "compose": b.get("compose", "upper")}
 
 
 def _chained(a, b):

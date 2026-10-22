@@ -58,7 +58,7 @@ def expand(raw):
             e = _sub(dict(j, name=name), side)
             out["joints"][e["name"]] = {"band": e.get("band", "none"), "helper": e.get("helper"),
                                         "budget": e.get("budget"), "side": side}
-            for opt in ("reach", "rows", "row_points", "overlap"):  # optional band shape (spinegen.rigbuild.joint_bands)
+            for opt in ("reach", "rows", "row_points", "overlap", "compose"):  # optional band shape (spinegen.rigbuild.joint_bands)
                 if e.get(opt) is not None:
                     out["joints"][e["name"]][opt] = e[opt]
     for key in ("helpers", "ik"):
