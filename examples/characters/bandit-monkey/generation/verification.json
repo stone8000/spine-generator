@@ -1,0 +1,10 @@
+{
+  "silhouetteIoU": 0.9994440400221689,
+  "meanVisibleRGBDifference": 0.5446563621711615,
+  "visiblePixelsWithRGBSumDifferenceOver30": 671,
+  "unionPixels": 575581,
+  "all15FileChecks": true,
+  "animationValidation": "Not run: downstream task in brief",
+  "assemblyOrder": "交件/layers.json",
+  "soleY": 1456
+}
