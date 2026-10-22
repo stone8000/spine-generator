@@ -124,7 +124,7 @@ canvas.editing { cursor: crosshair; touch-action: none; }
     <span class="status" id="status">先開啟一個 Spine 4.3 匯出的骨架 JSON，或試試範例</span>
     <span class="spacer"></span>
     <label class="file-btn"><button type="button" tabindex="-1">開啟骨架 JSON</button><input type="file" id="file" accept=".json,application/json" aria-label="開啟骨架 JSON"></label>
-    <label class="file-btn"><button type="button" tabindex="-1" class="primary">從圖層建立角色</button><input type="file" id="layers" accept="image/png" multiple aria-label="選擇圖層 PNG（可多選）"></label>
+    <label class="file-btn"><button type="button" tabindex="-1" class="primary">從圖層建立角色</button><input type="file" id="layers" accept="image/png,.json,application/json" multiple aria-label="選擇圖層 PNG（可多選，可附 layers.json 疊圖順序）"></label>
     <button type="button" id="ex-layers">範例：圖層角色</button>
     <button type="button" id="ex-layers-bad">範例：有問題的圖層</button>
     <button type="button" id="ex-fighter">範例：骨架</button>

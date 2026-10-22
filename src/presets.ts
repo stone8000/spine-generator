@@ -485,6 +485,7 @@ export const PRESETS: PresetDef[] = [
     params: [
       { name: 'angle', default: 65, desc: '前臂舉起的角度：從水平往前算起（手是 IK 目標骨時）' },
       { name: 'elbow', default: -25, desc: '上臂的角度：從水平往前算起，負的是手肘朝下、貼近身體，上臂才不會橫過下巴（手是 IK 目標骨時）' },
+      { name: 'swing', default: 30, desc: '上臂最多離開畫的姿勢幾度：畫成手肘外張或下垂的角色，照 elbow 硬擺會把肩膀端轉出軀幹、看起來手和身體分離（手是 IK 目標骨時）' },
       { name: 'lift', default: 120, desc: '雙手抬高（手不是 IK 目標骨時才用）' },
       { name: 'bounce', default: 12, desc: '身體彈跳幅度' },
       HAIR_PARAM,
@@ -496,6 +497,7 @@ export const PRESETS: PresetDef[] = [
       out.screen.push({ bone: c.role('hip'), channel: 'y', motion: wave({ amplitude: c.param('bounce', 12) * s, period: 0.6, peakAt: 0.15, duration: D }) });
       const angle = c.param('angle', 65);
       const elbowAngle = c.param('elbow', -25);
+      const swing = c.param('swing', 30);
       c.roleList('fists').forEach((f, i) => {
         const peakAt = 0.2 + (i * 2) / 30; // the far fist trails by 2 frames; a peak between key frames makes the runtime's 10-line curve segments jolt
         const chain = c.ikChain(f);
@@ -515,13 +517,19 @@ export const PRESETS: PresetDef[] = [
           const p = at(elbowAngle - i * 15, angle - i * 15);
           return side(chain.mid, chain.target) === side({ x: p.ex, y: p.ey }, p) ? at : undefined;
         })();
+        // keep the upper arm within `swing` of how it was drawn: the shoulder end is only painted to cover the torso
+        // around the drawn angle, so a big turn (a rear arm drawn hanging out to the side) shows its cut edge
+        const drawn = chain && (Math.atan2(chain.mid.y - chain.root.y, (chain.mid.x - chain.root.x) * c.facing) * 180) / Math.PI;
+        const want = elbowAngle - i * 15;
+        const off = drawn === undefined ? 0 : ((want - drawn + 540) % 360) - 180;
+        const elbowPose = drawn === undefined ? want : drawn + Math.max(-swing, Math.min(swing, off));
         if (!chain || !posed) {
           out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 25 * s, period: 0.6, peakAt, offset: c.param('lift', 120) * s, duration: D }) });
           return;
         }
         // the pump: the forearm swings 10° and the upper arm 5° around the pose, together
         const fore = wave({ amplitude: 10, period: 0.6, peakAt, offset: angle - i * 15, duration: D });
-        const upper = wave({ amplitude: 5, period: 0.6, peakAt, offset: elbowAngle - i * 15, duration: D });
+        const upper = wave({ amplitude: 5, period: 0.6, peakAt, offset: elbowPose, duration: D });
         const fist = (t: number) => posed(upper.value(t), fore.value(t));
         out.screen.push({ bone: f, channel: 'x', motion: fn(D, (t) => fist(t).x - chain.target.x, [], true) });
         out.screen.push({ bone: f, channel: 'y', motion: fn(D, (t) => fist(t).y - chain.target.y, [], true) });

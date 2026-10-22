@@ -279,10 +279,45 @@ export interface RigResult {
  * Build the skeleton. `layerNames` are the PNG names the user supplied (without .png). Every layer is a full-canvas
  * image placed exactly where it was drawn; Spine's packer strips the transparent margins when building the atlas.
  */
-export function buildRig(joints: Joints, layerNames: string[], name = 'character', canvas: CanvasSize = CANVAS): RigResult {
+export interface RigOptions {
+  /**
+   * Draw order of this delivery, back → front (layer names without .png), e.g. from the art's `layers.json`. Use it
+   * when the drawing overlaps differently from the template, like a rear glove guarding in front of the chest.
+   * Layers it doesn't list keep their template place, right after the listed layer before them.
+   */
+  order?: string[];
+  /** The layers' alpha, for the checks that compare joints with the art (head top). */
+  alphas?: Map<string, AlphaMap>;
+}
+
+/**
+ * Sanity checks on the joints, guessed or dragged: the mistakes that make a rig look broken although every bone
+ * builds (a neck folded back, a head turned sideways, a shoulder down at the elbow).
+ */
+export function checkJoints(j: Joints, alphas?: Map<string, AlphaMap>): string[] {
+  const out: string[] = [];
+  const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+  if (j.neckBase.y <= j.headBase.y) out.push('脖子底（兩肩中點）在下巴後方的上面，脖子會反折：把「脖子底」拖到兩肩之間、「下巴後方」拖到頭和脖子交界');
+  const tilt = (Math.atan2(Math.abs(j.headTop.x - j.headBase.x), j.headBase.y - j.headTop.y) * 180) / Math.PI;
+  if (j.headTop.y >= j.headBase.y || tilt > 50) out.push(`頭頂點不在下巴後方的上面（頭軸歪了 ${Math.round(tilt)}°），頭會繞錯方向轉：把「頭頂」拖到頭頂正中`);
+  const head = alphas?.get('head');
+  if (head) {
+    let top = -1, bottom = -1;
+    for (let y = 0; y < head.height && top < 0; y += 2) for (let x = 0; x < head.width; x += 2) if (head.data[y * head.width + x] > 128) { top = y; break; }
+    for (let y = head.height - 1; y >= 0 && bottom < 0; y -= 2) for (let x = 0; x < head.width; x += 2) if (head.data[y * head.width + x] > 128) { bottom = y; break; }
+    if (top >= 0 && j.headTop.y - top > 0.25 * (bottom - top)) out.push(`頭頂點比頭的最上緣低了 ${Math.round(j.headTop.y - top)} px：把「頭頂」拖到頭頂（含帽子）`);
+  }
+  const torso = dist(j.neckBase, j.waist);
+  for (const [id, label] of [['shoulderF', '前肩'], ['shoulderB', '後肩']] as const) {
+    if (j[id].y - j.neckBase.y > 0.35 * torso) out.push(`${label}點比脖子底低了 ${Math.round(j[id].y - j.neckBase.y)} px，手臂會從胸口長出來：把它拖到肩膀頂端`);
+  }
+  return out;
+}
+
+export function buildRig(joints: Joints, layerNames: string[], name = 'character', canvas: CanvasSize = CANVAS, opts: RigOptions = {}): RigResult {
   const have = new Set(layerNames);
   const missing = PARTS.filter((p) => p.required && !have.has(p.name)).map((p) => p.name);
-  const warnings: string[] = [];
+  const warnings: string[] = checkJoints(joints, opts.alphas);
   const hasHair = [...have].some((n) => n.startsWith('hair_front'));
   const pt = (id: JointId | 'root') => (id === 'root' ? { x: 0, y: 0 } : toSpine(joints[id], canvas));
   const world = new Map<string, { x: number; y: number; rot: number; len: number }>();
@@ -325,6 +360,19 @@ export function buildRig(joints: Joints, layerNames: string[], name = 'character
     if (p.name === 'hair_front') return [...have].filter((n) => n.startsWith('hair_front')).sort().map((n) => ({ name: n, bone: 'hairF' }));
     return have.has(p.name) ? [{ name: p.name, bone: p.bone }] : [];
   });
+  if (opts.order?.length) {
+    const unknown = opts.order.filter((n) => !used.some((u) => u.name === n));
+    if (unknown.length) warnings.push(`疊圖順序裡有沒交的圖層：${unknown.join('、')}（略過）`);
+    const listed = opts.order.flatMap((n) => used.filter((u) => u.name === n));
+    const rest = used.filter((u) => !opts.order!.includes(u.name));
+    const sorted = [...listed];
+    for (const u of rest) {
+      // after the listed layer that precedes it in the template, or first when none does
+      const before = used.slice(0, used.indexOf(u)).reverse().find((p) => sorted.includes(p));
+      sorted.splice(before ? sorted.indexOf(before) + 1 : 0, 0, u);
+    }
+    used.splice(0, used.length, ...sorted);
+  }
   const extra = [...have].filter((n) => !PARTS.some((p) => p.name === n) && !n.startsWith('hair_front'));
   if (extra.length) warnings.push(`這些圖層不在模板裡，沒有使用：${extra.join('、')}（請改成模板的檔名）`);
   const slots: SpineJson[] = [];

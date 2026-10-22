@@ -12,7 +12,7 @@ import { compileRecipe, type Recipe, type RecipeAnimation } from '../recipe.ts';
 import { checkSkeleton, type AnimationReport } from '../check.ts';
 import { guessRecipe, estimateSize } from '../roles.ts';
 import { assertSpine43, parseSkeleton, type SpineJson } from '../spineJson.ts';
-import { buildRig, guessJoints, JOINT_LINKS, type AlphaMap } from '../autorig.ts';
+import { buildRig, checkJoints, guessJoints, JOINT_LINKS, type AlphaMap } from '../autorig.ts';
 import { JOINTS, PARTS, defaultJoints, CANVAS, type Joints, type JointId, type CanvasSize } from '../rigTemplate.ts';
 import { checkSeams, type SeamIssue } from '../seams.ts';
 
@@ -45,6 +45,10 @@ interface RigEdit {
   layers: Map<string, LayerArt>;
   rejected: { name: string; why: string }[];
   joints: Joints;
+  /** Draw order from the delivery's layers.json (back → front), when it has one. */
+  order?: string[];
+  /** Joint problems shown at the last 建立骨架 click; a second click with the same problems builds anyway. */
+  jointIssues?: string;
 }
 
 const state = {
@@ -167,7 +171,20 @@ async function loadLayers(entries: { name: string; blob: Blob }[], base: string)
   setStatus(`讀取 ${entries.length} 張圖層…`);
   const decoded: { name: string; art: LayerArt }[] = [];
   const rejected: { name: string; why: string }[] = [];
+  let order: string[] | undefined;
   for (const e of entries) {
+    if (/\.json$/i.test(e.name)) {
+      // the delivery's layers.json: { "order": ["arm_back_upper.png", …] } back → front (a plain array works too)
+      try {
+        const j = JSON.parse(await e.blob.text());
+        const list = Array.isArray(j) ? j : j?.order;
+        if (!Array.isArray(list) || !list.every((x) => typeof x === 'string')) throw new Error();
+        order = list.map(normalize);
+      } catch {
+        rejected.push({ name: e.name, why: '不是疊圖順序檔（要有 order 陣列）' });
+      }
+      continue;
+    }
     try {
       decoded.push({ name: normalize(e.name), art: await decode(e.blob) });
     } catch {
@@ -210,7 +227,7 @@ async function loadLayers(entries: { name: string; blob: Blob }[], base: string)
   }
   const canvas = { width: w, height: h };
   const alphas = new Map([...layers].map(([n, a]) => [n, a.alpha]));
-  state.rig = { base, canvas, layers, rejected, joints: layers.size ? guessJoints(alphas) : defaultJoints(canvas) };
+  state.rig = { base, canvas, layers, rejected, order, joints: layers.size ? guessJoints(alphas) : defaultJoints(canvas) };
   state.skeleton = null;
   state.compiled = null;
   state.draft = null;
@@ -249,6 +266,7 @@ function renderRigPanel() {
     list.append(el('div', { class: `row ${cls}` }, el('span', {}, `${ok ? '✓' : p.required ? '✗' : '–'} ${p.name}.png`), el('span', {}, ok ? p.label : p.required ? '缺少' : '選用')));
   }
   for (const r of rig.rejected) list.append(el('div', { class: 'row miss' }, el('span', {}, `✗ ${r.name}`), el('span', {}, r.why)));
+  if (rig.order) list.append(el('div', { class: 'row ok' }, el('span', {}, '✓ layers.json'), el('span', {}, `照交件的疊圖順序（${rig.order.length} 層）`)));
   const missing = PARTS.filter((p) => p.required && !rig.layers.has(p.name));
   tune.append(el('div', { class: 'section' }, el('span', { class: 'lbl' }, el('b', {}, `圖層檢查（畫布 ${rig.canvas.width}×${rig.canvas.height}）`)), list,
     ...(missing.length ? [el('div', { class: 'error-box' }, `缺少必要圖層：${missing.map((m) => m.name).join('、')}。可以先建立骨架試看看，缺的部位不會顯示。`)] : [])));
@@ -264,11 +282,13 @@ function renderRigPanel() {
     toast('已還原模板位置');
   });
   const build = el('button', { type: 'button', class: 'primary', id: 'rig-build' }, '建立骨架，開始套動作');
+  const issues = el('div', { id: 'rig-issues' });
   build.addEventListener('click', buildFromRig);
   tune.append(el('div', { class: 'section' },
     el('span', { class: 'lbl' }, el('b', {}, '關節對齊')),
     el('span', { class: 'hint' }, '把紅點拖到圖上真正的關節位置：肩、肘、腕、腿根、膝、踝、脖子、下巴後方、頭頂、前髮根與髮尾。滑鼠移到點上會顯示名稱；點擠在一起時用滾輪放大。點的位置決定部件繞哪裡轉，偏了手會像脫臼。'),
     el('div', { class: 'actions' }, guess, reset),
+    issues,
     el('div', { class: 'actions' }, build)));
   const export_ = el('button', { type: 'button', id: 'rig-joints' }, '下載關節位置');
   export_.addEventListener('click', () => download(`${rig.base}.joints.json`, JSON.stringify(rig.joints, null, 2)));
@@ -294,8 +314,20 @@ function renderRigPanel() {
 function buildFromRig() {
   const rig = state.rig;
   if (!rig) return;
+  const alphas = new Map([...rig.layers].map(([n, a]) => [n, a.alpha]));
+  // joints that would build a broken-looking rig: list them and build only on a second click
+  const issues = checkJoints(rig.joints, alphas);
+  const box = document.getElementById('rig-issues');
+  if (issues.length && rig.jointIssues !== issues.join('\n')) {
+    rig.jointIssues = issues.join('\n');
+    box?.replaceChildren(el('div', { class: 'error-box' }, el('b', {}, `關節有 ${issues.length} 個地方不對勁（再按一次「建立骨架」就照現在的位置建立）`), ...issues.map((i) => el('div', {}, `・${i}`))));
+    toast(`關節有 ${issues.length} 個地方不對勁，見右側清單`);
+    return;
+  }
+  box?.replaceChildren();
+  rig.jointIssues = undefined;
   const names = [...rig.layers.keys()];
-  const result = buildRig(rig.joints, names, rig.base, rig.canvas);
+  const result = buildRig(rig.joints, names, rig.base, rig.canvas, { order: rig.order, alphas });
   const notes = [...result.warnings];
   if (result.missing.length) notes.unshift(`缺少 ${result.missing.join('、')}`);
   loadSkeleton(result.json, `${rig.base}.json`, { roles: result.roles, size: estimateSize(result.json), art: rig.layers, notes });

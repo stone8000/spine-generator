@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRig, guessJoints } from '../src/autorig.ts';
+import { buildRig, checkJoints, guessJoints } from '../src/autorig.ts';
 import { defaultJoints, JOINTS, toSpine } from '../src/rigTemplate.ts';
 import { compileRecipe } from '../src/recipe.ts';
 import { checkSeams } from '../src/seams.ts';
@@ -127,4 +127,52 @@ test('celebrate on the auto-rig: the front elbow stays down, so the upper arm st
     assert.ok(f.y > s.y, `step ${i}: the fist is above the shoulder`);
     assert.ok(f.x - s.x > upper, `step ${i}: the glove is an upper arm's length in front of the shoulder (${(f.x - s.x).toFixed(0)})`);
   }
+});
+
+test('a delivery draw order (layers.json) reorders the slots; unlisted layers keep their template neighbour', () => {
+  const layers = synthLayers('good');
+  const names = [...layers.keys()];
+  const plain = buildRig(defaultJoints(), names).json.slots.map((x: { name: string }) => x.name);
+  assert.ok(plain.indexOf('torso') > plain.indexOf('fist_back'), 'template: the chest covers the rear glove');
+  // the bandit monkey's order: rear forearm and glove in front of the chest, pelvis in front of the legs
+  const order = ['arm_back_upper', 'leg_back_upper', 'leg_back_lower', 'leg_front_upper', 'leg_front_lower', 'pelvis', 'neck', 'torso', 'arm_back_lower', 'fist_back', 'head', 'arm_front_upper', 'arm_front_lower', 'fist_front'];
+  const { json, warnings } = buildRig(defaultJoints(), names, 'c', undefined, { order });
+  const got = json.slots.map((x: { name: string }) => x.name);
+  assert.deepEqual(got.filter((n: string) => order.includes(n)), order);
+  assert.ok(got.indexOf('fist_back') > got.indexOf('torso'), 'rear glove now in front of the chest');
+  if (names.includes('hair_back')) assert.equal(got[0], 'hair_back', 'unlisted hair_back stays at the back');
+  if (names.includes('hair_front')) assert.equal(got[got.indexOf('head') + 1], 'hair_front', 'unlisted hair_front stays right after the head');
+  assert.deepEqual(warnings, []);
+  assert.equal(got.length, plain.length);
+});
+
+test('joint sanity check: the template passes; a folded neck, a sideways head and a dropped shoulder are reported', () => {
+  const layers = synthLayers('good');
+  assert.deepEqual(checkJoints(defaultJoints(), layers), []);
+  assert.deepEqual(checkJoints(guessJoints(layers), layers), []);
+  // what the auto-guess produced on the bandit monkey (near-frontal art, wide stance)
+  const j = defaultJoints();
+  j.neckBase = { x: 513, y: 351 }; j.headBase = { x: 554, y: 398 }; j.headTop = { x: 742, y: 301 }; j.shoulderF = { x: 669, y: 494 }; j.waist = { x: 513, y: 708 };
+  const issues = checkJoints(j, layers);
+  for (const want of ['脖子會反折', '頭軸歪了', '頭頂點比頭的最上緣低', '前肩點比脖子底低']) assert.ok(issues.some((i) => i.includes(want)), `missing: ${want}\n${issues.join('\n')}`);
+  assert.ok(buildRig(j, [...layers.keys()]).warnings.some((w) => w.includes('脖子會反折')), 'buildRig passes the checks on as warnings');
+});
+
+test('celebrate keeps each upper arm within `swing` of how it was drawn (a rear arm drawn hanging out to the side)', () => {
+  const j = defaultJoints();
+  j.elbowB = { x: j.shoulderB.x - 60, y: j.shoulderB.y + 125 };
+  j.wristB = { x: j.elbowB.x + 120, y: j.elbowB.y - 60 };
+  const rig = buildRig(j, [...synthLayers('good').keys()]);
+  const turn = (params: Record<string, number>) => {
+    const { json } = compileRecipe(rig.json, { roles: rig.roles, size: estimateSize(rig.json), animations: [{ name: 'cel', preset: 'celebrate', params }] });
+    const p = play(json, 'cel', ['upperArmB', 'foreArmB']);
+    const ang = (i: number) => (Math.atan2(p.foreArmB[i].y - p.upperArmB[i].y, p.foreArmB[i].x - p.upperArmB[i].x) * 180) / Math.PI;
+    const drawn = (Math.atan2(-(j.elbowB.y - j.shoulderB.y), j.elbowB.x - j.shoulderB.x) * 180) / Math.PI;
+    return Math.max(...p.upperArmB.map((_: unknown, i: number) => Math.abs(((ang(i) - drawn + 540) % 360) - 180)));
+  };
+  // the IK guard and the forearm pose add some turn of their own, so compare against the uncapped pose
+  const capped = turn({}), free = turn({ swing: 180 }), small = turn({ swing: 10 });
+  assert.ok(free > 75, `negative control: without the cap the upper arm turns ${free.toFixed(1)}°`);
+  assert.ok(capped < free - 30, `default cap: ${capped.toFixed(1)}° vs ${free.toFixed(1)}° uncapped`);
+  assert.ok(small < capped, `a tighter cap turns less: ${small.toFixed(1)}° < ${capped.toFixed(1)}°`);
 });
