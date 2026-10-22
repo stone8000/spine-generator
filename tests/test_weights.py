@@ -417,3 +417,38 @@ def test_row_composition_gives_the_lower_band_its_ramp_outright():
     assert np.allclose(W[idx, col["shin"]], kr[idx, 1] * (1 - t[idx]))
     assert np.allclose(U[idx, col["foot"]], kr[idx, 1] * t[idx])
     assert (W[idx, col["foot"]] > U[idx, col["foot"]] + 1e-6).any()
+
+
+def test_accessory_chain_fills_the_parent_first_and_stays_within_three_bones():
+    """P2 open issue 8: near a joint the parent holds little, so the
+    accessory's share is taken of the whole chain (parent, helper, the bone
+    across the joint), each with its own copy of the accessory, filled
+    greedily from the parent: only one bone is ever split, so a vertex of
+    two band bones ends with 3 bones at most (L8), the accessory's total is
+    share x chain weight, and merging every copy back into its bone gives
+    the original weights (exact at rest)."""
+    names = ["upper", "helper", "lower", "cuff", "cuff_h", "cuff_lo"]
+    chain = [("upper", "cuff"), ("helper", "cuff_h"), ("lower", "cuff_lo")]
+    M = np.array([[0.6, 0.4, 0.0, 0, 0, 0],    # share 0.5: 0.5 from the upper arm
+                  [0.3, 0.7, 0.0, 0, 0, 0],    # share 0.5: the upper arm's 0.3 whole, 0.2 of the helper
+                  [0.3, 0.7, 0.0, 0, 0, 0],    # share 1: both whole, 2 bones
+                  [0.0, 0.6, 0.4, 0, 0, 0],    # past the joint: helper first, then the lower bone
+                  [0.5, 0.3, 0.2, 0, 0, 0],    # three bones already: no room
+                  [1.0, 0.0, 0.0, 0, 0, 0]])   # outside the band: the parent alone
+    share = np.array([0.5, 0.5, 1.0, 0.8, 0.4, 0.3])  # row 4: 0.4 would split the upper arm (4 bones)
+    X, stuck = weights.accessory_chain_split(M, names, chain, share)
+    assert stuck.tolist() == [False, False, False, False, True, False]
+    W = M.copy()
+    got = weights.compose_accessory_chain(W, names, chain, share)
+    assert got == {"cuff": 4, "cuff_h": 3, "cuff_lo": 1}
+    acc = W[:, 3:].sum(1)
+    assert np.allclose(acc, [0.5, 0.5, 1.0, 0.8, 0.0, 0.3])
+    assert np.allclose(W[1], [0.0, 0.5, 0.0, 0.3, 0.2, 0.0])
+    assert np.allclose(W[3], [0.0, 0.0, 0.2, 0.0, 0.6, 0.2])
+    assert ((W >= 0.02).sum(1) <= 3).all()
+    merged = W[:, :3] + W[:, 3:]
+    assert np.allclose(merged, M[:, :3])
+    # the parent-only rule takes nothing where the parent holds nothing
+    W2 = M.copy()
+    weights.compose_accessory(W2, names, "cuff", "upper", share)
+    assert W2[3, 3] == 0.0 and acc[3] > 0.5

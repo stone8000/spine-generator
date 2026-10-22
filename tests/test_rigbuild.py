@@ -591,9 +591,89 @@ def test_accessory_tapers_toward_vertices_with_no_room(cuffed):
     for i in stuck:
         for j in set(T[(T == i).any(1)].ravel()) - {i}:
             r = rows[j]
-            share = r.get("pant_l", 0.0) / max(r.get("pant_l", 0.0) + r.get("thigh_l", 0.0), 1e-9)
-            assert share <= np.linalg.norm(v[i] - v[j]) / (rigbuild.ACC_TAPER * hw) + 1e-9, (i, j, share)
+            # the pant and its copies (ACCESSORY COPIES) take at most the
+            # tapered share of the chain's weight, which is <= 1
+            got = sum(x for n, x in r.items() if n.startswith("pant_l"))
+            assert got <= np.linalg.norm(v[i] - v[j]) / (rigbuild.ACC_TAPER * hw) + 1e-9, (i, j, got)
     assert res["report"]["accessories"]["bones"]["pant_l"]["vertices"] > 0
+
+
+def test_accessory_copies_carry_the_swing_across_the_joint(cuffed, tmp_path):
+    """P2 open issue 8: with the cuff sharing only its parent's weight, the
+    sleeve near the elbow (where the upper arm holds little) barely swings:
+    on the monkey the left sleeve moved 17 px against the source's 58. The
+    cuff gets a copy under the elbow's helper and one under the forearm
+    (ACCESSORY COPIES), each turned by the cuff's own local change (a
+    relative local transform constraint after the physics), and takes its
+    source share of the whole band row. Without physics the rig poses
+    exactly as without copies; L8 holds; in the official runtime the
+    cuff's physics moves the sleeve's band vertices more than before."""
+    d, y_el, _ = cuffed
+    bands = {"elbow_l": {"reach": {"upper": 3.5}}}
+    old = rigbuild.build(d, mode="joint", bands=bands, accessory_copies=False)
+    new = rigbuild.build(d, mode="joint", bands=bands)
+    ir = new["ir"]
+    by = irmod.by_name(ir["bones"])
+    copies = {n: b for n, b in by.items() if n.startswith("cuff_l_")}
+    assert set(copies) == {"cuff_l_elbow_mid_l", "cuff_l_forearm_l"}
+    assert {b["parent"] for b in copies.values()} == {"elbow_mid_l", "forearm_l"}
+    follow = [c for c in ir["transform"] if c.get("kind") == "transform" and c["target"] == "cuff_l"]
+    assert sorted(b for c in follow for b in c["bones"]) == sorted(copies)
+    last_physics = max(c["order"] for c in ir["physics"])
+    assert all(c["local"] and c["relative"] and c["mix"]["rotate"] == 1.0 and c["order"] > last_physics
+               and c["offset"]["rotation"] == pytest.approx(-by["cuff_l"]["rotation"]) for c in follow)
+    ev = lbs.Evaluator(ir)
+    w = ev.world_dict(ev.world())
+    for n in copies:  # the same setup world transform as the cuff
+        assert np.allclose(w[n], w["cuff_l"], atol=1e-6)
+
+    def rows(res):
+        att = next(a for _, s, _, a in irmod.iter_attachments(res["ir"]) if s == "upper_arm_l")
+        return att, [dict((n, x) for n, x in r) for r in att["weights"]]
+    att, r_new = rows(new)
+    _, r_old = rows(old)
+    assert all(len(r) <= 3 for r in r_new)
+    above = np.array([y - y_el for _, y in att["vertices"]])
+    near = [i for i, a in enumerate(above) if -10.0 < a < 30.0]
+    acc = lambda r: sum(x for n, x in r.items() if n.startswith("cuff_l"))
+    assert near and sum(acc(r_new[i]) for i in near) > 1.5 * sum(acc(r_old[i]) for i in near) + 1.0
+    assert sum(acc(r_new[i]) for i in near) > 0.6 * len(near)  # 100% cuff in the source there
+    pose = {"forearm_l": {"rotation": 100.0}, "upperarm_l": {"rotation": -30.0}, "hips": {"y": -0.1 * ir["H"]}}
+    got = []
+    for res in (old, new):
+        e = lbs.Evaluator(res["ir"])
+        got.append(e.attachment_vertices(e.world(pose), "upper_arm_l", dict(e.shown())["upper_arm_l"]))
+    assert np.abs(got[0] - got[1]).max() < 1e-9  # rest-exact: no physics, no keys on the cuff
+    from spinegen import oracle
+    ok, why = oracle.available()
+    if not ok:
+        pytest.skip(f"runtime oracle unavailable: {why}")
+    swing = []
+    for name, res in (("old", old), ("new", new)):
+        paths = rigbuild.write(str(tmp_path / name), res)
+        fr = [oracle.dump(paths["skeleton"], paths["atlas"], anim="wave", fps=60, physics=ph)["frames"]
+              for ph in ("update", "none")]
+        v = [np.stack([np.asarray(f["slots"]["upper_arm_l"]["vertices"]).reshape(-1, 2) for f in x]) for x in fr]
+        swing.append(np.linalg.norm(v[0] - v[1], axis=-1).max(0)[near].max())
+    assert swing[1] > 1.5 * swing[0], swing
+
+
+def test_match_physics_scales_down_a_harder_swing_only():
+    """P2 open issue 8: the monkey's pant hems swing 34 px here (the leg IK
+    turns the thigh at each bob of the hips) against 11 px in the source
+    (the legs squash with scale keys); once the copies carry that swing
+    onto the thigh it folded in cheer. match_physics scales a physics mix
+    by source / here when here is more than PHYS_MATCH_TOL harder, and
+    never raises one."""
+    ir = {"physics": [dict(_physics(b, k), mix=m) for k, (b, m) in enumerate((("pant", 1.0), ("cuff", 1.0),
+                                                                               ("hat", 0.5)))]}
+    here = {"pant_phys": {"a": 34.0, "b": 10.0}, "cuff_phys": {"a": 18.0, "b": 9.0}, "hat_phys": {"a": 2.0, "b": 1.0}}
+    src = {"pant_phys": {"a": 11.0, "b": 2.0}, "cuff_phys": {"a": 17.0, "b": 9.5}, "hat_phys": {"a": 4.0, "b": 1.0}}
+    out = rigbuild.scale_physics_mix(ir, here, src)
+    mix = {c["bone"]: c["mix"] for c in ir["physics"]}
+    assert mix["pant"] == pytest.approx(11.0 / 34.0, abs=1e-4)
+    assert mix["cuff"] == 1.0 and mix["hat"] == 0.5   # within the tolerance / swings less: untouched
+    assert out["pant_phys"]["source_px"] == 11.0 and out["pant_phys"]["px"] == 34.0
 
 
 def test_band_above_an_overlap_keeps_its_share(layers_dir):
@@ -841,7 +921,7 @@ def test_monkey_rebuild(mode, tmp_path):
     layers = tmp_path / "layers"
     ingest_spine.unpack(skel, at, str(layers))
     res = rigbuild.build(str(layers), mode=mode)
-    paths = rigbuild.write(str(tmp_path / mode), res)
+    paths, _ = rigbuild.write_matched(str(tmp_path / mode), res, str(layers))  # the CLI's physics match
     ir = res["ir"]
     assert len(ir["animations"]) == 9 and len(ir["physics"]) == 7 and len(ir["ik"]) == 2
     assert {c["bone"] for c in ir["physics"]} >= {"cuffL", "pantR", "banana"}

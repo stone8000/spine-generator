@@ -295,6 +295,71 @@ def compose_accessory(M, names, acc, parent, share, max_influences=3, prune=0.02
     return int((x > 0).sum())
 
 
+def accessory_chain_split(M, names, chain, share, max_influences=3, prune=0.02):
+    """(X, no_room): per vertex, the weight compose_accessory_chain would
+    move from each chain bone to its accessory bone (X is N x len(chain)),
+    and the vertices that would need more than `max_influences` bones (X
+    row 0).
+
+    chain   [(bone, accessory bone), ...]: first the accessory's parent and
+            the accessory itself, then each joint-band bone next to the
+            parent (the helper, the bone across the joint) with a copy of
+            the accessory hanging from it (rigbuild ACCESSORY COPIES)
+    share   (N,) 0..1: the accessory's part of the whole chain's weight
+
+    The target T = share x (weight the vertex has on the chain bones) is
+    filled greedily along the chain, the parent first: each bone hands its
+    accessory all it holds until T is met and the last one a part. WHY
+    greedy: a vertex in a joint band holds two of the three band bones
+    (piecewise ramp), and splitting both would put 4 bones on it (L8: 3);
+    filled in order only one bone is ever split, so a vertex of two band
+    bones ends with 3 at most, and T is continuous in share and in the
+    weights, so neighbours never jump. The same prune rules as
+    accessory_split keep it exact at rest."""
+    col = {n: i for i, n in enumerate(names)}
+    share = np.clip(np.asarray(share, float), 0.0, 1.0)
+    W = np.stack([M[:, col[b]] for b, _ in chain], 1)
+    rem = share * W.sum(1)
+    X = np.zeros_like(W)
+    for k in range(len(chain)):
+        take = np.minimum(W[:, k], rem)
+        take[take < prune] = 0.0
+        whole = (take > 0) & (W[:, k] - take < prune)
+        take[whole] = W[whole, k]
+        X[:, k] = take
+        rem = np.maximum(rem - take, 0.0)
+    used = (M >= prune).sum(1)
+    added = sum(((X[:, k] > 0) & (M[:, col[a]] < prune)).astype(int) for k, (_, a) in enumerate(chain))
+    gone = sum(((X[:, k] > 0) & (X[:, k] >= W[:, k])).astype(int) for k in range(len(chain)))
+    no_room = (X.sum(1) > 0) & (used + added - gone > max_influences)
+    X[no_room] = 0.0
+    return X, no_room
+
+
+def compose_accessory_chain(M, names, chain, share, max_influences=3, prune=0.02):
+    """compose_accessory along a chain of (bone, accessory bone) pairs
+    (accessory_chain_split), in place; returns {accessory bone: vertices
+    that got any}.
+
+    WHY (P2 open issue 8): near a joint the parent holds little (the band's
+    helper and the bone across the joint hold the rest), so an accessory
+    that only shares its parent's weight barely moves there: the monkey's
+    left sleeve swung 17 px against the source's 58. Each band bone gets a
+    copy of the accessory (same setup world transform, its own parent the
+    band bone, driven by the accessory's local deltas: rigbuild ACCESSORY
+    COPIES); a copy at rest moves exactly like the bone it hangs from, so
+    moving weight from a band bone to its copy changes nothing without
+    physics or keys, the same argument as compose_accessory."""
+    X, _ = accessory_chain_split(M, names, chain, share, max_influences, prune)
+    col = {n: i for i, n in enumerate(names)}
+    got = {}
+    for k, (b, a) in enumerate(chain):
+        M[:, col[a]] += X[:, k]
+        M[:, col[b]] -= X[:, k]
+        got[a] = got.get(a, 0) + int((X[:, k] > 0).sum())
+    return got
+
+
 def as_matrix(weights, names):
     """[[(name, w), ...]] -> (N, B) array in `names` order."""
     col = {n: i for i, n in enumerate(names)}
