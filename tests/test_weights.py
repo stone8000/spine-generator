@@ -277,3 +277,143 @@ def test_helper_elbow_holds_120_degrees_in_spine_core(tmp_path):
     assert h[120.0]["band_union"] >= 0.9
     assert out["ramp"][150.0]["folds"] > 0
     assert out["ramp"][120.0]["band_union"] < h[120.0]["band_union"] - 0.1
+
+
+@pytest.mark.parametrize("helper", [False, True])
+def test_asymmetric_reach_ramp(arm_mesh, helper):
+    """"reach" [upper, lower]: with a helper, upper -> helper over the upper
+    reach and helper -> lower over the lower one (the helper owns the joint
+    whatever the lengths); without one, one linear ramp over the whole band.
+    A symmetric reach is the old extent exactly."""
+    bones = arm_bones(helper)
+    up, lo = 1.6, 0.8
+    j = dict(elbow_joint(helper), reach=(up, lo))
+    V = arm_mesh["verts"]
+    m, ramp = weights.joint_ramp(V, j, bones)
+    s = (V[m] - ELBOW) @ np.array([1.0, 0.0])
+    assert s.min() >= -up * HW - weights.END_TOL - 1e-9 and s.max() <= lo * HW + weights.END_TOL + 1e-9
+    if helper:
+        a = np.clip((s + up * HW) / (up * HW), 0, 1)
+        b = np.clip(s / (lo * HW), 0, 1)
+        assert np.allclose(ramp, np.stack([1 - a, b, a - b], 1))
+    else:
+        t = np.clip((s + up * HW) / ((up + lo) * HW), 0, 1)
+        assert np.allclose(ramp, np.stack([1 - t, t], 1))
+    sym = dict(elbow_joint(helper), reach=(1.5, 1.5))
+    m1, r1 = weights.joint_ramp(V, sym, bones)
+    m2, r2 = weights.joint_ramp(V, elbow_joint(helper, extent=1.5), bones)
+    assert np.array_equal(m1, m2) and np.allclose(r1, r2)
+    with pytest.raises(ValueError):
+        weights.joint_ramp(V, dict(sym, reach=(1.5, 0.0)), bones)
+
+
+def test_chain_composition_of_overlapping_bands():
+    """An "overlap" band running into the band above it on the same chain
+    splits whatever its upper bone holds there (weights CHAIN COMPOSITION):
+    a shin vertex in both the knee's lower half and the ankle's ramp gets
+    helper, shin and foot, rows sum to 1, and the result does not depend
+    on the order the joints are given in. Without "overlap" the later band
+    simply takes the vertex (the old rule, which rigbuild avoids by sharing)."""
+    alpha = capsule((330, 60), (26, 30), 22, (304, 30), 20)
+    knee, ankle = np.array([126.0, 30.0]), np.array([216.0, 30.0])
+    bones = [{"name": "thigh", "head": (26.0, 30.0), "tail": tuple(knee)},
+             {"name": "shin", "head": tuple(knee), "tail": tuple(ankle)},
+             {"name": "knee_mid", "head": tuple(knee), "tail": tuple(knee)},
+             {"name": "foot", "head": tuple(ankle), "tail": (304.0, 30.0)}]
+    jk = {"center": tuple(knee), "upper": "thigh", "helper": "knee_mid", "lower": "shin", "halfwidth": HW,
+          "axis": (1, 0), "reach": (2.0, 3.0), "exclusive": True}
+    ja = {"center": tuple(ankle), "upper": "shin", "helper": None, "lower": "foot", "halfwidth": HW,
+          "axis": (1, 0), "reach": (3.5, 0.5), "exclusive": True, "overlap": True}
+    m = mesh.build(alpha, (0, 0), bands=[dict(jk, rows=3), dict(ja, rows=3)])
+    names = [b["name"] for b in bones]
+    W = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, ja])
+    W2 = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [ja, jk])
+    assert np.allclose(W, W2)
+    assert np.allclose(W.sum(1), 1.0)
+    x = m["verts"][:, 0]
+    both = (x > ankle[0] - 3.5 * HW + 1) & (x < knee[0] + 3.0 * HW - 1)
+    assert both.any()
+    mk, rk = weights.joint_ramp(m["verts"], jk, bones)
+    ma, ra = weights.joint_ramp(m["verts"], ja, bones)
+    kr = np.zeros((len(x), 3))
+    kr[mk] = rk                                   # columns: thigh, shin, helper
+    t = np.zeros(len(x))
+    t[ma] = ra[:, 1]                              # foot share of the ankle ramp
+    idx = np.flatnonzero(both & mk & ma)
+    col = {n: i for i, n in enumerate(names)}
+    assert np.allclose(W[idx, col["knee_mid"]], kr[idx, 2])
+    assert np.allclose(W[idx, col["shin"]], kr[idx, 1] * (1 - t[idx]))
+    assert np.allclose(W[idx, col["foot"]], kr[idx, 1] * t[idx])
+    assert (W[idx][:, [col["knee_mid"], col["shin"], col["foot"]]] > 0.02).all(1).any()
+    # without "overlap" the ankle band takes its vertices whole
+    W3 = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, dict(ja, overlap=False)])
+    assert np.allclose(W3[idx, col["knee_mid"]], 0.0)
+
+
+def test_compose_accessory_takes_a_share_of_the_parent_only():
+    """P2 review: an accessory (a cuff hanging from the upper arm) takes its
+    share of the PARENT's weight, never of the helper's or another bone's,
+    so merging it back gives the original weights exactly (it moves like
+    its parent at rest); parts under the prune threshold go whole to one
+    bone, and a vertex that already has three bones keeps its share on the
+    parent (L8)."""
+    names = ["upper", "helper", "hips", "cuff"]
+    M = np.array([[0.6, 0.4, 0.0, 0.0],     # share 1: all of the upper arm's 0.6
+                  [0.6, 0.4, 0.0, 0.0],     # share 0.5: 0.3 each
+                  [0.03, 0.97, 0.0, 0.0],   # 0.015 is under the prune: stays on the parent
+                  [0.3, 0.7, 0.0, 0.0],     # 0.285 to the cuff leaves 0.015: all 0.3 go
+                  [0.5, 0.3, 0.2, 0.0],     # three bones already: no room
+                  [0.0, 1.0, 0.0, 0.0]])    # no parent weight: nothing to take
+    share = np.array([1.0, 0.5, 0.5, 0.95, 0.5, 1.0])
+    x, stuck = weights.accessory_split(M, names, "cuff", "upper", share)
+    assert stuck.tolist() == [False, False, False, False, True, False]
+    W = M.copy()
+    n = weights.compose_accessory(W, names, "cuff", "upper", share)
+    assert n == 3
+    assert np.allclose(W[:, 3], [0.6, 0.3, 0.0, 0.3, 0.0, 0.0])
+    assert np.allclose(W[:, :3].sum(1) + W[:, 3], 1.0)
+    assert np.allclose(W[:, 1:3], M[:, 1:3])               # helper and hips untouched
+    merged = W.copy()
+    merged[:, 0] += merged[:, 3]
+    merged[:, 3] = 0.0
+    assert np.allclose(merged, M)
+    assert ((W > 0) & (W < 0.02)).sum() == 0
+    assert ((W >= 0.02).sum(1) <= 3).all()
+
+
+def test_row_composition_gives_the_lower_band_its_ramp_outright():
+    """compose "row" (P2 review R2): an overlap band's own bone takes its
+    ramp value of the whole row, so the foot's weight is the ankle ramp's
+    t everywhere (it falls off evenly up the calf), and the knee's helper
+    and the shin keep their split of the rest: helper h (1 - t), shin
+    (1 - h)(1 - t). The default ("upper") gives the foot t x the shin's
+    share instead."""
+    alpha = capsule((330, 60), (26, 30), 22, (304, 30), 20)
+    knee, ankle = np.array([126.0, 30.0]), np.array([216.0, 30.0])
+    bones = [{"name": "thigh", "head": (26.0, 30.0), "tail": tuple(knee)},
+             {"name": "shin", "head": tuple(knee), "tail": tuple(ankle)},
+             {"name": "knee_mid", "head": tuple(knee), "tail": tuple(knee)},
+             {"name": "foot", "head": tuple(ankle), "tail": (304.0, 30.0)}]
+    jk = {"center": tuple(knee), "upper": "thigh", "helper": "knee_mid", "lower": "shin", "halfwidth": HW,
+          "axis": (1, 0), "reach": (2.0, 3.0), "exclusive": True}
+    ja = {"center": tuple(ankle), "upper": "shin", "helper": None, "lower": "foot", "halfwidth": HW,
+          "axis": (1, 0), "reach": (3.5, 0.5), "exclusive": True, "overlap": True, "compose": "row"}
+    m = mesh.build(alpha, (0, 0), bands=[dict(jk, rows=3), dict(ja, rows=3)])
+    col = {b["name"]: i for i, b in enumerate(bones)}
+    W = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, ja])
+    U = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, dict(ja, compose="upper")])
+    assert np.allclose(W.sum(1), 1.0)
+    x = m["verts"][:, 0]
+    mk, rk = weights.joint_ramp(m["verts"], jk, bones)
+    ma, ra = weights.joint_ramp(m["verts"], ja, bones)
+    kr = np.zeros((len(x), 3))
+    kr[mk] = rk                                   # columns: thigh, shin, helper
+    t = np.zeros(len(x))
+    t[ma] = ra[:, 1]
+    idx = np.flatnonzero(mk & ma & (x > ankle[0] - 3.5 * HW + 1) & (x < knee[0] + 3.0 * HW - 1))
+    assert len(idx) and (kr[idx, 2] > 0.05).any()  # the overlap, where the knee's helper still holds weight
+    assert np.allclose(W[idx, col["foot"]], t[idx])
+    assert np.allclose(W[idx, col["knee_mid"]], kr[idx, 2] * (1 - t[idx]))
+    assert np.allclose(W[idx, col["shin"]], kr[idx, 1] * (1 - t[idx]))
+    assert np.allclose(U[idx, col["foot"]], kr[idx, 1] * t[idx])
+    assert (W[idx, col["foot"]] > U[idx, col["foot"]] + 1e-6).any()

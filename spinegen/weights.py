@@ -36,6 +36,43 @@ WHY TWO METHODS (SOTA §2 權重)
   Overlapping layers at a joint (upper arm over forearm) get the same ramp
   at the same canvas point, so they deform together and the seam stays shut.
 
+CHAIN COMPOSITION (P2 A2)
+  Two bands of one limb normally share the length between them (rigbuild):
+  each vertex is in one ramp at most. A band marked "overlap" may instead
+  run into the band above it (knee -> ankle on a calf): its ramp then
+  redistributes whatever weight its upper bone (the shin) holds there, so a
+  calf vertex can carry helper, shin and foot (3 influences). WHY: a deep
+  crouch bends the knee ~100 deg and the planted ankle ~50 deg at once, and
+  a straight ramp of length e squeezes art y off its axis to
+  cos^2(D/4) - sin(D/2) y/e of its area (helper; ~cos^2(D/2) - sin D y/e
+  without). The monkey's calf is 105-107 px long and its art reaches 70-77
+  px off the knee's axis on the inner side and 73 px off the ankle's on the
+  outer hem: no split of 106 px between the two ramps keeps both positive
+  (continuum), while two overlapping ramps of 70-80 and 85-100 px do.
+  Two ways to compose (the band's "compose", COMPOSE):
+  * "upper" (default): the band's ramp splits what its upper bone holds:
+    foot = t x shin share, and the knee's helper keeps its weight. Where
+    the knee's ramp is also taking the shin's weight away, the foot's
+    weight falls off at the sum of both slopes: on the monkey's right calf
+    (P2 A2's 92 px ankle band) up to 1.8x the ankle ramp's own slope just
+    above where the knee's ramp starts, where its hem flares 80-93 px off
+    the ankle's axis.
+  * "row": the band's own bones take their ramp values of the WHOLE row
+    and the bones already there keep theirs scaled by the rest: foot = t,
+    helper = h (1 - t), shin = (1 - h)(1 - t), the product of the two
+    ramps. The foot's weight falls off at 1 / length all the way up the
+    calf; a fold appears where sin D x y x |dt/ds| reaches ~1 - 0.56 (1 -
+    cos D), D the ankle's turn, y the art's distance off its axis.
+  Measured (P2 review: crouch with the hips also shifted sideways, which
+  bends one ankle 50-67 deg; spine-core folds summed over a grid of depths
+  and shifts): monkey, 6 depths x 15 shifts, upper 137 / row 22 (ankle band
+  over the whole calf; upper over the whole calf 98, row at 2.4 halfwidths
+  77); the synthetic short flared calf (tests), 5 x 9: upper 82 / row 26.
+  A third way, the band's own bones taking their ramp values out of the
+  upper bone's share only, was 11 on the monkey and 126 on the synthetic
+  calf: with the shin starved near the knee, the planted foot's weight
+  holds the upper calf back while the knee drops.
+
 BONE HEAT IN 2D (Pinocchio; Blender meshlaplacian.cc heat_bone_weighting)
   For each bone j solve  (L + D H) w_j = D H p_j  where
     L   cotangent Laplacian of the triangle mesh (stiffness form),
@@ -73,6 +110,7 @@ LATERAL = 1.6        # a joint band reaches this many halfwidths sideways from t
 END_TOL = 0.5        # px: mesh.build puts a vertex row on each band end; a vertex this close to an
                      # end belongs to the band (pinned to the ramp's end value) but is not "inside"
                      # it for B2 (it carries one influence by design)
+COMPOSE = ("upper", "row")  # how an "overlap" band composes with the band above (CHAIN COMPOSITION)
 B2_MIN = 0.9         # SOTA §5 B2: >= 90% of joint-band vertices have >= 2 influences
 
 
@@ -89,10 +127,16 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
     joints    [{"center", "upper", "helper" (name or None), "lower", "halfwidth",
                optional "axis" (default: mean direction of the upper and lower
                bones), "extent" (band half-length in halfwidths, default
-               mesh.BAND_EXTENT; give the mesh band the same), "lateral" (band
+               mesh.BAND_EXTENT; give the mesh band the same), "reach"
+              ([upper, lower] halfwidths from the centre, overriding
+              extent: an asymmetric band, joint_reach), "lateral" (band
               reach sideways in halfwidths, default LATERAL; see band_mask),
               "exclusive" (True: band vertices carry only the joint's bones; by
-              default other bones keep the heat weight they had there)}]; every bone a
+              default other bones keep the heat weight they had there),
+              "overlap" (True: the band may run into the band of the joint
+              above it on the same chain, whose lower bone is this joint's
+              upper bone; there its ramp splits that bone's share, CHAIN
+              COMPOSITION)}]; every bone a
               joint names must be in `bones`
     mode      "auto": heat + joint ramps; "heat": heat only; "rigid": every vertex
               100% on bones[0] (the old cut-out, for comparison)
@@ -129,21 +173,61 @@ def weight_matrix(verts, tris, outline, bones, joints=(), visibility=True):
         fixed = np.zeros(len(V), bool)
         target = W.copy()
         index = {b["name"]: i for i, b in enumerate(bones)}
-        for j in joints:
+        for j in chain_order(joints):
             m, ramp = joint_ramp(V, j, bones)
             cols = [index[j["upper"]], index[j["lower"]]] + ([index[j["helper"]]] if j.get("helper") else [])
-            if j.get("exclusive"):
-                target[m] = 0.0  # the band belongs to its joint's bones alone
-                mass = np.ones((int(m.sum()), 1))
+            if j.get("overlap"):
+                # a band that may run into the band above it on the same
+                # chain (the planted ankle into the knee's lower half): in
+                # the overlap its ramp splits whatever its upper bone holds
+                # there (chain composition, module doc); elsewhere as below
+                new = m & ~fixed
             else:
-                mass = target[m][:, cols].sum(1, keepdims=True)
-            target[np.ix_(m, cols)] = 0.0
-            target[np.ix_(m, cols[:2])] += mass * ramp[:, :2]
-            if j.get("helper"):
-                target[np.ix_(m, cols[2:])] += mass * ramp[:, 2:]
+                new = m
+            if j.get("exclusive"):
+                target[new] = 0.0  # the band belongs to its joint's bones alone
+                mass = np.ones((int(new.sum()), 1))
+            else:
+                mass = target[new][:, cols].sum(1, keepdims=True)
+            target[np.ix_(new, cols)] = 0.0
+            target[new, cols[0]] = mass[:, 0]
+            share = target[m, cols[0]].copy()[:, None]     # what the upper bone holds: all of it outside overlaps
+            target[m, cols[0]] = 0.0
+            if j.get("overlap") and j.get("compose", "upper") == "row":
+                # "row": the band's own bones take their ramp values of the
+                # WHOLE row and the bones already there (the upper bone, the
+                # band above) keep theirs, scaled by what is left (module
+                # doc, CHAIN COMPOSITION)
+                own = ramp[:, 1:]
+                rest = 1.0 - own.sum(1)
+                target[m] *= rest[:, None]
+                target[m, cols[0]] += share[:, 0] * rest
+                target[np.ix_(m, cols[1:])] += own
+            else:
+                target[np.ix_(m, cols[:2])] += share * ramp[:, :2]
+                if j.get("helper"):
+                    target[np.ix_(m, cols[2:])] += share * ramp[:, 2:]
             fixed |= m
         W = _solve(A, B, fixed, target[fixed]) if fixed.any() else W
     return _normalise(W, V, bones)
+
+
+def chain_order(joints):
+    """Joints with every joint whose lower bone is another's upper bone
+    first (hip before knee before ankle), otherwise in the given order: a
+    band that composes with the band above it (`overlap`) needs that band's
+    weights in place."""
+    joints = list(joints)
+    out, placed = [], set()
+    while joints:
+        for k, j in enumerate(joints):
+            if not any(o is not j and o["lower"] == j["upper"] for o in joints):
+                out.append(joints.pop(k))
+                break
+        else:  # a cycle (not a limb chain): keep the given order
+            out += joints
+            break
+    return out
 
 
 def prune_weights(W, names, max_influences=3, prune=0.02):
@@ -158,6 +242,59 @@ def prune_weights(W, names, max_influences=3, prune=0.02):
     return out
 
 
+def accessory_split(M, names, acc, parent, share, max_influences=3, prune=0.02):
+    """(x, no_room): the weight compose_accessory would move from `parent`
+    to `acc` per vertex, and the vertices that would need one bone more
+    than `max_influences` to take their share (they get x = 0).
+
+    The rules that keep it exact at rest: the accessory's part and the
+    parent's leftover are each either 0 or >= `prune` (a smaller part goes
+    to the other bone, which moves the same way at rest)."""
+    col = {n: i for i, n in enumerate(names)}
+    a, p = col[acc], col[parent]
+    share = np.clip(np.asarray(share, float), 0.0, 1.0)
+    wp = M[:, p].copy()
+    x = share * wp
+    x[x < prune] = 0.0                       # too little for the accessory: all stays on the parent
+    whole = (x > 0) & (wp - x < prune)       # too little left on the parent: all to the accessory
+    x[whole] = wp[whole]
+    used = (M >= prune).sum(1)
+    no_room = (x > 0) & (x < wp) & (M[:, a] < prune) & (used + 1 > max_influences)
+    x[no_room] = 0.0
+    return x, no_room
+
+
+def compose_accessory(M, names, acc, parent, share, max_influences=3, prune=0.02):
+    """Give accessory bone `acc` the fraction `share` (per vertex, 0..1) of
+    what its PARENT bone holds in M (N x B, columns `names`, rows summing
+    to 1), in place; returns the number of vertices that got any.
+
+    WHY (P2 review, ACCESSORIES): an accessory (a cuff, a pant hem: a
+    physics bone hanging from a limb bone) moves exactly like its parent
+    until physics or a key moves it, so weight moved from the parent to the
+    accessory changes nothing at rest or in any pose without physics: the
+    joint bands' fold and area guarantees hold whatever `share` is, and no
+    fade near a joint is needed for them. Taking the accessory's weight
+    from the whole vertex instead (helper and lower bone too) would pin
+    part of a band vertex to the upper bone and change how the joint bends,
+    which is why the old carry-over faded accessories out near every band;
+    scaled by the band's reach, that fade wiped the monkey's cuffs and pant
+    hems once the elbow and knee bands grew (A1/A2). Near a joint the
+    parent holds less, so the physics wiggle fades with the parent's share,
+    which is what the vertex follows.
+
+    Exact at rest by construction (accessory_split). A vertex never
+    exceeds `max_influences` (SOTA L8: 3): one with no room for another
+    bone keeps its share on the parent; a caller tapers the share toward
+    such vertices so the physics motion does not jump between neighbours
+    (rigbuild._carry_accessories)."""
+    x, _ = accessory_split(M, names, acc, parent, share, max_influences, prune)
+    col = {n: i for i, n in enumerate(names)}
+    M[:, col[acc]] += x
+    M[:, col[parent]] -= x
+    return int((x > 0).sum())
+
+
 def as_matrix(weights, names):
     """[[(name, w), ...]] -> (N, B) array in `names` order."""
     col = {n: i for i, n in enumerate(names)}
@@ -169,6 +306,25 @@ def as_matrix(weights, names):
 
 
 # ---------------------------------------------------------------- joint bands
+
+def joint_reach(joint):
+    """(upper, lower) px the band reaches from its centre along the axis,
+    toward the upper and the lower bone.
+
+    `reach` [upper, lower] in halfwidths, else `extent` both ways. WHY two
+    lengths: a band only has to be long where the art is wide for its
+    length. The elbow's sleeve side has a whole upper arm to spread over,
+    while the forearm side must stop before a rigid wrist or it bends the
+    hand (P2 A1); one symmetric extent has to pick between the two."""
+    hw = float(joint["halfwidth"])
+    if joint.get("reach") is not None:
+        up, lo = (float(v) for v in joint["reach"])
+    else:
+        up = lo = float(joint.get("extent", BAND_EXTENT))
+    if up <= 0 or lo <= 0:
+        raise ValueError(f"joint at {tuple(joint['center'])}: band reach must be > 0 both ways, not {(up, lo)}")
+    return up * hw, lo * hw
+
 
 def joint_frame(joint, bones):
     """(center, unit axis from upper toward lower, halfwidth, band half-length)."""
@@ -212,8 +368,12 @@ def band_mask(verts, joint, bones, strict=False):
     wider than LATERAL x halfwidth (a flared hem) would otherwise leave its
     outer vertices on heat weights next to ramped ones, and fold there."""
     s, lat = band_coords(verts, joint, bones)
-    _, _, hw, ext = joint_frame(joint, bones)
-    along = np.abs(s) < ext - END_TOL if strict else np.abs(s) <= ext + END_TOL
+    _, _, hw, _ = joint_frame(joint, bones)
+    up, lo = joint_reach(joint)
+    if strict:
+        along = (s > -up + END_TOL) & (s < lo - END_TOL)
+    else:
+        along = (s >= -up - END_TOL) & (s <= lo + END_TOL)
     return along & (lat <= float(joint.get("lateral", LATERAL)) * hw)
 
 
@@ -222,16 +382,18 @@ def joint_ramp(verts, joint, bones):
 
     ramp columns: [upper, lower] or, with a helper, [upper, lower, helper].
     t runs 0 -> 1 across the band; with a helper the ramp is piecewise:
-    upper -> helper over the first half, helper -> lower over the second, so
-    no vertex mixes more than two of the three ([E1] pw_mid)."""
+    upper -> helper over the upper half (centre - reach up .. centre),
+    helper -> lower over the lower half, so no vertex mixes more than two
+    of the three ([E1] pw_mid) and the helper owns the centre whatever the
+    two halves' lengths (joint_reach)."""
     m = band_mask(verts, joint, bones)
     s, _ = band_coords(np.asarray(verts, float).reshape(-1, 2)[m], joint, bones)
-    _, _, _, ext = joint_frame(joint, bones)
-    t = np.clip((s + ext) / (2 * ext), 0.0, 1.0)
+    up, lo = joint_reach(joint)
     if joint.get("helper"):
-        a = np.clip(2 * t, 0, 1)
-        b = np.clip(2 * t - 1, 0, 1)
+        a = np.clip((s + up) / up, 0, 1)
+        b = np.clip(s / lo, 0, 1)
         return m, np.stack([1 - a, b, a - b], 1)
+    t = np.clip((s + up) / (up + lo), 0.0, 1.0)
     return m, np.stack([1 - t, t], 1)
 
 

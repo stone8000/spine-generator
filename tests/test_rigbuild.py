@@ -248,6 +248,123 @@ def test_joint_modes_override_and_choice(layers_dir):
     assert "seam@a|b" in why["elbow_r"]
 
 
+def _template(**joints):
+    """biped_mascot with some joints' entries replaced (raw form, then expanded)."""
+    from spinegen import template as tmpl
+    with open(os.path.join(tmpl.TEMPLATE_DIR, "biped_mascot.json")) as f:
+        raw = json.load(f)
+    for name, spec in joints.items():
+        raw["joints"][name] = spec
+    return tmpl.expand(raw)
+
+
+SYMMETRIC_ELBOW = {"band": "both", "helper": "elbow_mid_{s}", "budget": "arm_{s}.elbow"}
+
+
+def test_elbow_band_reaches_up_the_sleeve_and_stops_at_the_wrist(layers_dir):
+    """The template's elbow band is asymmetric (reach 2.25 up the sleeve,
+    2 down the forearm); asked for more than the forearm holds, it stops
+    at the rigid wrist; a band with no reach in the template stays
+    symmetric (the measured default). The budget joint carries both
+    regions G2 reads: the band (band_center, extent = half its length),
+    where every triangle is range-checked, and the joint's fixed window
+    (2 halfwidths both ways here, whatever the reach), where the area is
+    summed (P2 review R1)."""
+    res = rigbuild.build(layers_dir, mode="joint")
+    bands = res["report"]["bands"]
+    assert bands["elbow_l"]["reach"] == [2.25, 2.0]
+    assert bands["shoulder_l"]["reach"][0] == bands["shoulder_l"]["reach"][1]   # no reach in the template
+    hw = bands["elbow_l"]["halfwidth"]
+    j = next(x for x in res["joints"]["joints"] if x["name"] == "elbow_l")["band"]
+    mid = np.asarray(j["center"]) + 0.5 * (2.0 - 2.25) * hw * np.asarray(j["axis"])
+    assert np.allclose(j["band_center"], mid) and j["extent"] == pytest.approx(2.125)
+    assert j["window"] == [2.0, 2.0]
+    longer = rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.5}}})
+    jl = next(x for x in longer["joints"]["joints"] if x["name"] == "elbow_l")["band"]
+    assert jl["extent"] == pytest.approx(2.75) and jl["window"] == j["window"]
+    # asking for a forearm half longer than the forearm: clipped at the wrist
+    with open(os.path.join(layers_dir, "joints.json")) as f:
+        jd = json.load(f)
+    elbow, wrist = (np.asarray(jd["joints"][k]["xy"], float) for k in ("elbow_l", "wrist_l"))
+    long = rigbuild.build(layers_dir, mode="joint",
+                          template=_template(**{"elbow_{s}": dict(SYMMETRIC_ELBOW, reach={"upper": 2, "lower": 9})}))
+    b = long["report"]["bands"]["elbow_l"]
+    d = float((wrist - elbow) @ np.asarray(b["axis"])) / b["halfwidth"]
+    assert b["reach"][1] == pytest.approx(d, abs=1e-3) and d < 9
+    assert any("stops at the joint wrist_l" in n for n in long["report"]["notes"])
+    # every vertex at or past the wrist (the synthetic forearm's art ends there) is 100% forearm
+    att = next(a for _, s, _, a in irmod.iter_attachments(long["ir"]) if s == "forearm_l")
+    V = np.asarray(att["vertices"], float).reshape(-1, 2)
+    wr = rigbuild.Canvas(json.load(open(os.path.join(layers_dir, "layers.json")))).to_world(wrist)
+    ax = np.array([b["axis"][0], -b["axis"][1]])
+    past = (V - wr) @ ax > -0.5
+    assert past.any() and all(att["weights"][i] == [["forearm_l", 1.0]] for i in np.flatnonzero(past))
+
+
+def test_neighbouring_bands_share_by_need(layers_dir):
+    """Two bands on one layer (shoulder and elbow on the upper arm): half
+    the gap each, but a band reaching less than its half leaves the rest to
+    the other (rigbuild.joint_bands)."""
+    def reaches(shoulder_lower, elbow_upper):
+        t = _template(**{"shoulder_{s}": {"band": "lower", "budget": "arm_{s}.shoulder",
+                                          "reach": {"upper": 2.0, "lower": shoulder_lower}},
+                         "elbow_{s}": dict(SYMMETRIC_ELBOW, reach={"upper": elbow_upper, "lower": 2.0})})
+        bands = rigbuild.build(layers_dir, mode="joint", template=t)["report"]["bands"]
+        sh, el = bands["shoulder_l"], bands["elbow_l"]
+        d = float(np.linalg.norm(np.subtract(sh["center"], el["center"])))
+        return sh["reach"][1] * sh["halfwidth"], el["reach"][0] * el["halfwidth"], d
+    sh, el, d = reaches(0.5, 50.0)           # a short shoulder band: the elbow takes the rest
+    assert sh + el == pytest.approx(d, abs=0.05) and el > 0.5 * d
+    sh, el, d = reaches(50.0, 50.0)          # both want more than the gap: half each
+    assert sh == pytest.approx(0.5 * d, abs=0.05) and el == pytest.approx(0.5 * d, abs=0.05)
+    sh, el, d = reaches(0.5, 1.0)            # room for both: neither changes
+    assert sh + el < d
+
+
+def test_template_elbow_holds_past_90_where_the_symmetric_band_stops(layers_dir, tmp_path):
+    """The template's elbow (2.25 halfwidths up the sleeve, 4 forearm rows,
+    3 points per row) holds more than 110 deg on the synthetic arm under
+    G2's per-triangle range and fixed window, where the old symmetric
+    2-halfwidth band without row points stopped at 90 deg on one fan
+    triangle of the upper arm (tri@upper_arm_l). P2 review R1: A1's 3.5
+    halfwidths up the sleeve reads no better than that old band once G2
+    sums the joint's window instead of the band (92 deg, by area)."""
+    from spinegen import budget
+    out = {}
+    long_elbow = dict(_template()["joints"]["elbow_l"], reach={"upper": 3.5, "lower": 2.0})
+    long_elbow = {k: v for k, v in long_elbow.items() if k != "side"}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**{"elbow_{s}": SYMMETRIC_ELBOW})),
+                    ("long", _template(**{"elbow_{s}": dict(long_elbow, helper="elbow_mid_{s}",
+                                                           budget="arm_{s}.elbow")}))):
+        res = rigbuild.build(layers_dir, mode="joint", template=t)
+        assert res["report"]["bands"]["elbow_l"]["window"] == [2.0, 2.0]  # the same window for all three
+        paths = rigbuild.write(str(tmp_path / name), res)
+        ir, images = raster.load_rig(paths["rig"]), raster.load_images(paths["atlas"])
+        b = budget.scan(ir, images, res["joints"], 4.0, 150.0, only={"elbow_l"})
+        out[name] = b["joints"]["elbow_l"]["+"]
+    assert out["old"]["soft"] <= 92 and out["old"]["limit_by"].startswith("tri@upper_arm")
+    assert out["new"]["soft"] >= 110
+    assert out["long"]["soft"] <= 96 and out["long"]["limit_by"].startswith("area@")
+
+
+def test_fit_reach_takes_the_shortest_reach_that_holds(layers_dir):
+    """fit_reach (P2 review R1) scans each candidate upper reach with the
+    budget, per joint, and takes the shortest that holds `need` both ways
+    (else the one that holds most); build(bands=...) applies it to that
+    joint alone, and the joint's G2 window does not move with it."""
+    bands, fit = rigbuild.fit_reach(layers_dir, candidates={"elbow_l": [2.25, 3.5]}, need=100.0, step=4.0,
+                                    mode="joint")
+    rows = fit["table"]["elbow_l"]
+    assert rows["2.25"]["min"] >= 100 > rows["3.5"]["min"]
+    assert fit["chosen"] == {"elbow_l": 2.25} and bands == {"elbow_l": {"reach": {"upper": 2.25}}}
+    res = rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.0}}})
+    assert res["report"]["bands"]["elbow_l"]["reach"] == [3.0, 2.0]
+    assert res["report"]["bands"]["elbow_r"]["reach"] == [2.25, 2.0]
+    assert res["report"]["bands"]["elbow_l"]["window"] == res["report"]["bands"]["elbow_r"]["window"]
+    with pytest.raises(ValueError, match="only"):
+        rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"helper": None}})
+
+
 # ---------------------------------------------------------------- feet
 
 def test_crouch_keeps_the_soles_planted(built):
@@ -267,6 +384,276 @@ def test_crouch_keeps_the_soles_planted(built):
     assert c["foot_slide"] <= 1e-6 and min(c["foot_vertices"].values()) > 2
     # the rigid comparison rig has the same skeleton, so the same planted soles
     assert rigbuild.crouch(built["rigid"]["ir"], 0.05 * ir["H"])["max_slide"] <= 1e-6
+
+
+LEG_OLD = {"knee_{s}": {"band": "both", "helper": "knee_mid_{s}", "budget": "leg_{s}.knee"},
+           "ankle_{s}": {"band": "both", "budget": "leg_{s}.ankle"}}
+
+
+@pytest.fixture(scope="module")
+def flared(layers_dir, tmp_path_factory):
+    """The synthetic character with a mascot's calf: the knees moved down
+    to 2.7 calf halfwidths above the ankles, and each trouser hem flared
+    28 px outward over its bottom 40 px (the monkey's calves are 2.1-2.8
+    halfwidths long and flare 1.9 halfwidths at the hem)."""
+    import shutil
+    from PIL import Image
+    d = str(tmp_path_factory.mktemp("flared") / "layers")
+    shutil.copytree(layers_dir, d)
+    with open(os.path.join(d, "layers.json")) as f:
+        doc = json.load(f)
+    pad, rows = 28, 40
+    for lay in doc["layers"]:
+        if lay["role"] not in ("shin_l", "shin_r"):
+            continue
+        path = os.path.join(d, "layers", lay["name"] + ".png")
+        im = np.array(Image.open(path).convert("RGBA"))
+        h, w = im.shape[:2]
+        out = np.zeros((h, w + 2 * pad, 4), np.uint8)
+        out[:, pad:pad + w] = im
+        paint = im[h // 2, w // 2]
+        for k in range(rows):                     # outward = away from the body's midline
+            ext = int(pad * (1 - k / rows))
+            if lay["role"] == "shin_l":
+                out[h - 1 - k, pad - ext:pad + 2] = paint
+            else:
+                out[h - 1 - k, pad + w - 2:pad + w + ext] = paint
+        Image.fromarray(out).save(path)
+        lay["x"] -= pad
+        lay["w"] += 2 * pad
+    with open(os.path.join(d, "layers.json"), "w") as f:
+        json.dump(doc, f)
+    with open(os.path.join(d, "joints.json")) as f:
+        jd = json.load(f)
+    for s in "lr":
+        jd["joints"][f"knee_{s}"]["xy"][1] = jd["joints"][f"ankle_{s}"]["xy"][1] - 110.0
+    with open(os.path.join(d, "joints.json"), "w") as f:
+        json.dump(jd, f)
+    return d
+
+
+def test_knee_and_planted_ankle_overlap_on_a_short_flared_calf(flared):
+    """P2 A2: the template's knee (1.5 halfwidths down the calf) and planted
+    ankle (2.4 up the shin) overlap and compose (weights CHAIN COMPOSITION)
+    instead of sharing the calf. On a short, flared calf a deep crouch
+    folds the shared bands and not the overlapping ones, and F1's
+    guarantees hold: knees outward and symmetric, whole foot and calf hems
+    0 px."""
+    folds = {}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**LEG_OLD))):
+        res = rigbuild.build(flared, mode="joint", template=t)
+        ir = res["ir"]
+        b = irmod.by_name(ir["bones"])
+        bands = res["report"]["bands"]
+        if name == "new":
+            # not shared: each reaches its own length (the ankle stops at the knee)
+            assert bands["knee_l"]["reach"] == [2.0, 1.5]
+            calf = float(np.linalg.norm(np.subtract(bands["knee_l"]["pivot"], bands["ankle_l"]["pivot"])))
+            ankle = 2 * bands["ankle_l"]["reach"][0] * bands["ankle_l"]["halfwidth"]
+            assert ankle + 1.5 * bands["knee_l"]["halfwidth"] > calf
+            # three influences at most where they overlap, and some vertex has all three
+            att = next(a for _, s, _, a in irmod.iter_attachments(ir) if s == "calf_l")
+            assert max(len(r) for r in att["weights"]) == 3
+            assert any({n for n, _ in r} == {"knee_mid_l", "shin_l", "foot_l"} for r in att["weights"])
+        for f in (0.08, 0.10):
+            pose = {"hips": {"y": b["hips"]["y"] - f * ir["H"]}}
+            folds[name, f] = lbs.Evaluator(ir).folds(pose=pose)["folds"]
+            if name == "new":
+                c = rigbuild.crouch(ir, f * ir["H"])
+                assert c["knees_ok"] and c["foot_slide"] <= 1e-6 and c["shin_bottom_slide"] <= 1e-6
+    assert folds["new", 0.08] == 0 and folds["old", 0.08] >= 4
+    assert folds["new", 0.10] <= folds["old", 0.10] / 4
+
+
+CUFF_FULL, CUFF_NONE = 100.0, 120.0  # px above the elbow: 100% cuff below FULL, none above NONE
+PANT_FULL, PANT_NONE = 90.0, 130.0  # px above the knee: the same for the pant hem on the left thigh
+
+
+def _physics(bone, order):
+    """A monkey-like physics constraint on `bone` (its cuffs' values)."""
+    return {"name": f"{bone}_phys", "order": order, "skin_required": False, "bone": bone, "x": 0.0, "y": 0.0,
+            "rotate": 1.0, "scale_x": 0.0, "shear_x": 0.0, "limit": 5000.0, "fps": 60.0, "inertia": 0.28,
+            "strength": 230.0, "damping": 0.82, "mass": 1.0, "wind": 0.0, "gravity": 0.0, "mix": 1.0,
+            "global": {k: False for k in ("inertia", "strength", "damping", "mass", "wind", "gravity", "mix")},
+            "spring": None, "runs": True}
+
+
+@pytest.fixture(scope="module")
+def cuffed(tmp_path_factory):
+    """The synthetic source with monkey-style accessories: cuff_l under
+    upperarm_l and pant_l under thigh_l, each with a physics constraint;
+    the left sleeve is 100% cuff from the elbow up to CUFF_FULL px and 100%
+    upper arm above CUFF_NONE px (the monkey's sleeves: 100% cuffL over
+    their lower half), the left thigh likewise 100% pant up to PANT_FULL px
+    above the knee. Returns the layers dir and the elbow's and knee's
+    world y."""
+    ir, images = _source()
+    b = irmod.by_name(ir["bones"])
+    ev = lbs.Evaluator(ir)
+    w = ev.world_dict(ev.world())
+    ends = {}
+    for acc, parent, slot, child, full, none in (("cuff_l", "upperarm_l", "upper_arm_l", "forearm_l", CUFF_FULL,
+                                                  CUFF_NONE),
+                                                 ("pant_l", "thigh_l", "thigh_l", "calf_l", PANT_FULL, PANT_NONE)):
+        ir["bones"].insert(irmod.bone_index(ir)[parent] + 1,
+                           irmod.new_bone(acc, parent, 0.0, 0.0, 0.0, b[parent]["length"]))
+        y_j = ends[acc] = float(w[child][5])
+        att = ir["skins"][0]["attachments"][slot][slot]
+        rows = []
+        for x, y in att["vertices"]:
+            t = float(np.clip((y - y_j - full) / (none - full), 0.0, 1.0))  # 0 accessory .. 1 parent
+            rows.append([[n, v] for n, v in ((acc, 1.0 - t), (parent, t)) if v > 0])
+        att["weights"] = rows
+        ir["physics"].append(_physics(acc, len(ir["transform"]) + len(ir["ik"]) + len(ir["physics"])))
+    assert not irmod.validate(ir)
+    d = tmp_path_factory.mktemp("cuffed")
+    spine42.write(ir, str(d / "synth.json"))
+    at, _ = atlas.write(str(d / "synth.atlas"), images)
+    ingest_spine.unpack(str(d / "synth.json"), at, str(d / "layers"))
+    return str(d / "layers"), ends["cuff_l"], ends["pant_l"]
+
+
+def test_accessory_weights_ride_on_their_parent(cuffed, tmp_path):
+    """P2 review (A2_no_regression_secondary_motion): an elbow band of 3.5
+    halfwidths (126 px, A1's template) runs up the sleeve over the whole cuff.
+    The old carry-over faded accessory weights out over each band's reach
+    and left the cuff almost nothing; now the cuff takes its source share
+    of whatever the upper arm holds, so it keeps every sleeve vertex it had
+    (100% of the upper arm's share inside CUFF_FULL), the joint bends
+    exactly as without it (rest-exact: the cuff moves like its parent), and
+    its physics moves the sleeve in the official runtime."""
+    d, y_el, _ = cuffed
+    res = rigbuild.build(d, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.5}}})
+    ir = res["ir"]
+    acc = res["report"]["accessories"]
+    assert acc["ok"] and acc["bones"]["cuff_l"]["physics"] and acc["bones"]["cuff_l"]["vertices"] > 0
+    att = next(a for _, s, _, a in irmod.iter_attachments(ir) if s == "upper_arm_l")
+    up = res["report"]["bands"]["elbow_l"]["reach"][0] * res["report"]["bands"]["elbow_l"]["halfwidth"]
+    assert up >= CUFF_NONE  # the band covers the whole cuff: the case the fade emptied
+    rows = [dict((n, x) for n, x in r) for r in att["weights"]]
+    above = np.array([y - y_el for _, y in att["vertices"]])
+    inside = [r for r, a in zip(rows, above) if 2.0 < a < CUFF_FULL - 10.0]
+    assert inside and all("upperarm_l" not in r for r in inside)           # the whole upper-arm share
+    assert sum(r.get("cuff_l", 0.0) for r in inside) > 0.2 * len(inside)
+    assert all("cuff_l" not in r for r, a in zip(rows, above) if a > CUFF_NONE + 10.0)
+    assert all(len(r) <= 3 for r in rows)
+    # rest-exact: the same rig with the cuff merged back into its parent
+    # poses every vertex identically (no physics in lbs)
+    merged = json.loads(json.dumps(ir))
+    for _, s, _, a in irmod.iter_attachments(merged):
+        if a.get("weights"):
+            a["weights"] = [[[{"cuff_l": "upperarm_l", "pant_l": "thigh_l"}.get(n, n), x] for n, x in r]
+                            for r in a["weights"]]
+    pose = {"forearm_l": {"rotation": 100.0}, "upperarm_l": {"rotation": -30.0},
+            "hips": {"y": -0.1 * ir["H"]}}
+    for slot in ("upper_arm_l", "thigh_l"):
+        got = []
+        for rig in (ir, merged):
+            ev = lbs.Evaluator(rig)
+            got.append(ev.attachment_vertices(ev.world(pose), slot, dict(ev.shown())[slot]))
+        assert np.abs(got[0] - got[1]).max() < 1e-9
+    from spinegen import oracle
+    ok, why = oracle.available()
+    if not ok:
+        pytest.skip(f"runtime oracle unavailable: {why}")
+    paths = rigbuild.write(str(tmp_path / "rig"), res)
+    moved = []
+    for phys in ("update", "none"):
+        fr = oracle.dump(paths["skeleton"], paths["atlas"], anim="wave", fps=60, physics=phys)["frames"]
+        moved.append(np.stack([np.asarray(f["slots"]["upper_arm_l"]["vertices"]).reshape(-1, 2) for f in fr]))
+    assert np.linalg.norm(moved[0] - moved[1], axis=-1).max() > 1.0  # the cuff's physics moves the sleeve
+
+
+def test_accessory_tapers_toward_vertices_with_no_room(cuffed):
+    """P2 review: a thigh vertex in the knee band's overlap with the hip
+    band already has three bones (hips, thigh, knee helper), so L8 leaves
+    no room for the pant hem and its share stays on the thigh. A
+    neighbour with room must not then take a whole share: two vertices 11
+    px apart moving 0 and 0.47 x the pant's swing flipped the monkey's
+    sliver triangle across the thigh in cheer. The share tapers to 0 over
+    ACC_TAPER halfwidths toward such vertices. A knee band reaching 3
+    halfwidths up the thigh makes the overlap wide here."""
+    d, _, y_kn = cuffed
+    knee = {"band": "both", "helper": "knee_mid_{s}", "budget": "leg_{s}.knee",
+            "reach": {"upper": 3.0, "lower": 1.5}, "overlap": True}
+    res = rigbuild.build(d, mode="joint", template=_template(**{"knee_{s}": knee}))
+    ir = res["ir"]
+    att = next(a for _, s, _, a in irmod.iter_attachments(ir) if s == "thigh_l")
+    rows = [dict((n, x) for n, x in r) for r in att["weights"]]
+    assert all(len(r) <= 3 for r in rows)
+    v = np.asarray(att["vertices"], float)
+    above = v[:, 1] - y_kn
+    stuck = [i for i, r in enumerate(rows) if len(r) == 3 and "pant_l" not in r and "thigh_l" in r
+             and 5.0 < above[i] < PANT_NONE - 5.0]
+    assert stuck, "the fixture must have vertices with no room inside the pant hem"
+    hw = min(res["report"]["bands"][j]["halfwidth"] for j in ("hip_l", "knee_l"))
+    T = np.asarray(att["triangles"]).reshape(-1, 3)
+    for i in stuck:
+        for j in set(T[(T == i).any(1)].ravel()) - {i}:
+            r = rows[j]
+            share = r.get("pant_l", 0.0) / max(r.get("pant_l", 0.0) + r.get("thigh_l", 0.0), 1e-9)
+            assert share <= np.linalg.norm(v[i] - v[j]) / (rigbuild.ACC_TAPER * hw) + 1e-9, (i, j, share)
+    assert res["report"]["accessories"]["bones"]["pant_l"]["vertices"] > 0
+
+
+def test_band_above_an_overlap_keeps_its_share(layers_dir):
+    """The knee overlaps the hip band (template "overlap") and keeps the
+    reach the template asks for (2 halfwidths up the thigh); the hip band,
+    which asks for none, still stops at its half of the gap as before P2
+    A2, instead of growing to the full 2-halfwidth default over most of
+    the thigh (the monkey: 1.14 -> 2.0 halfwidths, 118 of 134 px)."""
+    res = rigbuild.build(layers_dir, mode="joint")
+    bands = res["report"]["bands"]
+    hip, knee = bands["hip_l"], bands["knee_l"]
+    d = float(np.linalg.norm(np.subtract(hip["pivot"], knee["pivot"])))
+    assert knee["reach"] == [2.0, 1.5]
+    want = max(0.5 * d, d - knee["reach"][0] * knee["halfwidth"]) / hip["halfwidth"]
+    assert hip["reach"] == pytest.approx([want, want], abs=1e-3) and want < 2.0
+
+
+ANKLE_UPPER_24 = {"ankle_{s}": {"band": "both", "budget": "leg_{s}.ankle", "reach": {"upper": 2.4, "lower": 2.4},
+                                 "overlap": True}}
+
+
+def test_crouch_with_the_weight_shifted_does_not_fold_the_flared_calf(flared):
+    """P2 review (A2_robust_to_weight_shift): a crouch that also moves the
+    hips sideways bends one ankle much more than the other (the monkey's
+    right ankle: 44 deg straight down at 0.10 H, 60 deg with the hips 40 px
+    over). The template's ankle runs the whole calf and composes by row
+    (weights CHAIN COMPOSITION: foot = the ankle ramp's t outright), so the
+    foot's weight falls off evenly up the flared calf. A2's ankle (2.4
+    halfwidths, foot = t x the shin's share) folds there."""
+    folds = {}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**ANKLE_UPPER_24))):
+        ir = rigbuild.build(flared, mode="joint", template=t)["ir"]
+        b = irmod.by_name(ir["bones"])
+        for f in (0.08, 0.10):
+            for dx in (-40.0, -20.0, 0.0, 20.0, 40.0):
+                pose = {"hips": {"x": b["hips"]["x"] + dx, "y": b["hips"]["y"] - f * ir["H"]}}
+                folds[name, f, dx] = lbs.Evaluator(ir).folds(pose=pose)["folds"]
+    assert all(v == 0 for (n, _, _), v in folds.items() if n == "new"), folds
+    assert sum(v for (n, _, _), v in folds.items() if n == "old") >= 5, folds
+    with pytest.raises(ValueError, match="compose"):
+        rigbuild.build(flared, mode="joint", template=_template(
+            **{"ankle_{s}": dict(ANKLE_UPPER_24["ankle_{s}"], compose="take")}))
+
+
+def test_straighten_moves_the_joint_the_template_names(layers_dir, kinked):
+    """ik "straighten": which joint goes onto the hip-ankle line when the
+    setup leg is kinked against the knee rule (default the knee; the A2
+    study also tried the ankle and the hip). Either way the setup leg is
+    reproduced and the knee bends outward."""
+    for how in ("ankle", "hip"):
+        t = _template()
+        for ik in t["ik"]:
+            ik["straighten"] = how
+        res = rigbuild.build(layers_dir, joints=kinked["joints"], mode="joint", template=t, recenter=False)
+        rep = res["report"]["ik"]
+        moved = {r["straightened_joint"] for r in rep.values() if r["straightened_px"] > 0}
+        assert moved and all(j.startswith("ankle_" if how == "ankle" else "hip_") for j in moved)
+        # a fully straight leg is the IK's singular pose: 0.009 px with the ankle moved
+        assert all(r["setup_error_px"] <= 0.05 for r in rep.values())
+        assert rigbuild.crouch(res["ir"], 0.05 * res["ir"]["H"])["knees_ok"]
 
 
 def _knees_and_foot(ir, depth):

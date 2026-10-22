@@ -82,17 +82,23 @@ THE LEAN OPTIONS (what spinegen.rigbuild uses by default)
                         eps into it, so coverage stays what it was;
     band_slivers=deg    optional: medial-axis points next to the thin
                         triangles near a band (_medial_points).
-  The monkey's lean joint rig: 582 vertices (0.48x the grid), B2 0.98, 0
-  folds over all its animations in spine-core, elbows 98-110 deg on the
-  band's summed area but 58-78 deg with G2's per-triangle range [0.3, 3]
-  (P2 review F3): the first triangle out of range is a long fan from the
-  crook's outline vertex into the sleeve. That is close to what ANY mesh
-  can do there: a piecewise-linear helper ramp of half-length 2 halfwidths
-  squeezes art 1.6 halfwidths off the axis to 0.27 of its area at 90 deg
-  in the continuum (0.35 at 80). Measured levers (P2_REPORT): interior
-  row points 76-90 deg at 0.69x the grid, band_slivers=10 58-90 at 0.56x,
-  4 rows 68-88, a 3-halfwidth band 62-96 (it bends the hand), the helper
-  taking 40% of the turn 56-88.
+  The monkey's lean joint rig with symmetric 2-halfwidth bands: 582
+  vertices (0.48x the grid), elbows 98-110 deg on the band's summed area
+  but 58-78 deg with G2's per-triangle range [0.3, 3] (P2 review F3): the
+  first triangle out of range is a long fan from the crook's outline
+  vertex into the sleeve. A piecewise-linear helper ramp of half-length e
+  squeezes art y off the axis to ~cos^2(D/4) - sin(D/2) y/e of its area,
+  and the sleeve's art reaches 1.3-2.3 halfwidths off the axis. What
+  fixed it is the band's shape, per joint from the template: 4 rows on
+  the forearm half and 3 interior points per row ("row_points", on top of
+  row_points="ends"), which cut the fans, and a sleeve-side "reach" fitted
+  per elbow (rigbuild.fit_reach: 2.5 and 2.25 halfwidths; the forearm
+  half stops at the wrist): 96/92/98/90 deg at 637 vertices (0.53x the
+  grid), G2 summed over the joint's fixed window (P2 review R1; A1's 3.5
+  halfwidths read 106/92/108/94 over its own, longer band and 98/92/108/80
+  over the window). Other levers measured (P2_REPORT): interior points on
+  every row 76-90 at 0.69x, band_slivers=10 58-90 at 0.56x, a symmetric
+  3-halfwidth band 62-96 (it bends the hand 12-22 px).
 
 COORDINATES
   Layer pixels are image space: x right, y down, pixel (i, j) covers
@@ -142,10 +148,15 @@ def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None, outl
     bands     [{"center": (x, y), "axis": (dx, dy), "halfwidth": px,
                 "rows": per half band (default BAND_ROWS),
                 "extent": half-length along the axis in halfwidths (default BAND_EXTENT),
+                "reach": optional [upper, lower] halfwidths from the center (an
+                asymmetric band; overrides extent, band_reach),
                 "offsets": optional explicit row positions in [-1, 1] (fractions of
-                the half-length; overrides rows)}] in canvas coordinates; rows of
-              vertices perpendicular to `axis` go at row_offsets(rows) * extent *
-              halfwidth from the center, each from outline to outline
+                each half's reach; overrides rows),
+                "row_points": with row_points="ends", this band's rows still get
+                that many evenly spaced interior points (the row a chain of
+                constrained edges through them)}] in canvas coordinates; rows of
+              vertices perpendicular to `axis` go at band_row_positions() from the
+              center, each from outline to outline
     eps       approxPolyDP tolerance in px (with outline="adaptive", the floor)
     min_angle refinement target in degrees (CDT smallest-angle criterion; 0: none)
     max_area  optional largest triangle area in px^2
@@ -187,7 +198,7 @@ def build(alpha, origin, bands=(), eps=1.75, min_angle=28.0, max_area=None, outl
     bands = list(bands)
     if row_points == "ends":
         loops, interior, row_pts, side = _band_points(loops, bands, origin, ends_only=True)
-        row_edges = [(r[0], r[1]) for b in row_pts for r in b if len(r) >= 2] + side
+        row_edges = [e for b in row_pts for r in b if len(r) >= 2 for e in _row_chain(r, interior)] + side
     else:
         loops, interior, row_pts = _band_points(loops, bands, origin)
         row_edges = []
@@ -287,6 +298,35 @@ def row_offsets(rows):
         raise ValueError("a band needs at least one row per half")
     half = np.arange(1, rows + 1) / rows          # (0, 1]: slice boundaries of one half, end included
     return np.concatenate([-half[::-1], [-CENTER_PAIR, CENTER_PAIR], half])
+
+
+def band_reach(band):
+    """(upper, lower) px a band reaches from its centre along its axis:
+    "reach" [upper, lower] in halfwidths, else "extent" both ways (the
+    same rule as weights.joint_reach, which the weights must agree with)."""
+    hw = float(band["halfwidth"])
+    if band.get("reach") is not None:
+        up, lo = (float(v) for v in band["reach"])
+    else:
+        up = lo = float(band.get("extent", BAND_EXTENT))
+    return up * hw, lo * hw
+
+
+def band_row_positions(band):
+    """Row positions (px along the axis from the band centre, sorted) of
+    one band: row_offsets() scaled by each half's own reach, or explicit
+    "offsets" (fractions of each half's reach). "rows" may be one count
+    for both halves or [upper, lower]: a long half keeps its rows about as
+    far apart as the short one's (an asymmetric band, band_reach)."""
+    up, lo = band_reach(band)
+    if band.get("offsets") is not None:
+        o = np.sort(np.asarray(band["offsets"], float))
+        return np.where(o < 0, o * up, o * lo)
+    rows = band.get("rows", BAND_ROWS)
+    ru, rl = (rows, rows) if np.ndim(rows) == 0 else rows
+    neg = row_offsets(ru)
+    pos = row_offsets(rl)
+    return np.concatenate([neg[neg < 0] * up, pos[pos > 0] * lo])
 
 
 def min_angles(verts, tris):
@@ -550,16 +590,14 @@ def _band_points(loops, bands, origin, ends_only=False):
         a = a / np.linalg.norm(a)
         nrm = np.array([-a[1], a[0]])
         hw = float(band["halfwidth"])
-        ext = float(band.get("extent", BAND_EXTENT)) * hw
-        if band.get("offsets") is not None:
-            offs = np.sort(np.asarray(band["offsets"], float)) * ext
-        else:
-            offs = row_offsets(band.get("rows", BAND_ROWS)) * ext
+        offs = band_row_positions(band)
+        ext = 0.5 * float(offs[-1] - offs[0])
         gap = max(2.0 * ext / max(len(offs) - 1, 1), 0.5 * hw)  # spacing along a row ~ spacing between rows
         band_rows = []
+        k = int(band.get("row_points", 0) or 0) if ends_only else 0
         for s in offs:
             band_rows.append(_row(loops, c + s * a, nrm, math.inf if ends_only else gap, inserts, interior,
-                                  side if ends_only else None))
+                                  side if ends_only else None, count=k or None))
         rows.append(band_rows)
     landed = {}
     out = [_splice(lp, ins, li > 0, landed) for li, (lp, ins) in enumerate(zip(loops, inserts))]
@@ -571,7 +609,17 @@ def _band_points(loops, bands, origin, ends_only=False):
     return out, interior, rows
 
 
-def _row(loops, p0, nrm, gap, inserts, interior, side=None):
+def _row_chain(row, interior):
+    """Constrained edges of one "ends" row: its two outline points joined
+    through the interior points it kept (_clear_points may drop some), in
+    order along the row (_row lists them that way)."""
+    kept = {tuple(p) for p in np.asarray(interior, float).reshape(-1, 2).tolist()}
+    mid = [p for p in row[2:] if tuple(np.asarray(p, float).tolist()) in kept]
+    chain = [row[0]] + mid + [row[1]]
+    return list(zip(chain[:-1], chain[1:]))
+
+
+def _row(loops, p0, nrm, gap, inserts, interior, side=None, count=None):
     """One row across the limb through p0 along nrm. Its two outline
     crossings are queued for splicing (returned as insert ids), its interior
     points appended to `interior` (returned as points). With `side` (a
@@ -615,7 +663,10 @@ def _row(loops, p0, nrm, gap, inserts, interior, side=None):
         ident = sum(len(x) for x in inserts)
         inserts[li].append((k, u, p0 + t * nrm, ident))
         pts.append(ident)
-    m = max(1, int(round((t1 - t0) / gap))) if math.isfinite(gap) else 1
+    if count:
+        m = int(count) + 1  # a band's own "row_points": that many evenly spaced interior points
+    else:
+        m = max(1, int(round((t1 - t0) / gap))) if math.isfinite(gap) else 1
     for j in range(1, m):
         p = p0 + (t0 + (t1 - t0) * j / m) * nrm
         interior.append(p)
@@ -724,12 +775,13 @@ def _medial_points(tv, tt, bands, origin, dt, min_deg, interior, loops):
         a = np.asarray(b["axis"], float)
         a = a / np.linalg.norm(a)
         hw = float(b["halfwidth"])
-        reach = (float(b.get("extent", BAND_EXTENT)) + BAND_SLIVER_MARGIN) * hw
+        up, lo = band_reach(b)
+        lo_s, hi_s = -up - BAND_SLIVER_MARGIN * hw, lo + BAND_SLIVER_MARGIN * hw
         s = (tv[tt] - c) @ a
-        hit = (np.abs(s) <= reach).any(1)
+        hit = ((s >= lo_s) & (s <= hi_s)).any(1)
         near |= hit
         hws.append(hw)
-        zones.append((c, a, reach))
+        zones.append((c, a, lo_s, hi_s))
     hw = float(np.median(hws))
     bad = np.nonzero(near & (ang < min_deg))[0]
     if not len(bad):
@@ -748,7 +800,7 @@ def _medial_points(tv, tt, bands, origin, dt, min_deg, interior, loops):
             continue
         k = np.unravel_index(int(np.argmax(win)), win.shape)
         p = np.array([j0 + k[1] + 0.5, i0 + k[0] + 0.5]) - PAD
-        if not any(abs((p - c) @ a) <= reach for c, a, reach in zones):
+        if not any(lo_s <= (p - c) @ a <= hi_s for c, a, lo_s, hi_s in zones):
             continue
         if any(np.linalg.norm(p - q) < space for q in taken + out):
             continue
@@ -772,8 +824,18 @@ def _triangulate(loops, interior, min_angle, max_area, extra_edges=(), constrain
         n = len(lp)
         edges += [(base + i, base + (i + 1) % n) for i in range(n)]
         base += n
+    # one vertex per position: a hole whose outline touches the outer
+    # outline at a pixel corner (seen on the mirrored monkey's art) gives
+    # both loops the same point, and the CDT refuses duplicate vertices;
+    # the shared vertex is a pinch that both loops' edges use
+    pts, first, back = np.unique(pts, axis=0, return_index=True, return_inverse=True)
+    keep = np.argsort(first)                       # in first-seen order: the outline stays first
+    rank = np.empty(len(keep), np.int64)
+    rank[keep] = np.arange(len(keep))
+    pts, back = pts[keep], rank[back.ravel()]
+    edges = list(dict.fromkeys((int(back[a]), int(back[b])) for a, b in edges if back[a] != back[b]))
     if len(extra_edges):
-        where = {tuple(p): i for i, p in enumerate(pts[:base].tolist())}
+        where = {tuple(p): i for i, p in enumerate(pts.tolist())}
         for a, b in extra_edges:
             ia, ib = where.get(tuple(np.asarray(a, float).tolist())), where.get(tuple(np.asarray(b, float).tolist()))
             if ia is not None and ib is not None and ia != ib:
