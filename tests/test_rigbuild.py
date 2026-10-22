@@ -269,7 +269,8 @@ def test_elbow_band_reaches_up_the_sleeve_and_stops_at_the_wrist(layers_dir):
     (band_center, extent = half its length)."""
     res = rigbuild.build(layers_dir, mode="joint")
     bands = res["report"]["bands"]
-    assert bands["elbow_l"]["reach"] == [3.5, 2.0] and bands["knee_l"]["reach"][0] == bands["knee_l"]["reach"][1]
+    assert bands["elbow_l"]["reach"] == [3.5, 2.0]
+    assert bands["shoulder_l"]["reach"][0] == bands["shoulder_l"]["reach"][1]   # no reach in the template
     hw = bands["elbow_l"]["halfwidth"]
     j = next(x for x in res["joints"]["joints"] if x["name"] == "elbow_l")["band"]
     mid = np.asarray(j["center"]) + 0.5 * (2.0 - 3.5) * hw * np.asarray(j["axis"])
@@ -283,7 +284,7 @@ def test_elbow_band_reaches_up_the_sleeve_and_stops_at_the_wrist(layers_dir):
     b = long["report"]["bands"]["elbow_l"]
     d = float((wrist - elbow) @ np.asarray(b["axis"])) / b["halfwidth"]
     assert b["reach"][1] == pytest.approx(d, abs=1e-3) and d < 9
-    assert any("stops at the rigid joint wrist_l" in n for n in long["report"]["notes"])
+    assert any("stops at the joint wrist_l" in n for n in long["report"]["notes"])
     # every vertex at or past the wrist (the synthetic forearm's art ends there) is 100% forearm
     att = next(a for _, s, _, a in irmod.iter_attachments(long["ir"]) if s == "forearm_l")
     V = np.asarray(att["vertices"], float).reshape(-1, 2)
@@ -349,6 +350,103 @@ def test_crouch_keeps_the_soles_planted(built):
     assert c["foot_slide"] <= 1e-6 and min(c["foot_vertices"].values()) > 2
     # the rigid comparison rig has the same skeleton, so the same planted soles
     assert rigbuild.crouch(built["rigid"]["ir"], 0.05 * ir["H"])["max_slide"] <= 1e-6
+
+
+LEG_OLD = {"knee_{s}": {"band": "both", "helper": "knee_mid_{s}", "budget": "leg_{s}.knee"},
+           "ankle_{s}": {"band": "both", "budget": "leg_{s}.ankle"}}
+
+
+@pytest.fixture(scope="module")
+def flared(layers_dir, tmp_path_factory):
+    """The synthetic character with a mascot's calf: the knees moved down
+    to 2.7 calf halfwidths above the ankles, and each trouser hem flared
+    28 px outward over its bottom 40 px (the monkey's calves are 2.1-2.8
+    halfwidths long and flare 1.9 halfwidths at the hem)."""
+    import shutil
+    from PIL import Image
+    d = str(tmp_path_factory.mktemp("flared") / "layers")
+    shutil.copytree(layers_dir, d)
+    with open(os.path.join(d, "layers.json")) as f:
+        doc = json.load(f)
+    pad, rows = 28, 40
+    for lay in doc["layers"]:
+        if lay["role"] not in ("shin_l", "shin_r"):
+            continue
+        path = os.path.join(d, "layers", lay["name"] + ".png")
+        im = np.array(Image.open(path).convert("RGBA"))
+        h, w = im.shape[:2]
+        out = np.zeros((h, w + 2 * pad, 4), np.uint8)
+        out[:, pad:pad + w] = im
+        paint = im[h // 2, w // 2]
+        for k in range(rows):                     # outward = away from the body's midline
+            ext = int(pad * (1 - k / rows))
+            if lay["role"] == "shin_l":
+                out[h - 1 - k, pad - ext:pad + 2] = paint
+            else:
+                out[h - 1 - k, pad + w - 2:pad + w + ext] = paint
+        Image.fromarray(out).save(path)
+        lay["x"] -= pad
+        lay["w"] += 2 * pad
+    with open(os.path.join(d, "layers.json"), "w") as f:
+        json.dump(doc, f)
+    with open(os.path.join(d, "joints.json")) as f:
+        jd = json.load(f)
+    for s in "lr":
+        jd["joints"][f"knee_{s}"]["xy"][1] = jd["joints"][f"ankle_{s}"]["xy"][1] - 110.0
+    with open(os.path.join(d, "joints.json"), "w") as f:
+        json.dump(jd, f)
+    return d
+
+
+def test_knee_and_planted_ankle_overlap_on_a_short_flared_calf(flared):
+    """P2 A2: the template's knee (1.5 halfwidths down the calf) and planted
+    ankle (2.4 up the shin) overlap and compose (weights CHAIN COMPOSITION)
+    instead of sharing the calf. On a short, flared calf a deep crouch
+    folds the shared bands and not the overlapping ones, and F1's
+    guarantees hold: knees outward and symmetric, whole foot and calf hems
+    0 px."""
+    folds = {}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**LEG_OLD))):
+        res = rigbuild.build(flared, mode="joint", template=t)
+        ir = res["ir"]
+        b = irmod.by_name(ir["bones"])
+        bands = res["report"]["bands"]
+        if name == "new":
+            # not shared: each reaches its own length (the ankle stops at the knee)
+            assert bands["knee_l"]["reach"] == [2.0, 1.5]
+            calf = float(np.linalg.norm(np.subtract(bands["knee_l"]["pivot"], bands["ankle_l"]["pivot"])))
+            ankle = 2 * bands["ankle_l"]["reach"][0] * bands["ankle_l"]["halfwidth"]
+            assert ankle + 1.5 * bands["knee_l"]["halfwidth"] > calf
+            # three influences at most where they overlap, and some vertex has all three
+            att = next(a for _, s, _, a in irmod.iter_attachments(ir) if s == "calf_l")
+            assert max(len(r) for r in att["weights"]) == 3
+            assert any({n for n, _ in r} == {"knee_mid_l", "shin_l", "foot_l"} for r in att["weights"])
+        for f in (0.08, 0.10):
+            pose = {"hips": {"y": b["hips"]["y"] - f * ir["H"]}}
+            folds[name, f] = lbs.Evaluator(ir).folds(pose=pose)["folds"]
+            if name == "new":
+                c = rigbuild.crouch(ir, f * ir["H"])
+                assert c["knees_ok"] and c["foot_slide"] <= 1e-6 and c["shin_bottom_slide"] <= 1e-6
+    assert folds["new", 0.08] == 0 and folds["old", 0.08] >= 4
+    assert folds["new", 0.10] <= folds["old", 0.10] / 4
+
+
+def test_straighten_moves_the_joint_the_template_names(layers_dir, kinked):
+    """ik "straighten": which joint goes onto the hip-ankle line when the
+    setup leg is kinked against the knee rule (default the knee; the A2
+    study also tried the ankle and the hip). Either way the setup leg is
+    reproduced and the knee bends outward."""
+    for how in ("ankle", "hip"):
+        t = _template()
+        for ik in t["ik"]:
+            ik["straighten"] = how
+        res = rigbuild.build(layers_dir, joints=kinked["joints"], mode="joint", template=t, recenter=False)
+        rep = res["report"]["ik"]
+        moved = {r["straightened_joint"] for r in rep.values() if r["straightened_px"] > 0}
+        assert moved and all(j.startswith("ankle_" if how == "ankle" else "hip_") for j in moved)
+        # a fully straight leg is the IK's singular pose: 0.009 px with the ankle moved
+        assert all(r["setup_error_px"] <= 0.05 for r in rep.values())
+        assert rigbuild.crouch(res["ir"], 0.05 * res["ir"]["H"])["knees_ok"]
 
 
 def _knees_and_foot(ir, depth):

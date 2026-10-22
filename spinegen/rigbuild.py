@@ -65,7 +65,7 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            sleeve and 2 down the forearm), shortened so neighbouring bands
            on one bone never overlap (half the gap each, unless one needs
            less) and so no band runs past a rigid joint down its lower bone
-           (_stop_at_rigid_joints: the elbow stops at the wrist, the hand
+           (_stop_at_joints: the elbow stops at the wrist, the hand
            stays rigid). A joint's "rows" and "row_points" shape its rows
            (mesh.build). The ankle of a PLANTED foot is one-sided: its band runs
            from the ankle up the shin (the upper half of the band it would
@@ -465,11 +465,18 @@ class _Builder:
             n = _knee_normal(hip, ankle, want)
             off = float((knee - hip) @ n)
             if off < -KNEE_TOL:
-                j = self.bones[shin]["joint"]
-                self.jxy[j] = self.jxy[j] + self.cv.dir_to_world(-off * n)  # the y flip is its own inverse
-                out[j] = -off
-                self.notes.append(f"joint {j}: moved {-off:.1f} px onto the hip-ankle line (the setup leg was "
-                                  f"kinked against the template's knee rule {ik['knee']!r})")
+                how = ik.get("straighten", "knee")
+                d = ankle - hip
+                t = float((knee - hip) @ d / (d @ d))   # where the knee sits along hip -> ankle
+                # move one joint across the line so that the line passes the knee
+                which, by = {"knee": (shin, -off), "ankle": (ik["target"], off / t),
+                             "hip": (thigh, off / (1.0 - t))}[how]
+                j = self.bones[which]["joint"]
+                self.jxy[j] = self.jxy[j] + self.cv.dir_to_world(by * n)  # the y flip is its own inverse
+                out[j] = abs(by)
+                self.notes.append(f"joint {j}: moved {abs(by):.1f} px so the knee is on the hip-ankle line (the "
+                                  f"setup leg was kinked {-off:.1f} px against the template's knee rule "
+                                  f"{ik['knee']!r})")
         return out
 
     def _role(self, spec):
@@ -609,20 +616,26 @@ class _Builder:
             bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "reach": reach,
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
                             "kind": kind, "budget": spec.get("budget"),
-                            "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0))}
+                            "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0)),
+                            "overlap": bool(spec.get("overlap", False))}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
             band["pivot"] = band["center"]
             band["planted"] = self.bones[band["lower"]]["parent"] in targets
-        self._stop_at_rigid_joints(bands)
+        self._stop_at_joints(bands)
         # two bands on one layer must not overlap: they share the distance
         # between them, half each, except that a band reaching less than its
         # half leaves the rest to the other (a short shoulder band lets a long
-        # elbow band run up the sleeve; two default bands still meet halfway)
+        # elbow band run up the sleeve; two default bands still meet halfway).
+        # A band marked "overlap" and the band above it on its chain (the
+        # planted ankle and the knee) do not share: they overlap and compose
+        # (weights.py CHAIN COMPOSITION)
         new = {j: list(b["reach"]) for j, b in bands.items()}
         for a, ba in bands.items():
             for b, bb in bands.items():
+                if _chained(ba, bb):
+                    continue
                 if a != b and set(ba["layers"]) & set(bb["layers"]):
                     d = float(np.linalg.norm(ba["center"] - bb["center"]))
                     ia = 1 if (bb["center"] - ba["center"]) @ ba["axis"] > 0 else 0  # a's half toward b
@@ -652,27 +665,36 @@ class _Builder:
             band["lateral"] = self._lateral(band)
         return bands
 
-    def _stop_at_rigid_joints(self, bands):
+    def _stop_at_joints(self, bands):
         """A band's lower half ends at the next joint down its lower bone
-        when the template keeps that joint rigid (band "none"): the elbow's
-        band stops at the wrist.
+        (the elbow's at the wrist, the knee's at the ankle); a band that
+        overlaps the band above it ("overlap") ends at that band's joint.
 
         WHY: a rigid joint means the part beyond it moves as one piece with
         its bone (the template's wrists: a mascot's hand image carries the
         forearm, so a wrist band would steal the elbow's length). A band
         running past it bends that part with the elbow: the monkey's fist
         curled with a 3-halfwidth elbow band (P2 F3). On the monkey the
-        default 2-halfwidth band already ends 2-6 px short of the wrists."""
+        default 2-halfwidth band already ends 2-6 px short of the wrists.
+        Past a banded joint the next band takes over (sharing, or chain
+        composition), and below a planted ankle everything is foot."""
         for jname, band in bands.items():
             for tj in self.spec[band["lower"]]["tails"]:
-                if tj not in self.jxy or self.t["joints"].get(tj, {}).get("band", "none") != "none":
+                if tj not in self.jxy:
                     continue
                 d = float((self.jxy[tj] - band["center"]) @ band["axis"]) / band["halfwidth"]
                 if 0 < d < band["reach"][1]:
                     band["reach"][1] = d
-                    self.notes.append(f"joint {jname}: band stops at the rigid joint {tj}, "
+                    self.notes.append(f"joint {jname}: band stops at the joint {tj}, "
                                       f"{d:.2f} halfwidths down {band['lower']}")
                 break
+            if band.get("overlap"):
+                up = self.bones[band["upper"]]
+                d = float((band["center"] - up["head"]) @ band["axis"]) / band["halfwidth"]
+                if 0 < d < band["reach"][0]:
+                    band["reach"][0] = d
+                    self.notes.append(f"joint {jname}: band stops at the joint {up['joint']}, "
+                                      f"{d:.2f} halfwidths up {band['upper']}")
 
     def _lateral(self, band):
         """Band reach sideways, in halfwidths: enough to take in all the art
@@ -740,8 +762,12 @@ class _Builder:
                                           "setup_slack": round(slack, 4), "bend_deg": round(bend_deg, 3),
                                           "bend_positive": c["bend_positive"], "knee": ik.get("knee"),
                                           "knee_dir": None if knee_dir is None else knee_dir.tolist(),
-                                          "straightened_px": round(self.straightened.get(self.bones[shin]["joint"],
-                                                                                         0.0), 3),
+                                          "straightened_px": round(sum(self.straightened.get(self.bones[n]["joint"], 0.0)
+                                                                       for n in (thigh, shin, ik["target"])), 3),
+                                          "straightened_joint": next((self.bones[n]["joint"] for n in
+                                                                      (thigh, shin, ik["target"]) if
+                                                                      self.bones[n]["joint"] in self.straightened),
+                                                                     None),
                                           "setup_error_px": round(err, 6), "planted": bool(ik.get("planted")),
                                           **rep}
             if soft < want:
@@ -1283,7 +1309,13 @@ def _mesh_band(b):
 def _weight_joint(b):
     return {"center": tuple(b["center"]), "upper": b["upper"], "helper": b["helper"], "lower": b["lower"],
             "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "reach": tuple(b["reach"]),
-            "lateral": b.get("lateral", weights.LATERAL), "exclusive": True}
+            "lateral": b.get("lateral", weights.LATERAL), "exclusive": True, "overlap": bool(b.get("overlap"))}
+
+
+def _chained(a, b):
+    """Is one of two bands an "overlap" band hanging below the other on the
+    same chain (its upper bone is the other's lower bone)?"""
+    return (b.get("overlap") and b["upper"] == a["lower"]) or (a.get("overlap") and a["upper"] == b["lower"])
 
 
 def _knee_normal(hip, ankle, want):

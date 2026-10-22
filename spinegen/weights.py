@@ -36,6 +36,20 @@ WHY TWO METHODS (SOTA §2 權重)
   Overlapping layers at a joint (upper arm over forearm) get the same ramp
   at the same canvas point, so they deform together and the seam stays shut.
 
+CHAIN COMPOSITION (P2 A2)
+  Two bands of one limb normally share the length between them (rigbuild):
+  each vertex is in one ramp at most. A band marked "overlap" may instead
+  run into the band above it (knee -> ankle on a calf): its ramp then
+  redistributes whatever weight its upper bone (the shin) holds there, so a
+  calf vertex can carry helper, shin and foot (3 influences). WHY: a deep
+  crouch bends the knee ~100 deg and the planted ankle ~50 deg at once, and
+  a straight ramp of length e squeezes art y off its axis to
+  cos^2(D/4) - sin(D/2) y/e of its area (helper; ~cos^2(D/2) - sin D y/e
+  without). The monkey's calf is 105-107 px long and its art reaches 70-77
+  px off the knee's axis on the inner side and 73 px off the ankle's on the
+  outer hem: no split of 106 px between the two ramps keeps both positive
+  (continuum), while two overlapping ramps of 70-80 and 85-100 px do.
+
 BONE HEAT IN 2D (Pinocchio; Blender meshlaplacian.cc heat_bone_weighting)
   For each bone j solve  (L + D H) w_j = D H p_j  where
     L   cotangent Laplacian of the triangle mesh (stiffness form),
@@ -94,7 +108,11 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
               extent: an asymmetric band, joint_reach), "lateral" (band
               reach sideways in halfwidths, default LATERAL; see band_mask),
               "exclusive" (True: band vertices carry only the joint's bones; by
-              default other bones keep the heat weight they had there)}]; every bone a
+              default other bones keep the heat weight they had there),
+              "overlap" (True: the band may run into the band of the joint
+              above it on the same chain, whose lower bone is this joint's
+              upper bone; there its ramp splits that bone's share, CHAIN
+              COMPOSITION)}]; every bone a
               joint names must be in `bones`
     mode      "auto": heat + joint ramps; "heat": heat only; "rigid": every vertex
               100% on bones[0] (the old cut-out, for comparison)
@@ -131,21 +149,50 @@ def weight_matrix(verts, tris, outline, bones, joints=(), visibility=True):
         fixed = np.zeros(len(V), bool)
         target = W.copy()
         index = {b["name"]: i for i, b in enumerate(bones)}
-        for j in joints:
+        for j in chain_order(joints):
             m, ramp = joint_ramp(V, j, bones)
             cols = [index[j["upper"]], index[j["lower"]]] + ([index[j["helper"]]] if j.get("helper") else [])
-            if j.get("exclusive"):
-                target[m] = 0.0  # the band belongs to its joint's bones alone
-                mass = np.ones((int(m.sum()), 1))
+            if j.get("overlap"):
+                # a band that may run into the band above it on the same
+                # chain (the planted ankle into the knee's lower half): in
+                # the overlap its ramp splits whatever its upper bone holds
+                # there (chain composition, module doc); elsewhere as below
+                new = m & ~fixed
             else:
-                mass = target[m][:, cols].sum(1, keepdims=True)
-            target[np.ix_(m, cols)] = 0.0
-            target[np.ix_(m, cols[:2])] += mass * ramp[:, :2]
+                new = m
+            if j.get("exclusive"):
+                target[new] = 0.0  # the band belongs to its joint's bones alone
+                mass = np.ones((int(new.sum()), 1))
+            else:
+                mass = target[new][:, cols].sum(1, keepdims=True)
+            target[np.ix_(new, cols)] = 0.0
+            target[new, cols[0]] = mass[:, 0]
+            share = target[m, cols[0]].copy()[:, None]     # what the upper bone holds: all of it outside overlaps
+            target[m, cols[0]] = 0.0
+            target[np.ix_(m, cols[:2])] += share * ramp[:, :2]
             if j.get("helper"):
-                target[np.ix_(m, cols[2:])] += mass * ramp[:, 2:]
+                target[np.ix_(m, cols[2:])] += share * ramp[:, 2:]
             fixed |= m
         W = _solve(A, B, fixed, target[fixed]) if fixed.any() else W
     return _normalise(W, V, bones)
+
+
+def chain_order(joints):
+    """Joints with every joint whose lower bone is another's upper bone
+    first (hip before knee before ankle), otherwise in the given order: a
+    band that composes with the band above it (`overlap`) needs that band's
+    weights in place."""
+    joints = list(joints)
+    out, placed = [], set()
+    while joints:
+        for k, j in enumerate(joints):
+            if not any(o is not j and o["lower"] == j["upper"] for o in joints):
+                out.append(joints.pop(k))
+                break
+        else:  # a cycle (not a limb chain): keep the given order
+            out += joints
+            break
+    return out
 
 
 def prune_weights(W, names, max_influences=3, prune=0.02):

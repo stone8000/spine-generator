@@ -305,3 +305,46 @@ def test_asymmetric_reach_ramp(arm_mesh, helper):
     assert np.array_equal(m1, m2) and np.allclose(r1, r2)
     with pytest.raises(ValueError):
         weights.joint_ramp(V, dict(sym, reach=(1.5, 0.0)), bones)
+
+
+def test_chain_composition_of_overlapping_bands():
+    """An "overlap" band running into the band above it on the same chain
+    splits whatever its upper bone holds there (weights CHAIN COMPOSITION):
+    a shin vertex in both the knee's lower half and the ankle's ramp gets
+    helper, shin and foot, rows sum to 1, and the result does not depend
+    on the order the joints are given in. Without "overlap" the later band
+    simply takes the vertex (the old rule, which rigbuild avoids by sharing)."""
+    alpha = capsule((330, 60), (26, 30), 22, (304, 30), 20)
+    knee, ankle = np.array([126.0, 30.0]), np.array([216.0, 30.0])
+    bones = [{"name": "thigh", "head": (26.0, 30.0), "tail": tuple(knee)},
+             {"name": "shin", "head": tuple(knee), "tail": tuple(ankle)},
+             {"name": "knee_mid", "head": tuple(knee), "tail": tuple(knee)},
+             {"name": "foot", "head": tuple(ankle), "tail": (304.0, 30.0)}]
+    jk = {"center": tuple(knee), "upper": "thigh", "helper": "knee_mid", "lower": "shin", "halfwidth": HW,
+          "axis": (1, 0), "reach": (2.0, 3.0), "exclusive": True}
+    ja = {"center": tuple(ankle), "upper": "shin", "helper": None, "lower": "foot", "halfwidth": HW,
+          "axis": (1, 0), "reach": (3.5, 0.5), "exclusive": True, "overlap": True}
+    m = mesh.build(alpha, (0, 0), bands=[dict(jk, rows=3), dict(ja, rows=3)])
+    names = [b["name"] for b in bones]
+    W = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, ja])
+    W2 = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [ja, jk])
+    assert np.allclose(W, W2)
+    assert np.allclose(W.sum(1), 1.0)
+    x = m["verts"][:, 0]
+    both = (x > ankle[0] - 3.5 * HW + 1) & (x < knee[0] + 3.0 * HW - 1)
+    assert both.any()
+    mk, rk = weights.joint_ramp(m["verts"], jk, bones)
+    ma, ra = weights.joint_ramp(m["verts"], ja, bones)
+    kr = np.zeros((len(x), 3))
+    kr[mk] = rk                                   # columns: thigh, shin, helper
+    t = np.zeros(len(x))
+    t[ma] = ra[:, 1]                              # foot share of the ankle ramp
+    idx = np.flatnonzero(both & mk & ma)
+    col = {n: i for i, n in enumerate(names)}
+    assert np.allclose(W[idx, col["knee_mid"]], kr[idx, 2])
+    assert np.allclose(W[idx, col["shin"]], kr[idx, 1] * (1 - t[idx]))
+    assert np.allclose(W[idx, col["foot"]], kr[idx, 1] * t[idx])
+    assert (W[idx][:, [col["knee_mid"], col["shin"], col["foot"]]] > 0.02).all(1).any()
+    # without "overlap" the ankle band takes its vertices whole
+    W3 = weights.weight_matrix(m["verts"], m["tris"], mesh.outlines(m), bones, [jk, dict(ja, overlap=False)])
+    assert np.allclose(W3[idx, col["knee_mid"]], 0.0)
