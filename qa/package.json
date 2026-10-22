@@ -14,7 +14,7 @@
   "scripts": {
     "check": "node run.mjs check",
     "dump": "node run.mjs dump",
-    "test": "node --test test/qa.test.mjs"
+    "test": "node --test test/qa.test.mjs test/qa43.test.mjs"
   },
   "devDependencies": {
     "@esotericsoftware/spine-canvaskit": "4.2.120",

@@ -1,6 +1,6 @@
 # qa：以官方 runtime 當裁判
 
-用版本釘死的 `@esotericsoftware/spine-core@4.2.120`，在 Node 裡逐格跑骨架，輸出兩種東西：
+用版本釘死的 `@esotericsoftware/spine-core@4.2.120`（預設）或 `4.3.13`（`--runtime 4.3`，主要目標），在 Node 裡逐格跑骨架，輸出兩種東西：
 - **dump**：世界骨矩陣與世界頂點。Python 的 numpy LBS（`spinegen/lbs.py`）拿它比對，C1 閘門在 Python 那邊算。
 - **check**：SOTA §5 的具名閘門。任何一條硬閘門失敗，exit 1，build 就不寫出貨檔。
 
@@ -8,6 +8,7 @@ runtime 只是 devDependency，由有 Spine 授權的人安裝；repo 裡沒有�
 `package.json` 精確釘兩個套件（SOTA §3.3）：
 - `@esotericsoftware/spine-core` 4.2.120：裁判。
 - `@esotericsoftware/spine-canvaskit` 4.2.120：之後的預覽渲染要用（P1 還沒有用到）。它依賴的 spine-core 也是 4.2.120，npm 只裝一份；`npm test` 會檢查這兩件事。
+`qa43/` 另外釘 `@esotericsoftware/spine-core` 4.3.13，`--runtime 4.3` 經由 `qa43/spine.mjs` 從那裡載入。
 
 ```bash
 cd qa && npm ci          # 裝 4.2.120（精確版本，見 package-lock.json；含 canvaskit-wasm，約 32 MB）
@@ -73,6 +74,27 @@ stdout 是 `spinegen-qa/1` 報告；stderr 是每條閘門一行的摘要。exit
 - `counts`：明寫的期望數量，優先使用。`spinegen/ir.py` 的 `save()` 會寫出這個欄位。沒有 `counts` 時，改從 `spinegen-rig/1` 推算：`bones`、`slots`、`skins`、`events`、`ik`、`transform`（`half_angle` 算一條）、`path`、`physics`，以及 `skins[].attachments` 裡的 mesh 數。IR 沒有的鍵就不比對。
 - `foot_plant: [{bone, anim?, spans?: [[t0,t1]], point?: [x,y]}]`。
 - `flip: [骨名]`，或在 `bones[]` 的骨上寫 `flip: true`。
+
+## `--runtime 4.3`
+
+```bash
+cd qa43 && npm ci          # 4.3.13 釘在 qa43/（qa/ 自己的 node_modules 維持 4.2.120）
+node qa/run.mjs check --runtime 4.3 --skeleton x.json --atlas x.atlas [--ir build/rig.json]
+node qa/run.mjs dump  --runtime 4.3 --skeleton x.json --atlas x.atlas --anim idle
+```
+
+兩個 runtime 的差異都包在 `lib/rt42.mjs`、`lib/rt43.mjs`（骨的世界矩陣在 4.3 是 `bone.appliedPose`、約束是一條清單、
+`setupPose()` 等等），閘門只寫一次。`--target` 預設等於 `--runtime`。4.3 judge 跑 L1–L9、G1、G3、M1、P1、P3，其中依格式而不同的：
+
+| ID | 4.3 的規則 |
+|---|---|
+| L1_VERSION | 另外檢查 4.3 不讀、而且不會說的寫法：頂層 `ik`/`transform`/`path`/`physics`（4.3 只讀 `constraints[]`）、`type` 不是 ik/transform/path/physics/slider 的條目、4.3 條目裡的 4.2 鍵名（transform 的 `target`/`local`/`relative`，path 的 `target`，IK 的 `uniform`）、linked mesh 用 `parent` 沒有 `source` |
+| L2_COUNTS | runtime 的數量從 `data.constraints` 依型別數 |
+| L3_ORDER | 4.3 沒有 `order`，照 `constraints[]` 的順序跑。檢查：條目上殘留的 `order` 與位置不符、同型別同名（timeline 只會綁到第一個）；有 `--ir` 時，清單順序必須等於 IR 的求值順序（spinegen 4.3 emitter 的「連續順序」） |
+| L9_TC_MIX | 4.3 條目：`properties` 驅動的每個屬性，其 mix 都要明寫；沒有任何 `properties` 的條目什麼都不做；動畫 key 了某個沒被驅動的屬性的 mix（4.2 一定生效，4.3 什麼都不做）也算違規 |
+| C1_ORACLE | **只有 4.2**：`spinegen.lbs` 是 4.2.120 的模型。4.3 時 skipped，note 指向同一份 IR 的 4.2 輸出（`--runtime 4.2` 跑 C1）與 `python -m spinegen.equiv43`（4.2 輸出在 4.2.120、4.3 輸出在 4.3.13 逐格比對） |
+
+`npm test` 也跑 `test/qa43.test.mjs`（32 個，合成手臂的 4.3 版與一錯一閘門的變體）；qa43/ 沒裝時整組 skip。
 
 ## qa43
 

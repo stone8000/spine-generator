@@ -284,3 +284,65 @@ export function writeFixture(dir, name, skeleton, atlas = {}) {
   fs.writeFileSync(path.join(dir, ATLAS.page), transparentPng(ATLAS.width, ATLAS.height));
   return { json, atlas: atl };
 }
+
+// ---------------------------------------------------------------- Spine 4.3
+
+/**
+ * The clean synthetic arm in the Spine 4.3 layout: one `constraints[]` list
+ * (IK, then the half-angle helper in 4.3's properties form, then physics),
+ * `skeleton.spine` 4.3.13. The same rig as baseSkeleton(): the helper's
+ * local relative mixRotate 0.5 becomes additive rotate->rotate scale 0.5.
+ */
+export function baseSkeleton43() {
+  const sk = baseSkeleton();
+  sk.skeleton.spine = "4.3.13";
+  const [ik] = sk.ik, [tc] = sk.transform, [ph] = sk.physics;
+  delete sk.ik; delete sk.transform; delete sk.physics;
+  const { order: _order, ...phys } = ph;
+  sk.constraints = [
+    { type: "ik", name: ik.name, bones: ik.bones, target: ik.target, mix: ik.mix, softness: 0, bendPositive: true,
+      compress: false, stretch: false, scaleY: "none" },
+    { type: "transform", name: tc.name, bones: tc.bones, source: tc.target, localSource: true, localTarget: true,
+      additive: true, clamp: false, rotation: 0, x: 0, y: 0, scaleX: 0, scaleY: 0, shearY: 0,
+      properties: { rotate: { offset: 0, to: { rotate: { offset: 0, scale: 0.5 } } } },
+      mixRotate: 1, mixX: 0, mixY: 0, mixScaleX: 0, mixScaleY: 0, mixShearY: 0 },
+    { type: "physics", ...phys, scaleY: "none" },
+  ];
+  return sk;
+}
+
+/**
+ * One fault per variant for a 4.3 judge (`--runtime 4.3`): name -> {skeleton,
+ * atlas?}. The format faults are the ones 4.3 is silent about (or throws
+ * on with a message about the symptom); the rest are the shared gates on
+ * 4.3 data.
+ */
+export function variants43() {
+  const v = {};
+  const make = (name, mutate, atlas) => { const sk = clone(baseSkeleton43()); mutate(sk); v[name] = { skeleton: sk, atlas }; };
+  const con = (sk, name) => sk.constraints.find((c) => c.name === name);
+  make("declares42", (sk) => { sk.skeleton.spine = "4.2.43"; });
+  make("topLevelIk", (sk) => { const ik = sk.constraints.shift(); delete ik.type; delete ik.scaleY; sk.ik = [{ ...ik, order: 0 }]; });
+  make("unknownType", (sk) => { con(sk, "ik_arm").type = "IK"; });
+  make("target42", (sk) => { const tc = con(sk, "elbow_half"); tc.target = tc.source; delete tc.source; });
+  make("linkedParent", (sk) => { sk.skins[0].attachments.arm.arm2 = { type: "linkedmesh", path: "arm", parent: "arm", width: 200, height: 40 }; });
+  make("uniform42", (sk) => { const ik = con(sk, "ik_arm"); delete ik.scaleY; ik.uniform = true; });
+  make("orderKey", (sk) => { con(sk, "tail_phys").order = 0; });
+  make("dupName", (sk) => { sk.constraints.push({ ...con(sk, "tail_phys"), bone: "fore" }); });
+  make("shortCurve", (sk) => { sk.animations.wave.bones.shoulder.translate[0].curve = [0.333, 0, 0.667, 4]; });
+  make("ikRootParent", (sk) => { Object.assign(con(sk, "ik_arm"), { bones: ["root", "shoulder"], mix: 1 }); });
+  make("ikInherit", (sk) => { sk.bones[2].inherit = "noScale"; });
+  make("physicsImplicit", (sk) => { const p = con(sk, "tail_phys"); delete p.strength; p.limit = 60; });
+  // inertia 1, damping 0.95: 3.4 px apart at 30 vs 240 fps on 4.3 (limit 0.89 px at H=200)
+  make("physicsFpsFragile", (sk) => { Object.assign(con(sk, "tail_phys"), { inertia: 1, damping: 0.95 }); });
+  make("atlasSize", () => {}, { width: 512 });
+  make("missingRegion", () => {}, { handRegion: "hand_renamed" });
+  make("hull0", (sk) => { armMesh(sk).hull = 0; });
+  make("weightSum", (sk) => { armMesh(sk).vertices[4] = 0.9; });
+  make("tcMixImplicit", (sk) => { delete con(sk, "elbow_half").mixRotate; });
+  make("tcNoProperties", (sk) => { con(sk, "elbow_half").properties = {}; });
+  make("tcKeyedDeadMix", (sk) => { sk.animations.wave.transform = { elbow_half: [{ time: 0, mixRotate: 1, mixX: 1 }] }; });
+  make("setupFold", (sk) => { shiftVertexX(armMesh(sk), 11, 60); });
+  make("flip", (sk) => { sk.animations.mirror = { bones: { upper: { scale: [{ time: 0, x: 1, y: 1 }, { time: 0.5, x: -1, y: 1 }] } } }; });
+  return v;
+}
