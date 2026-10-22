@@ -44,6 +44,13 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
      moved (and that chain keeps the rig's softness), and every softening
      is checked: one that moves any other bone at setup by more than
      SETUP_TOL is undone.
+     COST (measured on the monkey, BRIDGE_REPORT): a chain drawn straight
+     sits at the flat end of the ease, so near the setup the knee barely
+     follows a hip drop (none at first for a fully straight leg) and the
+     shin runs on past the planted foot, 10-15 px in the kit's dips, where
+     a hard IK would bend the knee and then snap it straight on the way
+     up. --leg-softness 0 keeps the rig's own (hard) legs; only knees drawn
+     bent give both.
   2. emit.spine43 -> <name>.rig43.json, with the atlas and its page copied
      beside it.
   3. A recipe from the TEMPLATE ROLES (not the kit's name guessing):

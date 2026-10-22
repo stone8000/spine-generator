@@ -19,6 +19,10 @@ node qa/run.mjs check --runtime 4.3 --skeleton x.json --atlas x.atlas --ir rig.j
 python3 -m spinegen.bridge_motionkit $P2/monkey_joint/rig.json $P2/monkey_joint/monkey.atlas -o $W/monkey_joint --name monkey_joint
 python3 -m spinegen.bridge_motionkit $P2/monkey_rigid/rig.json $P2/monkey_rigid/monkey.atlas -o $W/monkey_rigid --name monkey_rigid
 python3 research/bridge_sheets.py $W/monkey_rigid $W/monkey_joint -o $W/sheets --all-frames
+# 選項比較（--leg-softness 0、--arm-softness 0、--no-ik-guard），同一格並排；上一版的輸出在 $W/v1_capped/
+python3 -m spinegen.bridge_motionkit $P2/monkey_joint/rig.json $P2/monkey_joint/monkey.atlas -o $W/exp_soft/joint_noguard --name monkey_joint --no-ik-guard
+python3 research/bridge_compare.py $W/compare/celebrate_legs_capped_vs_soft.png legs celebrate 4,31 $W/v1_capped/monkey_joint $W/monkey_joint
+python3 research/bridge_compare.py $W/compare/punch_arms_guard.png arms punch 0,8,11 $W/v1_capped/monkey_joint $W/monkey_joint $W/exp_soft/joint_noguard
 ```
 
 輸出都在 `/home/user/spinegen-work/bridge/`（不進 repo）。
@@ -59,48 +63,67 @@ L1／L3／L9 套 4.3 的格式規則（頂層 4.2 約束、未知 type、4.3 條
 
 ## B3 `spinegen/bridge_motionkit.py`
 
-1. 輸出時才加手臂 IK：拳頭目標 `ik_hand_l/r` 掛 root、放在前臂末端；兩骨 IK 排在腿 IK 之後、半角輔助骨之前；彎的方向取 setup 手肘的方向。
-   猴子的手臂畫得幾乎打直（setup 只剩 0.70／1.35 px 的餘裕），softness 想要 31 px，為了不動 setup 只能給 0.70／1.35 px。setup 移動 3e-5 px。
-2. 角色從模板角色來：hip/body = `hips`、chest = `torso`、head、fists（facing 方向較前的當 fistFront）、shoulders、shoulderBack。
-   7 個配件（香蕉、帽子、口袋、袖口、褲管）已經有 runtime physics，不交給 kit 的頭髮烘焙（不然會動兩次），所以沒有 hair。size = 1.5（kit 自己估的）。
-3. 原本的 9 支動畫丟掉：它們是 FK key，手臂 IK mix 1 會把手釘住。
+1. 輸出時才加手臂 IK：拳頭目標 `ik_hand_l/r` 掛 root；兩骨 IK 排在腿 IK 之後、半角輔助骨之前；彎的方向取 setup 手肘的方向。
+   **softness = 0.1 × 手臂長（30.9／31.9 px）**。猴子的手臂畫得幾乎打直，softness 一加，解出來的手會停在手腕前面；
+   做法和 kit 自己的 autorig 一樣（`motionkit/src/autorig.ts` 的 `softTarget`）：把目標沿「肩 → 手腕」推出去（22.3／20.2 px），
+   讓 softness 解出來剛好落在畫的手腕上。上一版說「只能把 softness 壓到 0.70／1.35 px 才不會動到 setup」，**這個理由是錯的**，已改掉。
+2. **腿 IK 也加 softness**：0.15 × 腿長（kit 的 `LEG_SOFTNESS`），rigbuild 原本只給 0／3.56 px，現在 36.0／37.6 px，
+   目標推出 36.0／18.0 px，掛在目標下的腳骨反向補回，腳還在原位。目標上有圖、或有別的約束讀它時不推（留原值並寫 note）；
+   每次推完都檢查 setup，超過 0.01 px 就退回。
+   setup 有沒有動：lbs 3.0e-5 px；4.3.13 實際播放，和沒加任何東西的 4.3 輸出比頂點 3.6e-5 px（不加 softness 時也是這麼多，是解 IK 的捨入）。
+3. 角色從模板角色來：hip/body = `hips`、chest = `torso`、head、fists（facing 方向較前的當 fistFront）、shoulders、shoulderBack。
+   7 個配件已經有 runtime physics，不交給 kit 的頭髮烘焙（不然會動兩次），所以沒有 hair。size = 1.5（kit 自己估的）。
+4. 原本的 9 支動畫丟掉：它們是 FK key，手臂 IK mix 1 會把手釘住。
+
+預設（手 0.1、腿 0.15、kit 的 IK 保護開）。joint／rigid 的 kit 分數相同：
 
 | | idle | punch | celebrate | hit |
 |---|---|---|---|---|
-| kit 流暢度分數（joint／rigid 相同） | 80（4 警告） | 100 | **35（13 警告）** | 100 |
-| 手肘最大彎（相對 setup） | 53° | 76° | **168–171°** | 30° |
-| 肩膀最大 | 14° | 49° | 15° | 6° |
-| 腳踝離開靴子（脛骨尖到腳） | 11.6 px | 16.0 px | 17.5 px | 16.6 px |
-| 藝術閘門不過的格數（joint vs rigid） | 42／61 vs 61／61 | 22／26 vs 26／26 | 37／37 vs 35／37 | 5／27 vs 11／27 |
+| kit 流暢度分數（上一版） | **100**（80，4 警告） | 100（100） | **55，9 警告**（35，13） | 100（100） |
+| 手肘：第 0 格／最大（相對 setup） | 40°／41°、32°／33° | 右 **32°**／75° | 130°／171°、123°／168° | 0°／12° |
+| 膝蓋最大（上一版） | 10°、13°（35°、25°） | 5°、8°（26°、17°） | 15°、15°（44°、28°） | 10°、17°（34°、20°） |
+| 小腿末端離腳：不夠長／穿進靴子 | 12.0／**10.2** px | 15.9／5.5 | 17.5／**15.3** | 16.5／9.0 |
+| 藝術閘門不過的格數（joint vs rigid） | 43／61 vs 61／61 | 18／26 vs 26／26 | 37／37 vs 35／37 | 4／27 vs 8／27 |
 
-qa（4.3.13）：兩版 L1–L9、G3、M1（0 px）、P3 都過。joint 的 G1 有 16 個摺疊（celebrate 右前臂），rigid 0；兩版 P1 都不過（16.1 px，punch 的右袖口）。
-藝術閘門（每格、4.3 runtime 的頂點）：joint **沒有任何 G4 接縫**，不過的是 G5 小洞（每格最多 9 個）、G2 面積（右腳踝 0.86、手肘 0.92，
-celebrate 手肘 0.79）、celebrate 的 G1；rigid 的 G4 接縫最大 196 px（punch 右肘）、188（celebrate 右肘）、55（idle 左肘）、膝蓋 9–22 px、
-右肩 79 px，另有 G6a 18–36 px、G6b NCC 0.39–0.50。kit 的警告幾乎都是同一件事：腿和手臂畫得太直，臀部往上或拳頭拉近時膝蓋、手肘
-「啪」一下伸直或折起（脛骨、前臂的加速度尖峰）；celebrate 另有一個褲管 physics 骨。
+上一版「穿進靴子」全是 0（硬 IK 夠得到就一定到）。qa（4.3.13）：兩版 L1–L9、G3、M1（0 px）、P3 都過；joint 的 G1 有 16 個摺疊
+（celebrate 右前臂），rigid 0；P1 兩版都不過（15.8 px，punch 右袖口）。
 
-試過但沒有採用：關掉 kit 的 IK 保護，idle 變 20 分（16 警告）；腿 IK 加 stretch，kit 的警告完全一樣。
+各選項（joint，`bridge.json` 在 `exp_soft/`）：
 
-## 看圖（`sheets/*.png`，每支動畫 rigid／joint 兩列，另有手臂、腿的 2 倍放大）
+| 手 softness／腿 softness／IK 保護 | idle | celebrate | idle 手肘第 0 格 | punch 右手肘第 0 格 |
+|---|---|---|---|---|
+| 0.1／0.15／開（預設） | 100 | 55 | 40°、32° | 32° |
+| 0.1／0.15／關（`--no-ik-guard`） | 90（2 警告） | 55 | 24°、4.5° | **0°** |
+| 0.1／原值／開（`--leg-softness 0`） | 80（4） | 30（14） | 40°、32° | 32° |
+| 0／0.15／開（`--arm-softness 0`） | 100 | 65（7） | 49°、32° | 33° |
+| 上一版（0.70／1.35 px，原值，開） | 80（4） | 35（13） | 49°、32° | 33° |
 
-- **punch**：猴子是正面角色，「往前」就是往畫面右邊，所以右手是往旁邊舉到水平（肩 49°），不像出拳。兩版右腋下都露出一塊深色楔形（軀幹畫在手臂下的陰影），
-  袖子上緣在領口附近裂開一條。rigid 的手肘斷成兩根直棒、接縫缺口很明顯；joint 的手肘是連續的弧，好很多。
-- **celebrate**：這個角色不能用。lift 120 × 1.5 只把垂下的拳頭抬到胸口，兩骨 IK 只能把前臂往上折 170°。rigid 的手藏到袖子後面，只剩碎片；
-  joint 的前臂和手在袖子前面皺成一團（G1）。垂手的角色要的是「肩膀舉起」的舉手動作，還要另畫舉手的圖，超過 P2 量到的肩膀預算。
-- **idle**：joint 看起來可以接受：手肘彎得圓順、蹲下時膝蓋往外。rigid 的手肘有缺口。但第 0 格就不是原畫的姿勢：IK 保護把幾乎打直的手臂拉到 95% 以內，
-  拳頭被收到腰邊。
-- **hit**：被打退的感覺有出來。rigid 的褲管離開靴子（16.6 px）；joint 的褲管跟著拉長，看不出斷。
-- 兩版都有、跟骨架無關的：手的圖裡帶著褲子碎片，手一離開大腿就露出綠色三角形（P2 的補圖需求）；左腰下方露出紅色碎片，
-  是軀幹圖裡被手臂蓋住的袖子顏色。
+kit 的警告分兩種：腿的（臀部上下時膝蓋「啪」一下伸直）加了腿 softness 就全部消失；剩下的都在 celebrate：手肘折 170° 的加速度尖峰，
+再加手 softness 帶出的 prop、cuffR 兩個。IK 保護會把幾乎打直的手臂先拉到 95% 臂長以內，所以 idle 和 punch 第 0 格就不是原畫；
+關掉保護第 0 格比較接近原畫，但 idle 掉到 90，punch 的出拳手臂幾乎打直（最大彎 12°）。預設維持 kit 的保護。
+手 softness 的代價：kit 的拳頭軌跡現在從推出去的目標開始算，看得到的拳頭位置和上一版差最多 11 px（idle／punch／hit）、22 px（celebrate）。
+
+## 看圖（`sheets/*.png` 每支動畫 rigid／joint；`compare/*.png` 是上一版、預設、關保護的同一格並排）
+
+- **腿 softness 的取捨**（`compare/idle_legs_capped_vs_soft.png`、`celebrate_legs_capped_vs_soft.png`）：臀部往下時，上一版膝蓋確實彎下去
+  （celebrate 最低那格是 O 型腿蹲下），現在腿幾乎是直的，褲管往下蓋住靴口 10–15 px。這是 softness 的數學：腿畫成全直時，
+  推出去的目標剛好在 softness 曲線的平端，臀部一開始下降，膝蓋幾乎不跟著彎（左腿起步時完全不跟，右腿只跟 31%）。
+  沒有斷開、沒有接縫，但「蹲」的感覺不見了。臀部往上那格兩版一樣（腿不夠長，褲管離開靴口 12–18 px，被靴子的領口蓋住）。
+- **IK 保護**（`compare/idle_arms_guard.png`、`punch_arms_guard.png`）：開著時第 0 格雙拳被收到腰邊；關掉時手臂垂下、接近原畫。
+- **punch**：還是往旁邊舉到水平，不像出拳；joint 的手肘是連續的弧，rigid 的手肘斷開（G4 195 px）；右腋下的深色楔形還在。
+- **celebrate**：還是不能用：兩骨 IK 把前臂往上折 170°，joint 皺成一團（G1），rigid 只剩碎片。
+- **idle**／**hit**：joint 可以接受；rigid 手肘有缺口。手裡的褲子碎片、左腰的紅色碎片照舊（補圖需求）。
 
 ## 還沒解決
 
 1. **physics 兩版不同**，最多 4.9 px（30 fps）；60 fps 以上約 2 px。這是 4.3 runtime 的行為，emitter 改不了。來源骨架的袖口 physics 在 4.2、4.3 都過不了 P1。
 2. **C1 只有 4.2**：4.3 檔案靠 4.2 輸出的 C1 加上 equiv43（只在 physics none 時證明相同）。
-3. **預設和這個角色對不上**：celebrate 會摺手；出拳變側舉；腿和手臂太直，臀部上升就留下 12–18 px 的腳踝缺口、膝蓋會啪一下伸直；
-   idle 一開始就不是原畫姿勢。要改的是角色（膝蓋、手肘先彎一點）或給垂手角色的預設，不是銜接器。
-4. 正面角色的 `facing` 是隨便選的（`--facing 1`）。
-5. 銜接器會丟掉骨架原本的動畫；要保留，得在那些動畫裡把手臂 IK 的 mix key 成 0。
-6. 補圖需求還在：手裡的褲子碎片、腋下的陰影、軀幹圖裡的袖子顏色。
+3. **膝蓋：沒有兩全的銜接器設定**。腿畫成全直時，硬 IK 蹲得下去但會啪一下伸直；softness 不會啪，但蹲不下去、褲管蓋進靴子 10–15 px。
+   要兩個都有，得在角色上把膝蓋先彎 5–15°（kit 的交付規格也這樣寫）。臀部上升時 12–18 px 的「腿不夠長」兩種設定都一樣，也是角色的事。
+4. **預設和這個角色對不上**：celebrate 會摺手、出拳變側舉，要的是給垂手角色的預設。第 0 格不是原畫姿勢：IK 保護開著時 idle 40°／32°、
+   punch 右手 32°；關掉保護 idle 24°／4.5°、punch 0°，但 kit 分數下降。
+5. rigbuild（另一條線在改）給 4.2 輸出的腿 softness 還是壓在 slack 以下；銜接器只在輸出 4.3 時補上。rigbuild 若改用「推目標」，4.2 也會有。
+6. 正面角色的 `facing` 是隨便選的（`--facing 1`；`--facing -1` 也能跑，idle 90、celebrate 70，前後拳互換）。銜接器會丟掉骨架原本的動畫；要保留，得在那些動畫裡把手臂 IK 的 mix key 成 0。
+7. 補圖需求還在：手裡的褲子碎片、腋下的陰影、軀幹圖裡的袖子顏色。
 
-測試：`python3 -m pytest tests -q` 240 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` 44 個，全部通過。
+測試：`python3 -m pytest tests -q` 249 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` 44 個，全部通過。
