@@ -91,6 +91,18 @@ WHERE THE DEFINITIONS COME FROM
   (P2 review F3: the monkey's elbows read 98-110 deg on the sum while
   single band triangles left the range from 60-80 deg); strict_tris=False
   keeps the old sum-only reading for comparison.
+  WHICH TRIANGLES (P2 review R1). The sum reads the joint's WINDOW when the
+  joint gives one ("window": [up, lo] halfwidths from the pivot along the
+  axis): a neighbourhood fixed by the joint's geometry (rigbuild: 2
+  halfwidths, or half way to the nearest banded joint, the same both ways;
+  for a planted foot only the shin side), not by how far the rig's ramp
+  runs. Read over the band itself, a longer band averages in more of the
+  lightly bent limb and reads more lenient: the monkey's A1 elbow band
+  (3.5 halfwidths up the sleeve) read 94 deg at its right elbow toward the
+  body, 80 in the fixed window. Every triangle of the band ("extent",
+  "band_center") and of the window counts in the single-triangle range, so
+  a long band is still held to it everywhere it bends. A joint without a
+  window reads its band for both, as before.
   G1 FOLDS is lbs' count (the same definition as qa/run.mjs G1).
 
 UNITS
@@ -136,7 +148,7 @@ def as_joint(joint):
     {name, bone, dirs, band: {...}}. Coordinates are WORLD (y up)."""
     band = dict(joint.get("band") or {})
     for k in ("center", "upper", "helper", "lower", "halfwidth", "axis", "extent", "slots", "other_limbs",
-              "band_center"):
+              "band_center", "window"):
         if k not in band and k in joint:
             band[k] = joint[k]
     band["name"] = joint.get("name") or band.get("name") or f"{band.get('upper')}-{band.get('lower')}"
@@ -544,40 +556,50 @@ def folds(frame, slots=None, rest=None):
 
 # ---------------------------------------------------------------- G2
 
-def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL):
+def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL, region="band"):
     """[(slot, triangle indices)] of the part meshes whose setup centroid is
     inside the joint band (axis-aligned with the joint's axis).
 
-    The band is centred on j["band_center"] when the joint gives one, else
-    on the joint: a one-sided band (a planted ankle, whose band runs up
-    the shin from the pivot so the boot stays 100% foot) bends about the
-    pivot but deforms only on one side, and a window centred on the pivot
-    would count half rigid boot, whose area never changes, and read the
-    band too lenient."""
+    region "band": the band the rig deforms, centred on j["band_center"]
+    when the joint gives one, else on the joint, +-"extent" halfwidths: a
+    one-sided band (a planted ankle, whose band runs up the shin from the
+    pivot so the boot stays 100% foot) bends about the pivot but deforms
+    only on one side, and a window centred on the pivot would count half
+    rigid boot, whose area never changes, and read the band too lenient.
+    region "window": the joint's fixed window, j["window"] = [up, lo]
+    halfwidths from the pivot toward the upper and the lower bone (module
+    doc, WHICH TRIANGLES); the band when the joint gives no window."""
     j = jr.j
-    ext = float(j.get("extent") or extent) * jr.hw
     lat = lateral * jr.hw
     ax = np.asarray(j["axis"], float)
     ax = ax / (np.linalg.norm(ax) or 1.0)
     nrm = np.array([-ax[1], ax[0]])
+    if region == "window" and j.get("window") is not None:
+        origin = np.asarray(j["center"], float)
+        lo_s, hi_s = -float(j["window"][0]) * jr.hw, float(j["window"][1]) * jr.hw
+    else:
+        ext = float(j.get("extent") or extent) * jr.hw
+        origin = np.asarray(j.get("band_center") or j["center"], float)
+        lo_s, hi_s = -ext, ext
     out = []
     for s in jr.upper_slots + jr.lower_slots:
         g = rest.geoms[s]
         if g.att["type"] not in ("mesh", "linkedmesh"):
             continue
-        cen = g.xy[g.tris].mean(1) - np.asarray(j.get("band_center") or j["center"], float)
+        cen = g.xy[g.tris].mean(1) - origin
         a, b = cen @ ax, cen @ nrm
-        k = np.nonzero((np.abs(a) <= ext) & (np.abs(b) <= lat))[0]
+        k = np.nonzero((a >= lo_s) & (a <= hi_s) & (np.abs(b) <= lat))[0]
         if len(k):
             out.append((s, k))
     return out
 
 
 def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=True):
-    """G2: posed / rest signed area of the joint band's triangles (each mesh
-    oriented by its setup winding, so folded triangles subtract) >=
-    min_ratio, and, with strict_tris (default, SOTA §5), every band
-    triangle's own ratio inside tri_range. "by" says which part failed
+    """G2: posed / rest signed area of the joint window's triangles (each
+    mesh oriented by its setup winding, so folded triangles subtract) >=
+    min_ratio, and, with strict_tris (default, SOTA §5), every band or
+    window triangle's own ratio inside tri_range (module doc, WHICH
+    TRIANGLES). "by" says which part failed
     ("band", "tris" or both); `worst` is the slot with the lowest ratio when
     the band fails, else the slot with the most triangles out of range;
     "tri_worst" names that slot's most extreme triangle (index into its
@@ -588,7 +610,11 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
     num = den = 0.0
     tri_min, tri_max, bad, per = math.inf, -math.inf, 0, {}
     extreme = {}
-    for s, k in band_triangles(rest, jr):
+    win = dict(band_triangles(rest, jr, region="window"))
+    tris = dict(band_triangles(rest, jr))
+    for s in win:
+        tris[s] = np.union1d(tris.get(s, np.zeros(0, np.int64)), win[s])
+    for s, k in tris.items():
         g0, g1 = rest.geoms[s], frame.geoms.get(s)
         if g1 is None:
             continue
@@ -600,14 +626,16 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
         a0, a1, kk = a0[ok], a1[ok], k[ok]
         if not len(a0):
             continue
-        num += a1.sum()
-        den += a0.sum()
+        in_win = np.isin(kk, win.get(s, np.zeros(0, np.int64)))
+        num += a1[in_win].sum()
+        den += a0[in_win].sum()
         r = a1 / a0
         tri_min, tri_max = min(tri_min, r.min()), max(tri_max, r.max())
         out = (r < tri_range[0]) | (r > tri_range[1])
         nb = int(out.sum())
         bad += nb
-        per[s] = {"ratio": float(a1.sum() / a0.sum()), "tris": int(len(a0)), "tri_out_of_range": nb}
+        per[s] = {"ratio": float(a1[in_win].sum() / a0[in_win].sum()) if in_win.any() else 1.0,
+                  "tris": int(len(a0)), "window_tris": int(in_win.sum()), "tri_out_of_range": nb}
         if nb:
             # most extreme = furthest outside the range on a log scale
             dist = np.maximum(np.log(tri_range[0] / np.maximum(r, 1e-9)), np.log(np.maximum(r, 1e-9) / tri_range[1]))

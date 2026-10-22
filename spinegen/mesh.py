@@ -89,13 +89,16 @@ THE LEAN OPTIONS (what spinegen.rigbuild uses by default)
   vertex into the sleeve. A piecewise-linear helper ramp of half-length e
   squeezes art y off the axis to ~cos^2(D/4) - sin(D/2) y/e of its area,
   and the sleeve's art reaches 1.3-2.3 halfwidths off the axis. What
-  fixed it (P2 A1) is the band's shape, per joint from the template: a
-  band "reach" longer on the sleeve side (3.5 halfwidths; the forearm half
-  stops at the wrist), 4 rows on the forearm half and 2 interior points
-  per row ("row_points", on top of row_points="ends"): 106/92/108/94 deg
-  at 615 vertices (0.51x the grid). Other levers measured (P2_REPORT):
-  interior points on every row 76-90 at 0.69x, band_slivers=10 58-90 at
-  0.56x, a symmetric 3-halfwidth band 62-96 (it bends the hand 12-22 px).
+  fixed it is the band's shape, per joint from the template: 4 rows on
+  the forearm half and 3 interior points per row ("row_points", on top of
+  row_points="ends"), which cut the fans, and a sleeve-side "reach" fitted
+  per elbow (rigbuild.fit_reach: 2.5 and 2.25 halfwidths; the forearm
+  half stops at the wrist): 96/92/98/90 deg at 637 vertices (0.53x the
+  grid), G2 summed over the joint's fixed window (P2 review R1; A1's 3.5
+  halfwidths read 106/92/108/94 over its own, longer band and 98/92/108/80
+  over the window). Other levers measured (P2_REPORT): interior points on
+  every row 76-90 at 0.69x, band_slivers=10 58-90 at 0.56x, a symmetric
+  3-halfwidth band 62-96 (it bends the hand 12-22 px).
 
 COORDINATES
   Layer pixels are image space: x right, y down, pixel (i, j) covers

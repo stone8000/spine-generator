@@ -100,6 +100,35 @@ def test_g2_one_sided_band_is_read_where_it_deforms():
     assert sum(map(len, upper.values())) != sum(map(len, both.values()))
 
 
+def test_g2_sum_reads_the_joints_window_not_the_band():
+    """P2 review R1: read over the band, a longer band averages in more of
+    the lightly bent limb and G2 eases as the rig changes (the monkey's
+    right elbow toward the body: 94 deg over A1's 3.5-halfwidth band, 80
+    over the joint's own window). With a "window" the sum stays on the
+    joint's neighbourhood whatever the band's length, and every triangle
+    of the band is still held to the single-triangle range."""
+    p = _probe("elbow_l", mode="joint")
+    b0 = p.joint["band"]
+    ext0 = float(b0.get("extent") or ag.BAND_EXTENT)
+    long_band = dict(p.joint, band=dict(b0, extent=3 * ext0))
+    windowed = dict(p.joint, band=dict(b0, extent=3 * ext0, window=[ext0, ext0]))
+    fr = p.frame(70)
+    g0 = ag.band_area_ratio(p.rest, fr, p.joint)
+    g_long = ag.band_area_ratio(p.rest, fr, long_band)
+    g_win = ag.band_area_ratio(p.rest, fr, windowed)
+    assert g_long["value"] > g0["value"] + 0.01
+    assert g_win["value"] == pytest.approx(g0["value"], abs=1e-12)
+    assert g_win["tri_out_of_range"] == g_long["tri_out_of_range"] >= g0["tri_out_of_range"]
+    assert sum(v["tris"] for v in g_win["slots"].values()) > sum(v["window_tris"] for v in g_win["slots"].values())
+    # a one-sided window ([up, 0]: a planted foot) holds nothing past the pivot
+    jr = ag.joint_rest(p.rest, dict(p.joint, band=dict(b0, window=[ext0, 0.0])))
+    ax = np.asarray(jr.j["axis"], float)
+    c = np.asarray(jr.j["center"], float)
+    for s, k in ag.band_triangles(p.rest, jr, region="window"):
+        g = p.rest.geoms[s]
+        assert ((g.xy[g.tris[k]].mean(1) - c) @ ax <= 1e-6).all(), s
+
+
 # ---------------------------------------------------------------- G4
 
 def test_g4_square_cut_elbow_tears_at_once():

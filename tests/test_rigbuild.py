@@ -262,19 +262,26 @@ SYMMETRIC_ELBOW = {"band": "both", "helper": "elbow_mid_{s}", "budget": "arm_{s}
 
 
 def test_elbow_band_reaches_up_the_sleeve_and_stops_at_the_wrist(layers_dir):
-    """The template's elbow band is asymmetric (reach 3.5 up the sleeve);
-    asked for more than the forearm holds, it stops at the rigid wrist; a
-    band with no reach in the template stays symmetric (the measured
-    default), and the budget's G2 window covers the asymmetric band
-    (band_center, extent = half its length)."""
+    """The template's elbow band is asymmetric (reach 2.25 up the sleeve,
+    2 down the forearm); asked for more than the forearm holds, it stops
+    at the rigid wrist; a band with no reach in the template stays
+    symmetric (the measured default). The budget joint carries both
+    regions G2 reads: the band (band_center, extent = half its length),
+    where every triangle is range-checked, and the joint's fixed window
+    (2 halfwidths both ways here, whatever the reach), where the area is
+    summed (P2 review R1)."""
     res = rigbuild.build(layers_dir, mode="joint")
     bands = res["report"]["bands"]
-    assert bands["elbow_l"]["reach"] == [3.5, 2.0]
+    assert bands["elbow_l"]["reach"] == [2.25, 2.0]
     assert bands["shoulder_l"]["reach"][0] == bands["shoulder_l"]["reach"][1]   # no reach in the template
     hw = bands["elbow_l"]["halfwidth"]
     j = next(x for x in res["joints"]["joints"] if x["name"] == "elbow_l")["band"]
-    mid = np.asarray(j["center"]) + 0.5 * (2.0 - 3.5) * hw * np.asarray(j["axis"])
-    assert np.allclose(j["band_center"], mid) and j["extent"] == pytest.approx(2.75)
+    mid = np.asarray(j["center"]) + 0.5 * (2.0 - 2.25) * hw * np.asarray(j["axis"])
+    assert np.allclose(j["band_center"], mid) and j["extent"] == pytest.approx(2.125)
+    assert j["window"] == [2.0, 2.0]
+    longer = rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.5}}})
+    jl = next(x for x in longer["joints"]["joints"] if x["name"] == "elbow_l")["band"]
+    assert jl["extent"] == pytest.approx(2.75) and jl["window"] == j["window"]
     # asking for a forearm half longer than the forearm: clipped at the wrist
     with open(os.path.join(layers_dir, "joints.json")) as f:
         jd = json.load(f)
@@ -315,20 +322,47 @@ def test_neighbouring_bands_share_by_need(layers_dir):
 
 
 def test_template_elbow_holds_past_90_where_the_symmetric_band_stops(layers_dir, tmp_path):
-    """P2 A1 on the synthetic arm: the template's elbow (3.5 halfwidths up
-    the sleeve, 4 forearm rows, 2 points per row) holds more than 100 deg
-    under G2's per-triangle range, where the old symmetric 2-halfwidth band
-    stopped at 90 deg on one triangle of the upper arm (tri@upper_arm_l)."""
+    """The template's elbow (2.25 halfwidths up the sleeve, 4 forearm rows,
+    3 points per row) holds more than 110 deg on the synthetic arm under
+    G2's per-triangle range and fixed window, where the old symmetric
+    2-halfwidth band without row points stopped at 90 deg on one fan
+    triangle of the upper arm (tri@upper_arm_l). P2 review R1: A1's 3.5
+    halfwidths up the sleeve reads no better than that old band once G2
+    sums the joint's window instead of the band (92 deg, by area)."""
     from spinegen import budget
     out = {}
-    for name, t in (("new", "biped_mascot"), ("old", _template(**{"elbow_{s}": SYMMETRIC_ELBOW}))):
+    long_elbow = dict(_template()["joints"]["elbow_l"], reach={"upper": 3.5, "lower": 2.0})
+    long_elbow = {k: v for k, v in long_elbow.items() if k != "side"}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**{"elbow_{s}": SYMMETRIC_ELBOW})),
+                    ("long", _template(**{"elbow_{s}": dict(long_elbow, helper="elbow_mid_{s}",
+                                                           budget="arm_{s}.elbow")}))):
         res = rigbuild.build(layers_dir, mode="joint", template=t)
+        assert res["report"]["bands"]["elbow_l"]["window"] == [2.0, 2.0]  # the same window for all three
         paths = rigbuild.write(str(tmp_path / name), res)
         ir, images = raster.load_rig(paths["rig"]), raster.load_images(paths["atlas"])
         b = budget.scan(ir, images, res["joints"], 4.0, 150.0, only={"elbow_l"})
         out[name] = b["joints"]["elbow_l"]["+"]
     assert out["old"]["soft"] <= 92 and out["old"]["limit_by"].startswith("tri@upper_arm")
     assert out["new"]["soft"] >= 110
+    assert out["long"]["soft"] <= 96 and out["long"]["limit_by"].startswith("area@")
+
+
+def test_fit_reach_takes_the_shortest_reach_that_holds(layers_dir):
+    """fit_reach (P2 review R1) scans each candidate upper reach with the
+    budget, per joint, and takes the shortest that holds `need` both ways
+    (else the one that holds most); build(bands=...) applies it to that
+    joint alone, and the joint's G2 window does not move with it."""
+    bands, fit = rigbuild.fit_reach(layers_dir, candidates={"elbow_l": [2.25, 3.5]}, need=100.0, step=4.0,
+                                    mode="joint")
+    rows = fit["table"]["elbow_l"]
+    assert rows["2.25"]["min"] >= 100 > rows["3.5"]["min"]
+    assert fit["chosen"] == {"elbow_l": 2.25} and bands == {"elbow_l": {"reach": {"upper": 2.25}}}
+    res = rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.0}}})
+    assert res["report"]["bands"]["elbow_l"]["reach"] == [3.0, 2.0]
+    assert res["report"]["bands"]["elbow_r"]["reach"] == [2.25, 2.0]
+    assert res["report"]["bands"]["elbow_l"]["window"] == res["report"]["bands"]["elbow_r"]["window"]
+    with pytest.raises(ValueError, match="only"):
+        rigbuild.build(layers_dir, mode="joint", bands={"elbow_l": {"helper": None}})
 
 
 # ---------------------------------------------------------------- feet
@@ -480,8 +514,8 @@ def cuffed(tmp_path_factory):
 
 
 def test_accessory_weights_ride_on_their_parent(cuffed, tmp_path):
-    """P2 review (A2_no_regression_secondary_motion): the template's elbow
-    band runs 3.5 halfwidths (126 px) up the sleeve, over the whole cuff.
+    """P2 review (A2_no_regression_secondary_motion): an elbow band of 3.5
+    halfwidths (126 px, A1's template) runs up the sleeve over the whole cuff.
     The old carry-over faded accessory weights out over each band's reach
     and left the cuff almost nothing; now the cuff takes its source share
     of whatever the upper arm holds, so it keeps every sleeve vertex it had
@@ -489,7 +523,7 @@ def test_accessory_weights_ride_on_their_parent(cuffed, tmp_path):
     exactly as without it (rest-exact: the cuff moves like its parent), and
     its physics moves the sleeve in the official runtime."""
     d, y_el, _ = cuffed
-    res = rigbuild.build(d, mode="joint")
+    res = rigbuild.build(d, mode="joint", bands={"elbow_l": {"reach": {"upper": 3.5}}})
     ir = res["ir"]
     acc = res["report"]["accessories"]
     assert acc["ok"] and acc["bones"]["cuff_l"]["physics"] and acc["bones"]["cuff_l"]["vertices"] > 0

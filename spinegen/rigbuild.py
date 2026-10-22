@@ -3,11 +3,13 @@
     python -m spinegen.rigbuild <layers dir> --template biped_mascot --mode joint|rigid -o <outdir>
         [--joints joints.json] [--name monkey] [--no-source] [--mesh lean|refined]
         [--joint-modes modes.json | --joint-modes rigid_budget.json --need 90]
+        [--bands bands.json] [--fit-reach 'elbow_l,elbow_r=2,2.25,2.5,3,3.5' [--fit-need 90]]
 
 writes rig.json + motion.json (IR), <name>.json (Spine 4.2, spinegen.emit.spine42),
 <name>.atlas + <name>.png (spinegen.atlas.pack), joints.json (the budget scanner's
-joints, world coordinates) and build_report.json; then a crouch check in the
-official runtime (crouch(): knees by the template's rule, planted feet <= 1 px).
+joints, world coordinates) and build_report.json (band_fit.json with --fit-reach);
+then a crouch check in the official runtime (crouch(): knees by the template's
+rule, planted feet <= 1 px), after the accessory check (accessory_check).
 
 WHY (SOTA §7 P2: make the art hold big angles)
   The monkey bends like a paper doll: each part is a rigid card on one bone,
@@ -61,8 +63,10 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            radius of the lower limb's art near the joint (the same rule as
            art_gates.estimate_halfwidth); band half-length = mesh.BAND_EXTENT
            halfwidths each way, or the template joint's "reach" {upper,
-           lower} (an asymmetric band: the elbow runs 3.5 halfwidths up the
-           sleeve and 2 down the forearm), shortened so neighbouring bands
+           lower} (an asymmetric band: the elbow runs 2.25 halfwidths up the
+           sleeve and 2 down the forearm; build(bands=...) sets one joint's,
+           and fit_reach() fits it per joint by the budget), shortened so
+           neighbouring bands
            on one bone never overlap (half the gap each, unless one needs
            less) and so no band runs past a rigid joint down its lower bone
            (_stop_at_joints: the elbow stops at the wrist, the hand
@@ -125,9 +129,11 @@ JOINT_MODES = ("rigid", "ramp", "helper")
 # with only their outline points (cutting every span of the outline they
 # cross), the one-sided covering outline. On the monkey: 582 vertices
 # (0.48x the 22 px grid) against 2264 (1.87x) "refined", B2 0.98, 0 folds
-# over every animation in spine-core. With the template's band shapes (P2
-# A1, A2): 615 vertices (0.51x), elbows 92-108 deg under G2's per-triangle
-# range, 0 folds in a 0.10 H crouch (P2_REPORT, mesh.py THE LEAN OPTIONS).
+# over every animation in spine-core. With the template's band shapes and
+# the elbows' fitted reach (P2 A1, A2, review R1, R2): 637 vertices (0.53x),
+# elbows 90-98 deg under G2's per-triangle range and fixed window, 0 folds
+# in a crouch to 0.10 H with the hips 40 px to either side (P2_REPORT,
+# mesh.py THE LEAN OPTIONS).
 MESH_PROFILES = {"lean": {"min_angle": 0.0, "outline": "adaptive", "row_points": "ends", "edges": "constrain"},
                  "refined": {}}
 SCHEMA_BUDGET_JOINTS = "spinegen-budget-joints/1"
@@ -177,8 +183,12 @@ class Canvas:
 
 # ---------------------------------------------------------------- public
 
+BAND_KEYS = ("reach", "rows", "row_points", "overlap", "compose")  # what `bands` may set per joint
+FIT_STEP = 2.0        # deg: fit_reach's budget scans (the budget's own default step)
+
+
 def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source="auto", name=None,
-          joint_modes=None, mesh_profile="lean", recenter=True):
+          joint_modes=None, mesh_profile="lean", recenter=True, bands=None):
     """Build the rig. Returns {"ir", "images", "joints" (budget form),
     "report"}.
 
@@ -192,6 +202,9 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     mesh_profile "lean" (default) or "refined", see MESH_PROFILES
     recenter    move elbows and knees onto the art's centre line (default;
                 _Builder._recenter says why)
+    bands       {joint: {reach, rows, row_points, overlap, compose}} per-joint
+                band shape over the template's (one side of a pair:
+                "elbow_l"), e.g. fit_reach()'s choice for this character
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -204,6 +217,16 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
         with open(joints) as f:
             joints = json.load(f)
     t = tmpl.load(template) if isinstance(template, str) else template
+    if bands:
+        t = json.loads(json.dumps(t))
+        for jname, spec in bands.items():
+            if jname not in t["joints"]:
+                raise ValueError(f"bands: no joint {jname!r} in template {t['name']}")
+            bad = set(spec) - set(BAND_KEYS)
+            if bad:
+                raise ValueError(f"bands {jname}: only {BAND_KEYS} can be set, not {sorted(bad)}")
+            for k, v in spec.items():
+                t["joints"][jname][k] = dict(t["joints"][jname].get(k) or {}, **v) if k == "reach" else v
     if source == "auto":
         source = _load_source(layers_dir, doc)
     b = _Builder(doc, imgs, joints, t, mode, source, name)
@@ -240,6 +263,57 @@ def choose_joint_modes(budget, need, template="biped_mascot"):
             by = min(dirs.values(), key=lambda e: e["soft"])["limit_by"]
             why[jname] = f"cut-out holds {soft:g} < {want:g} deg ({by})"
     return modes, why
+
+
+def fit_reach(layers_dir, joints=None, template="biped_mascot", candidates=None, need=90.0, max_angle=150.0,
+              step=FIT_STEP, progress=None, **build_kw):
+    """Per joint, the band reach toward the upper bone that holds the most
+    (theta_soft, both ways) in the budget scan, from `candidates` ({joint:
+    [halfwidths]}). Returns ({joint: {"reach": {"upper": v}}} for build's
+    `bands`, {"need", "table": {joint: {str(v): {"+", "-", "min",
+    "limit_by"}}}, "chosen"}).
+
+    Each candidate value is built once for every joint that lists it, and
+    only those joints are scanned (spinegen.budget, the whole rig's
+    canvas): joints on different limbs do not interact. A joint takes the
+    value with the largest min(soft+, soft-); among values that reach
+    `need` both ways it takes the shortest (fewer vertices bent, and the
+    window G2 sums stays closest to the bend); ties go to the shorter.
+
+    WHY (P2 review R1): one reach for both elbows has to trade between them.
+    The monkey's left sleeve fans its art 1.7 halfwidths off the axis at the
+    crook, so a short band squeezes single triangles there below 0.3 of
+    their area (L+ 88 deg at 2.25 halfwidths, 96 at 2.5); its right sleeve
+    leans 1.2-2.3 halfwidths toward the torso, so a long band loses area in
+    G2's fixed window when the arm bends toward the body (R- 80 deg at
+    3.5, 90 at 2.25). The rig is fitted to the art, as a rigger would,
+    by the gate that judges it."""
+    from . import budget as budgetmod
+    t = tmpl.load(template) if isinstance(template, str) else template
+    candidates = candidates or {}
+    values = sorted({float(v) for vs in candidates.values() for v in vs})
+    table = {j: {} for j in candidates}
+    for v in values:
+        js = [j for j, vs in candidates.items() if v in [float(x) for x in vs]]
+        res = build(layers_dir, joints, t, bands={j: {"reach": {"upper": v}} for j in js}, **build_kw)
+        ir = res["ir"]
+        images = res["images"]
+        scan = budgetmod.scan(ir, images, res["joints"], step, max_angle, only=set(js))
+        for j in js:
+            d = scan["joints"][j]
+            table[j][f"{v:g}"] = {"+": d["+"]["soft"], "-": d["-"]["soft"],
+                                  "min": min(d["+"]["soft"], d["-"]["soft"]),
+                                  "limit_by": [d["+"]["limit_by"], d["-"]["limit_by"]],
+                                  "reach": res["report"]["bands"][j]["reach"]}
+            if progress:
+                progress(f"fit {j} upper reach {v:g}: soft +{d['+']['soft']:g} / -{d['-']['soft']:g}")
+    chosen = {}
+    for j, rows in table.items():
+        vals = sorted(rows, key=float)
+        enough = [v for v in vals if rows[v]["min"] >= need]
+        chosen[j] = float(enough[0] if enough else max(vals, key=lambda v: (rows[v]["min"], -float(v))))
+    return ({j: {"reach": {"upper": v}} for j, v in chosen.items()},
+            {"need": need, "step": step, "table": table, "chosen": chosen})
 
 
 def write(outdir, res):
@@ -631,6 +705,7 @@ class _Builder:
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
             band["pivot"] = band["center"]
             band["planted"] = self.bones[band["lower"]]["parent"] in targets
+        self._g2_windows(bands)
         self._stop_at_joints(bands)
         # two bands on one layer must not overlap: they share the distance
         # between them, half each, except that a band reaching less than its
@@ -681,6 +756,35 @@ class _Builder:
         for band in bands.values():
             band["lateral"] = self._lateral(band)
         return bands
+
+    def _g2_windows(self, bands):
+        """band["window"] = [up, lo]: the halfwidths from the pivot that
+        G2's area sum reads (art_gates WHICH TRIANGLES), from the joints'
+        geometry alone: mesh.BAND_EXTENT, or half the distance to the
+        nearest other banded joint on a shared layer, the same both ways;
+        lo never past the next joint down the lower bone; lo = 0 for a
+        planted foot (only the shin side bends). It is the band every joint
+        had before the template gave reach and overlap (P2 A1/A2), so G2
+        reads the same art before and after a band changes length.
+
+        WHY (P2 review R1): read over the band itself, a longer band
+        averages in more of the lightly bent limb, and the gate eases as
+        the rig changes: the monkey's right elbow toward the body read 94
+        deg over A1's 3.5-halfwidth band and 80 over this window."""
+        for jname, band in bands.items():
+            hw = band["halfwidth"]
+            ext = mesh.BAND_EXTENT
+            for other, bo in bands.items():
+                if other != jname and set(band["layers"]) & set(bo["layers"]):
+                    ext = min(ext, 0.5 * float(np.linalg.norm(band["pivot"] - bo["pivot"])) / hw)
+            lo = ext
+            for tj in self.spec[band["lower"]]["tails"]:
+                if tj in self.jxy:
+                    d = float((self.jxy[tj] - band["pivot"]) @ band["axis"]) / hw
+                    if d > 0:
+                        lo = min(lo, d)
+                    break
+            band["window"] = [ext, 0.0 if band["planted"] else lo]
 
     def _stop_at_joints(self, bands):
         """A band's lower half ends at the next joint down its lower bone
@@ -1186,12 +1290,14 @@ class _Builder:
         for jname, b in self.bands.items():
             # center = the joint the bone turns about; a one-sided (planted)
             # or asymmetric band also names where it deforms: band_center
-            # and extent (half its length) are the window G2 reads
-            # (art_gates.band_triangles)
+            # and extent (half its length) are where G2 holds every
+            # triangle to its range; "window" is where G2 sums the area
+            # (art_gates WHICH TRIANGLES, _g2_windows)
             up, lo = b["reach"]
             band = {"center": self.cv.to_world(b.get("pivot", b["center"])).tolist(), "upper": b["upper"],
                     "helper": b["helper"], "lower": b["lower"], "halfwidth": b["halfwidth"],
-                    "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": 0.5 * (up + lo)}
+                    "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": 0.5 * (up + lo),
+                    "window": [float(v) for v in b["window"]]}
             if b.get("planted"):
                 band["band_center"] = self.cv.to_world(b["center"]).tolist()
             elif abs(up - lo) > 1e-9:
@@ -1407,6 +1513,7 @@ def _round_band(b):
             "pivot": [round(float(v), 3) for v in b.get("pivot", b["center"])], "planted": bool(b.get("planted")),
             "halfwidth": round(b["halfwidth"], 3), "extent": round(b["extent"], 4),
             "reach": [round(float(v), 4) for v in b["reach"]],
+            "window": [round(float(v), 4) for v in b.get("window", b["reach"])],
             "lateral": round(b.get("lateral", weights.LATERAL), 3), "upper": b["upper"],
             "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"]}
 
@@ -1555,6 +1662,14 @@ def main(argv=None):
                     help="degrees a joint must hold (both ways) to stay rigid when choosing from a budget")
     ap.add_argument("--keep-joints", action="store_true",
                     help="keep elbows and knees where the joints file puts them (no recentering)")
+    ap.add_argument("--bands", default=None,
+                    help="JSON {joint: {reach, rows, row_points, overlap, compose}}: per-joint band shape over the "
+                         "template's (e.g. a band_fit.json written by --fit-reach)")
+    ap.add_argument("--fit-reach", default=None, metavar="JOINTS=VALUES",
+                    help="fit each joint's upper reach by the budget (fit_reach), e.g. "
+                         "'elbow_l,elbow_r=2,2.25,2.5,3,3.5'; the chosen reaches go into the build and "
+                         "<out>/band_fit.json")
+    ap.add_argument("--fit-need", type=float, default=90.0, help="degrees --fit-reach tries to hold both ways")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args(argv)
     modes = None
@@ -1567,9 +1682,31 @@ def main(argv=None):
                 print(f"  joint {j}: {modes[j]} ({why[j]})")
         else:
             modes = jm
+    bands = None
+    if a.bands:
+        with open(a.bands) as f:
+            bands = json.load(f)
+        bands = bands.get("bands", bands)
+    fit = None
+    if a.fit_reach:
+        names, vals = a.fit_reach.split("=", 1)
+        cands = {j.strip(): [float(v) for v in vals.split(",")] for j in names.split(",")}
+        fitted, fit = fit_reach(a.layers_dir, a.joints, a.template, cands, a.fit_need,
+                                progress=lambda m: print("  " + m), mode=a.mode,
+                                source=None if a.no_source else "auto", name=a.name, joint_modes=modes,
+                                mesh_profile=a.mesh, recenter=not a.keep_joints)
+        bands = dict(bands or {})
+        for j, spec in fitted.items():
+            bands[j] = dict(bands.get(j, {}), **spec)
+        for j, v in fit["chosen"].items():
+            print(f"  fit {j}: upper reach {v:g} halfwidths")
     res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name, modes, a.mesh,
-                not a.keep_joints)
+                not a.keep_joints, bands)
+    if fit is not None:
+        res["report"]["fit_reach"] = fit
     paths = write(a.out, res)
+    if fit is not None:
+        _dump(os.path.join(a.out, "band_fit.json"), {"bands": bands, "fit": fit})
     tot = res["report"]["totals"]
     ir = res["ir"]
     print(f"{paths['skeleton']}: {len(ir['bones'])} bones, {len(ir['slots'])} slots, {len(ir['ik'])} ik, "
