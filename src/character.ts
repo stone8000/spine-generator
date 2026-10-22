@@ -8,6 +8,7 @@ import { guessJoints, buildRig, type AlphaMap } from './autorig.ts';
 import { compileRecipe, type CompileResult, type RecipeAnimation } from './recipe.ts';
 import { checkSkeleton, type AnimationReport } from './check.ts';
 import { checkSeams, type SeamReport } from './seams.ts';
+import { poseUsage, type AngleBudget, type PoseUsage } from './poseChecks.ts';
 import { parseSkeleton, type SpineJson } from './spineJson.ts';
 import { estimateSize } from './roles.ts';
 import { JOINTS, CANVAS, type Joints, type CanvasSize } from './rigTemplate.ts';
@@ -45,6 +46,8 @@ export interface CharacterOptions {
   checkArt?: boolean;
   /** Sort slots after building instead of passing the order to buildRig (the older trial script's way). */
   sortSlots?: boolean;
+  /** Angle each joint's art holds (budget.json); joints turned past it are listed per animation. */
+  budget?: AngleBudget;
 }
 
 export interface CharacterResult {
@@ -57,6 +60,8 @@ export interface CharacterResult {
   summary: CompileResult['summary'];
   checks: AnimationReport[];
   seams: SeamReport[];
+  /** Joint turns, flips and frame 0 per animation. */
+  pose: PoseUsage[];
 }
 
 export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOptions = {}): CharacterResult {
@@ -79,20 +84,30 @@ export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOpt
   const loops = summary.filter((s) => s.loop).map((s) => s.name);
   const checks = checkSkeleton(json, { loops });
   const seams = checkSeams(json, alphas);
-  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, size, summary, checks, seams };
+  const pose = poseUsage(json, opts.budget);
+  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, size, summary, checks, seams, pose };
 }
 
-/** Per-animation result rows: smoothness score, non-info issues, seam issues. */
+/** An idle whose frame 0 is further than this from the drawn pose visibly jumps when the game swaps the still art for it. */
+export const FIRST_FRAME_TOLERANCE = 5;
+
+/** Per-animation result rows: smoothness score, non-info issues, seam issues, flips, budget overruns, frame 0. */
 export function characterRows(r: CharacterResult) {
   return r.summary.map((s) => {
     const c = r.checks.find((x) => x.name === s.name)!;
     const sm = r.seams.find((x) => x.animation === s.name)!;
+    const p = r.pose.find((x) => x.animation === s.name)!;
     return {
       name: s.name,
       duration: s.duration,
+      loop: !!s.loop,
       score: c.score,
       problems: c.issues.filter((i) => i.severity !== 'info').map((i) => i.message),
       seams: sm.issues.map((i) => `${i.joint}@${i.time}s ${Math.round(i.area)}px²`),
+      flips: p.flips.map((f) => `${f.label}${f.kind === 'mirror' ? '鏡像' : '反折'}@${f.time}s（${f.frames} 格）`),
+      over: p.over.map((o) => `${o.label} ${o.dir === '-' ? '−' : '+'}${Math.round(o.used)}°（預算 ${o.allowed}°）`),
+      firstFrame: p.firstFrame,
+      firstFrameOff: s.name.startsWith('idle') && p.firstFrame.degrees > FIRST_FRAME_TOLERANCE,
     };
   });
 }
