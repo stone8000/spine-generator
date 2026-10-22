@@ -99,8 +99,8 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     id: 'celebrate', confidence: 1, category: 'character', name: 'celebrate',
-    basis: '雙手要是 IK 目標骨才好看：手肘朝下、前臂往上揮，側面角色的上臂才不會橫過下巴；頭大手短時拳頭舉不過頭頂',
-    params: { angle: r(20, 90, 1, '°'), elbow: r(-80, 40, 1, '°'), swing: r(10, 180, 5, '°'), swingFront: r(10, 180, 5, '°'), lift: r(20, 250, 5), bounce: r(0, 40, 1), hair: HAIR },
+    basis: '雙手要是 IK 目標骨才好看：拳套舉到頭頂、上下揮動；側面角色的前手舉起時會經過臉前',
+    params: { angle: r(20, 90, 1, '°'), elbow: r(-80, 90, 1, '°'), angleBack: r(20, 120, 1, '°'), elbowBack: r(-80, 100, 1, '°'), swing: r(10, 180, 5, '°'), lift: r(20, 250, 5), bounce: r(0, 40, 1), hair: HAIR },
   },
 ];
 

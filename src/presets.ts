@@ -483,10 +483,11 @@ export const PRESETS: PresetDef[] = [
       HAIR_ROLE,
     ],
     params: [
-      { name: 'angle', default: 80, desc: '前臂舉起的角度：從水平往前算起（手是 IK 目標骨時）' },
-      { name: 'elbow', default: -10, desc: '上臂的角度：從水平往前算起，負的是手肘朝下、貼近身體，上臂才不會橫過下巴（手是 IK 目標骨時）' },
-      { name: 'swing', default: 30, desc: '後手上臂最多離開畫的姿勢幾度：畫成手肘外張或下垂的角色，照 elbow 硬擺會把肩膀端轉出軀幹、看起來手和身體分離（手是 IK 目標骨時）' },
-      { name: 'swingFront', default: 60, desc: '前手上臂最多離開畫的姿勢幾度：前手畫在軀幹上面、肩膀端多畫進軀幹，轉得比後手多也不會露底，拳頭才舉得高（手是 IK 目標骨時）' },
+      { name: 'angle', default: 85, desc: '前手前臂舉起的角度：從水平往前算起（手是 IK 目標骨時）' },
+      { name: 'elbow', default: 40, desc: '前手上臂的角度：從水平往前算起。40° 時拳套到頭頂高度；調低（負的是手肘朝下）手臂就不會經過臉，但看起來不像慶祝（手是 IK 目標骨時）' },
+      { name: 'angleBack', default: 95, desc: '後手前臂的角度（手是 IK 目標骨時）' },
+      { name: 'elbowBack', default: 60, desc: '後手上臂的角度：比前手高一點，拳套從頭後面露出來（手是 IK 目標骨時）' },
+      { name: 'swing', default: 180, desc: '上臂最多離開畫的姿勢幾度（180 = 不限制）：畫成手肘外張或下垂、肩膀端沒有多畫的角色，轉太多會露出切口、看起來手和身體分離，這時調小（手是 IK 目標骨時）' },
       { name: 'lift', default: 120, desc: '雙手抬高（手不是 IK 目標骨時才用）' },
       { name: 'bounce', default: 12, desc: '身體彈跳幅度' },
       HAIR_PARAM,
@@ -496,25 +497,24 @@ export const PRESETS: PresetDef[] = [
       const out = empty(D, true);
       const s = c.size;
       out.screen.push({ bone: c.role('hip'), channel: 'y', motion: wave({ amplitude: c.param('bounce', 12) * s, period: 0.6, peakAt: 0.15, duration: D }) });
-      const angle = c.param('angle', 80);
-      const elbowAngle = c.param('elbow', -10);
-      const swing = c.param('swing', 30);
-      const swingFront = c.param('swingFront', 60);
+      const angle = c.param('angle', 85);
+      const elbowAngle = c.param('elbow', 40);
+      const swing = c.param('swing', 180);
       c.roleList('fists').forEach((f, i) => {
         const peakAt = 0.2 + (i * 2) / 30; // the far fist trails by 2 frames; a peak between key frames makes the runtime's 10-line curve segments jolt
         const chain = c.ikChain(f);
         // keep the upper arm within `swing` of how it was drawn: the shoulder end is only painted to cover the torso
         // around the drawn angle, so a big turn (a rear arm drawn hanging out to the side) shows its cut edge
         const drawn = chain && (Math.atan2(chain.mid.y - chain.root.y, (chain.mid.x - chain.root.x) * c.facing) * 180) / Math.PI;
-        // the far arm stays 35° (upper arm) and 30° (forearm) below the near one: tucked behind it, under the chin
-        const want = elbowAngle - i * 35;
+        // the far arm goes a little higher, so its glove shows over the back of the head instead of stacking on the near one
+        const want = i ? c.param('elbowBack', 60) : elbowAngle;
         const off = drawn === undefined ? 0 : ((want - drawn + 540) % 360) - 180;
-        const cap = i === 0 ? swingFront : swing;
-        const elbowPose = drawn === undefined ? want : drawn + Math.max(-cap, Math.min(cap, off));
-        // A side-on character's front shoulder sits right under the jaw, so any arm raised from the shoulder (even a
-        // straight one at 45°) sweeps the upper arm across the chin and parks the glove in front of the face. Pose the
-        // arm instead: upper arm `elbow` degrees from forward (below horizontal: the elbow stays down by the ribs),
-        // forearm `angle` degrees up, and solve the fist target from that. The IK only lands the elbow there when it bends
+        const foreAngle = i ? c.param('angleBack', 95) : angle;
+        const elbowPose = drawn === undefined ? want : drawn + Math.max(-swing, Math.min(swing, off));
+        // Pose each arm by its two angles (upper arm `elbow`, forearm `angle`, from forward) and solve the fist target
+        // from them, so the glove ends up at the same place on any rig: at the defaults, at the top of the head with the
+        // elbow forward. A side-on character's front arm crosses the face on the way up; a negative `elbow` keeps it
+        // below the jaw, but then it no longer reads as a celebration. The IK only lands the elbow there when it bends
         // to the same side as in the setup pose, so a chain that bends the other way keeps the plain lift.
         const posed = chain && (() => {
           const [l1, l2] = chain.lengths;
@@ -524,15 +524,20 @@ export const PRESETS: PresetDef[] = [
             return { ex, ey, x: ex + Math.cos(w) * l2 * c.facing, y: ey + Math.sin(w) * l2 };
           };
           const side = (p: { x: number; y: number }, q: { x: number; y: number }) => Math.sign((q.x - chain.root.x) * (p.y - chain.root.y) - (q.y - chain.root.y) * (p.x - chain.root.x));
-          const p = at(elbowPose, angle - i * 30);
+          const p = at(elbowPose, foreAngle);
           return side(chain.mid, chain.target) === side({ x: p.ex, y: p.ey }, p) ? at : undefined;
         })();
+        if (chain && !posed && Math.abs(off) > swing) {
+          // the capped pose would flip the elbow: leave the arm as drawn and only pump it
+          out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 0.06 * chain.reach, period: 0.6, peakAt, duration: D }) });
+          return;
+        }
         if (!chain || !posed) {
           out.screen.push({ bone: f, channel: 'y', motion: wave({ amplitude: 25 * s, period: 0.6, peakAt, offset: c.param('lift', 120) * s, duration: D }) });
           return;
         }
         // the pump: the forearm swings 10° and the upper arm 5° around the pose, together
-        const fore = wave({ amplitude: 10, period: 0.6, peakAt, offset: angle - i * 30, duration: D });
+        const fore = wave({ amplitude: 10, period: 0.6, peakAt, offset: foreAngle, duration: D });
         const upper = wave({ amplitude: 5, period: 0.6, peakAt, offset: elbowPose, duration: D });
         const fist = (t: number) => posed(upper.value(t), fore.value(t));
         out.screen.push({ bone: f, channel: 'x', motion: fn(D, (t) => fist(t).x - chain.target.x, [], true) });

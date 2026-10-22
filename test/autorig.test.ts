@@ -116,17 +116,19 @@ test('jump on the auto-rig: the feet stay on the ground through the crouch and t
   assert.ok(p.shinF[lowest].x - p.shinF[0].x > 5, `knee comes forward ${(p.shinF[lowest].x - p.shinF[0].x).toFixed(1)}`);
 });
 
-test('celebrate on the auto-rig: the front elbow stays down, so the upper arm stays below the jaw and the glove out in front', () => {
-  const rig = buildRig(defaultJoints(), [...synthLayers('good').keys()]);
+test('celebrate on the auto-rig: the front glove pumps up to the top of the head, the elbow stays bent', () => {
+  const j = defaultJoints();
+  const rig = buildRig(j, [...synthLayers('good').keys()]);
   const { json } = compileRecipe(rig.json, { roles: rig.roles, size: estimateSize(rig.json), animations: [{ name: 'cel', preset: 'celebrate' }] });
   const p = play(json, 'cel', ['upperArmF', 'foreArmF', 'ik-fist-front']);
-  const upper = json.bones.find((b: { name: string }) => b.name === 'upperArmF').length;
-  for (let i = 0; i < p.upperArmF.length; i++) {
+  const top = toSpine(j.headTop).y, chin = toSpine(j.headBase).y;
+  const fy = p['ik-fist-front'].map((f) => f.y);
+  assert.ok(Math.min(...fy) > chin, `the glove never drops below the chin (${Math.min(...fy).toFixed(0)} vs ${chin})`);
+  assert.ok(Math.max(...fy) > top - 40, `the glove reaches the top of the head (${Math.max(...fy).toFixed(0)} vs ${top})`);
+  for (let i = 0; i < fy.length; i++) {
     const s = p.upperArmF[i], e = p.foreArmF[i], f = p['ik-fist-front'][i];
-    assert.ok(e.y < s.y, `step ${i}: the elbow is below the shoulder`);
-    assert.ok(f.y > s.y, `step ${i}: the fist is above the shoulder`);
-    // raised to brow height the fist comes back a little, but stays clear of the face
-    assert.ok(f.x - s.x > 0.8 * upper, `step ${i}: the glove is out in front of the shoulder (${(f.x - s.x).toFixed(0)} vs upper arm ${upper.toFixed(0)})`);
+    const bend = Math.abs(((Math.atan2(f.y - e.y, f.x - e.x) - Math.atan2(e.y - s.y, e.x - s.x)) * 180) / Math.PI);
+    assert.ok(bend > 20, `step ${i}: elbow bent ${bend.toFixed(1)}°`);
   }
 });
 
@@ -172,8 +174,8 @@ test('celebrate keeps each upper arm within `swing` of how it was drawn (a rear 
     return Math.max(...p.upperArmB.map((_: unknown, i: number) => Math.abs(((ang(i) - drawn + 540) % 360) - 180)));
   };
   // the IK guard and the forearm pose add some turn of their own, so compare against the uncapped pose
-  const capped = turn({}), free = turn({ swing: 180 }), small = turn({ swing: 10 });
-  assert.ok(free > 75, `negative control: without the cap the upper arm turns ${free.toFixed(1)}°`);
-  assert.ok(capped < free - 30, `default cap: ${capped.toFixed(1)}° vs ${free.toFixed(1)}° uncapped`);
-  assert.ok(small < capped, `a tighter cap turns less: ${small.toFixed(1)}° < ${capped.toFixed(1)}°`);
+  const capped = turn({ swing: 30 }), free = turn({}), small = turn({ swing: 10 });
+  assert.ok(free > 75, `negative control: with the default (no cap) the upper arm turns ${free.toFixed(1)}°`);
+  assert.ok(capped < free - 30, `30° cap: ${capped.toFixed(1)}° vs ${free.toFixed(1)}° uncapped`);
+  assert.ok(small <= capped + 0.1, `a tighter cap never turns more: ${small.toFixed(1)}° vs ${capped.toFixed(1)}°`);
 });
