@@ -2,7 +2,8 @@
 
     python -m spinegen.bridge_motionkit <rig.json> <atlas> -o <outdir>
         [--presets fighter-idle-bounce,punch,celebrate,hit-react] [--facing 1|-1]
-        [--name NAME] [--arm-softness 0.1] [--leg-softness 0.15] [--no-ik-guard] [--no-qa]
+        [--name NAME] [--arm-softness 0.1] [--leg-softness 0.15] [--no-ik-guard | --kit-guard]
+        [--budget auto|none|budget.json] [--joints joints.json] [--no-qa]
 
 WHY
   spinegen builds rigs that hold big angles (meshes across the joints,
@@ -62,6 +63,29 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
        left to it (baking the kit's hair physics on top would move it twice).
      size is the kit's own estimate (`spine-motion init`), so preset
      distances follow the rig exactly as the kit would scale them.
+  3b. IK GUARD PER CHAIN (recipe `ikGuardChains`; guard_chains): the kit's
+     guard keeps a fist target within 85-95 % of the arm's bone lengths;
+     an arm drawn straight sits past that at rest (the monkey: 99.8 %, and
+     its target is pushed further for the softness), so the kit's guard
+     bent the drawn elbows 32-53 deg before any motion (56.7 px of
+     vertices at amplitude 0). Per chain the knee is the setup distance
+     when that is past 85 %, so the drawn pose maps to itself, and the
+     ceiling is 3/4 of the way to where the softened solve goes straight.
+     `rest_probe` checks it: frame 0 of the first preset at amplitude 0
+     against the setup pose. --kit-guard keeps the kit's.
+  3c. BUDGET (budget.json and joints.json beside rig.json, from
+     spinegen.budget; fit_budget): the presets do not know the art's
+     limits. Each animation is played in spine-core 4.3.13 and every
+     joint's angle read (spinegen.budget_motion): held past theta_soft for
+     HOLD_SECONDS, or past theta_hard on any frame, or any G1 fold, is out
+     of budget. The joints' groups (each arm through its fist target, the
+     body through hip / chest: planted legs bend only as the body moves)
+     get an amplitude factor (recipe `boneAmplitude`), bisected until the
+     animation is in budget; bridge.json lists per animation which joints
+     were clamped, why, the factor and the angles before / after. An arm
+     carried at under ART_REQUEST_BELOW of its motion gets an art request
+     (artreq.json: a pose to draw, or, when the limit is a cut-out seam,
+     the joint's art).
   4. node motionkit/bin/spine-motion.js generate <rig43> <recipe> --check
      (npm ci in motionkit/ first when its runtime is missing), plus
      `check --json` for the per-animation scores.
@@ -195,7 +219,7 @@ def soften_ik(out, c, frac):
     for k in kids:
         k["x"], k["y"] = lbs.to_local(m_new, *bind[k["name"]][4:6])
     c["softness"] = new
-    return {"softness": round(new, 4), "softness_before": round(old, 4), "reach": round(reach, 3),
+    return {"softness": round(new, 4), "softness_before": round(old, 4), "reach": round(reach, 3), "soft_eff": new * eff,
             "target_distance": round(d, 3), "pushed_to": round(td, 3), "push_px": round(math.hypot(wx - m_old[4], wy - m_old[5]), 3),
             "target_xy": [wx, wy], "children_kept": [k["name"] for k in kids]}
 
@@ -285,7 +309,8 @@ def add_arm_ik(ir, softness=0.1):
             out, srep = _soften_checked(out, c, softness, ir, set(), report["notes"])
             if srep:
                 arm.update(softness=srep["softness"], target_xy=srep["target_xy"], push_px=srep["push_px"],
-                           arm_length=srep["reach"], wrist_distance=srep["target_distance"])
+                           arm_length=srep["reach"], wrist_distance=srep["target_distance"],
+                           soft_eff=srep["soft_eff"], target_distance=srep["pushed_to"])
     report["setup_error_px"] = setup_error(ir, out)
     if report["setup_error_px"] > SETUP_TOL:
         report["notes"].append(f"arm IK moves the setup pose by {report['setup_error_px']:.4f} px")
@@ -402,6 +427,239 @@ def make_recipe(roles, presets, size, facing=1, ik_guard=True):
     return {"fps": 30, "facing": facing, "size": size, "ikGuard": bool(ik_guard), "roles": roles, "animations": anims}
 
 
+# ---------------------------------------------------------------- IK guard per chain
+
+GUARD_KNEE = 0.85    # the kit's own guard: identity up to 85 % of the chain's reach ...
+GUARD_SHARE = 0.75   # ... ours eases out to this share of the way from the knee to where the solve goes straight
+GUARD_MIN_ROOM = 0.02  # fraction of reach: the least room the ease gets (a target drawn at the very end)
+
+
+def guard_chains(ir):
+    """The kit's IK reach guard, per screen-driven two-bone IK, from the SETUP reach (recipe
+    `ikGuardChains`, motionkit/src/solve.ts).
+
+    WHY: the kit's guard is identity up to 85 % of the chain's bone lengths and never lets the
+    target past 95 %. An arm drawn straight (the monkey's: wrist at 99.8 % of the arm) with a
+    target pushed out for its softness sits far past that at rest, so the default guard pulls
+    every fist in from frame 0 and bends the drawn elbows 35-53 deg before the preset moves
+    anything. Here the knee is the setup distance itself when that is further out than 85 %, so
+    the drawn pose maps to itself, and the ceiling is GUARD_SHARE of the way from the knee to
+    where this chain's solve goes straight (reach + softness, the end of spine-core's ease):
+    the target eases in before the elbow locks, so the guard still stops the snap.
+    Returns {target: {knee, max, setup, reach, straight_at}} in world units from the chain root."""
+    bind = lbs.bind_pose(ir)
+    bones = {b["name"]: b for b in ir["bones"]}
+    out = {}
+    for c in ir["ik"]:
+        if len(c["bones"]) != 2 or not c.get("runs", True):
+            continue
+        up, fo = bones[c["bones"][0]], bones[c["bones"][1]]
+        root = bind[up["name"]][4:6]
+        elbow = bind[fo["name"]][4:6]
+        tip = lbs.to_world(bind[fo["name"]], fo["length"], 0.0)
+        reach = math.dist(root, elbow) + math.dist(elbow, tip)
+        eff = abs(up["scale_x"]) * (abs(fo["scale_x"]) + 1) * 0.5
+        straight = reach + float(c.get("softness", 0.0)) * eff
+        d0 = math.dist(root, bind[c["target"]][4:6])
+        knee = max(GUARD_KNEE * reach, d0)
+        room = max(GUARD_SHARE * (straight - knee), GUARD_MIN_ROOM * reach)
+        out[c["target"]] = {"knee": round(knee, 4), "max": round(knee + room, 4), "setup": round(d0, 4),
+                            "reach": round(reach, 4), "straight_at": round(straight, 4)}
+    return out
+
+
+# ---------------------------------------------------------------- budget-aware amplitudes
+
+FIT_TOL = 0.04      # amplitude factors are bisected to this
+FIT_ROUNDS = 14
+ART_REQUEST_BELOW = 0.75  # an arm the art carries at under 3/4 of the preset's motion gets an art request
+
+
+def joint_groups(ir, roles, joints):
+    """{group: {"bones": [driver bones], "joints": [joint names]}}: what the bridge scales when a
+    joint leaves the budget. A joint of an arm IK chain (the shoulder and elbow bones, by the
+    joints file) belongs to that arm, scaled through its fist target; every other joint (hips,
+    knees, ankles: the feet stay planted, so the legs bend only as the body moves) belongs to
+    the body, scaled through the hip / body / chest roles."""
+    groups = {}
+    in_arm = {}
+    for c in ir["ik"]:
+        if c["name"].startswith("arm_ik_"):
+            g = "arm_" + c["name"][len("arm_ik_"):]
+            groups[g] = {"bones": [c["target"]], "joints": []}
+            for b in c["bones"]:
+                in_arm[b] = g
+    body = []
+    for r in ("hip", "body", "chest"):
+        v = roles.get(r)
+        if isinstance(v, str) and v not in body:
+            body.append(v)
+    groups["body"] = {"bones": body, "joints": []}
+    for j in joints:
+        groups[in_arm.get(j["bone"], "body")]["joints"].append(j["name"])
+    return {g: v for g, v in groups.items() if v["bones"]}
+
+
+def _blame(res, groups):
+    """Groups whose joints are out of budget in this measurement; a fold with every joint in
+    budget blames the group whose joint came closest to its hard limit."""
+    bad = {g for g, v in groups.items() if any(not res["joints"][j]["ok"] for j in v["joints"])}
+    if not bad and res["max_folds"]:
+        best, worst = None, -1.0
+        for g, v in groups.items():
+            for j in v["joints"]:
+                r = res["joints"][j]
+                for d in ("+", "-"):
+                    if r[d]["hard"] and math.isfinite(r[d]["hard"]):
+                        f = r[d]["peak"] / r[d]["hard"]
+                        if f > worst:
+                            best, worst = g, f
+        if best:
+            bad = {best}
+    return bad
+
+
+def _anim_recipe(recipe, anim, factors, groups):
+    a = dict(anim)
+    amp = {b: round(f, 4) for g, f in factors.items() for b in groups[g]["bones"] if f != 1}
+    if amp:
+        a["boneAmplitude"] = amp
+    else:
+        a.pop("boneAmplitude", None)
+    return dict(recipe, animations=[a])
+
+
+def fit_budget(rig43, atlas, recipe, joints, groups, work, loops=()):
+    """Per animation, the largest per-group amplitude factors at which every joint stays in
+    the art budget (holds within theta_soft, transits within theta_hard; spinegen.budget_motion)
+    and spine-core 4.3.13 counts no fold.
+
+    Bisection per group (a group out of budget shrinks, one in budget grows back toward its
+    last failing value); the groups couple (the body moving under a still fist bends the arm),
+    so if the bisection ends out of budget, one common multiplier on top is bisected the same
+    way (at 0 the animation is the setup pose, which is in budget). Returns {anim name: report}."""
+    from . import budget_motion as bmo
+    os.makedirs(work, exist_ok=True)
+    out = {}
+    for anim in recipe["animations"]:
+        name = anim["name"]
+        path = os.path.join(work, f"{name}.json")
+        rpath = os.path.join(work, f"{name}.recipe.json")
+
+        def evaluate(factors):
+            with open(rpath, "w") as f:
+                json.dump(_anim_recipe(recipe, anim, factors, groups), f, indent=1)
+            kit("generate", rig43, rpath, "-o", path)
+            return bmo.measure(path, atlas, joints, [name], loops)[name]
+
+        f = {g: 1.0 for g in groups}
+        first = evaluate(f)
+        trace = [{"factors": dict(f), "ok": first["ok"]}]
+        rec = {"before": _summ(first), "clamped": {}, "factors": dict(f), "fallback": None, "rounds": 1}
+        if first["ok"]:
+            rec["after"] = rec["before"]
+            out[name] = rec
+            continue
+        lo = {g: 0.0 for g in groups}
+        hi = {g: None for g in groups}
+        res, best = first, None
+        for _ in range(FIT_ROUNDS):
+            bad = _blame(res, groups)
+            if res["ok"]:
+                best = dict(f) if best is None or sum(f.values()) > sum(best.values()) else best
+            nxt = dict(f)
+            for g in groups:
+                if g in bad:
+                    hi[g] = f[g]
+                    nxt[g] = (lo[g] + hi[g]) / 2
+                elif hi[g] is not None:
+                    lo[g] = f[g]
+                    nxt[g] = (lo[g] + hi[g]) / 2 if hi[g] - lo[g] > FIT_TOL else lo[g]
+            if res["ok"] and all(hi[g] is None or hi[g] - lo[g] <= FIT_TOL for g in groups):
+                break
+            if nxt == f:
+                break
+            f = nxt
+            res = evaluate(f)
+            rec["rounds"] += 1
+            trace.append({"factors": dict(f), "ok": res["ok"]})
+        if best is None or not res["ok"]:
+            if best is not None:
+                f = best
+                res = evaluate(f)
+                rec["rounds"] += 1
+            else:  # coupled: one multiplier on the bisected factors
+                base, glo, ghi = dict(f), 0.0, 1.0
+                for _ in range(FIT_ROUNDS):
+                    m = (glo + ghi) / 2
+                    r = evaluate({g: v * m for g, v in base.items()})
+                    rec["rounds"] += 1
+                    if r["ok"]:
+                        glo = m
+                    else:
+                        ghi = m
+                    if ghi - glo <= FIT_TOL / 2:
+                        break
+                f = {g: v * glo for g, v in base.items()}
+                res = evaluate(f)
+                rec["fallback"] = {"multiplier": round(glo, 4), "base": {g: round(v, 4) for g, v in base.items()}}
+        rec["factors"] = {g: round(v, 4) for g, v in f.items()}
+        rec["after"] = _summ(res)
+        rec["ok"] = res["ok"]
+        rec["trace"] = trace
+        for g, v in groups.items():
+            for j in v["joints"]:
+                b = first["joints"][j]
+                if not b["ok"]:
+                    a = res["joints"][j]
+                    d = b["worst_dir"]
+                    rec["clamped"][j] = {"group": g, "factor": rec["factors"][g], "why": b["why"],
+                                         "hard_by": b[d]["hard_by"] if b[d]["transit"] else b[d]["soft_by"],
+                                         "before": [b["max_minus"], b["max_plus"]], "after": [a["max_minus"], a["max_plus"]],
+                                         "soft": [b["-"]["soft"], b["+"]["soft"]], "hard": [b["-"]["hard"], b["+"]["hard"]]}
+        out[name] = rec
+    return out
+
+
+def _summ(res):
+    return {"ok": res["ok"], "max_folds": res["max_folds"], "fold_frames": res["fold_frames"],
+            "joints": {n: {k: r[k] for k in ("ok", "max_plus", "max_minus", "t0")} | ({"why": r["why"]} if not r["ok"] else {})
+                       for n, r in res["joints"].items()}}
+
+
+def art_requests(fit, recipe, groups, roles):
+    """spinegen-artreq/1 items for the arms the budget could not carry: a preset that needs an
+    arm far past what the drawn arm bends (the monkey's celebrate: fists over the head from arms
+    drawn hanging) is not a motion to scale away but a pose to draw (a raised-arm attachment)."""
+    items = []
+    presets = {a["name"]: a["preset"] for a in recipe["animations"]}
+    for name, rec in fit.items():
+        for g, fac in rec["factors"].items():
+            if not g.startswith("arm_") or fac >= ART_REQUEST_BELOW:
+                continue
+            clamped = {j: c for j, c in rec["clamped"].items() if c["group"] == g}
+            if not clamped:
+                continue
+            side = g[len("arm_"):]
+            asked = "; ".join(f"{j} {c['before'][0]:.0f}..{c['before'][1]:.0f} deg against soft "
+                              f"{-c['soft'][0]:.0f}..{c['soft'][1]:.0f}, hard {-c['hard'][0]:.0f}..{c['hard'][1]:.0f}"
+                              for j, c in clamped.items())
+            seams = all(str(c.get("hard_by") or "").startswith("seam") for c in clamped.values())
+            if seams:  # a cut-out joint opens before it bends: the joint's art, not a pose
+                what = (f"overlapping art at the {side} arm's joints ({', '.join(clamped)}): the cut-out opens a "
+                        f"seam within a few degrees (or rebuild the arm in joint mode)")
+            else:
+                what = (f"a second {side} arm drawn in the pose '{name}' reaches ({presets[name]}"
+                        + (": raised, elbow bent, fist above the shoulder" if presets[name] == "celebrate" else "")
+                        + ") to swap in, since the drawn arm folds before it gets there")
+            items.append({"id": f"pose_{name}_{g}", "kind": "joint_art" if seams else "attachment", "slot": None,
+                          "layer": None, "what": what,
+                          "why": f"the preset asks {asked}; the drawn arm carries {fac:.0%} of its motion "
+                                 f"(target {groups[g]['bones'][0]}), so '{name}' plays scaled down",
+                          "anim": name, "factor": fac, "status": "open"})
+    return items
+
+
 # ---------------------------------------------------------------- node steps
 
 def ensure_kit():
@@ -471,7 +729,7 @@ def qa_check(motion_json, atlas, ir_summary_path, out_path):
 # ---------------------------------------------------------------- the bridge
 
 def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, arm_softness=0.1, qa=True,
-        leg_softness=LEG_SOFTNESS, ik_guard=True):
+        leg_softness=LEG_SOFTNESS, ik_guard=True, kit_guard=False, budget="auto", joints=None):
     ir = irmod.load(rig_path)
     name = name or ir.get("name") or "rig"
     os.makedirs(out_dir, exist_ok=True)
@@ -505,6 +763,35 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
     size, guessed = kit_size(rig43)
     roles, notes = roles_from_template(bridged, arms, facing)
     recipe = make_recipe(roles, presets, size, facing, ik_guard)
+    if ik_guard and not kit_guard:
+        recipe["ikGuardChains"] = {t: {"knee": g["knee"], "max": g["max"]} for t, g in guard_chains(bridged).items()}
+        rep["ik_guard"] = {"mode": "per chain", "chains": guard_chains(bridged)}
+    else:
+        rep["ik_guard"] = {"mode": "kit default" if ik_guard else "off"}
+    loops = [a["name"] for a in recipe["animations"] if a["preset"] in ("fighter-idle-bounce", "fighter-idle-weave", "celebrate", "breathe")]
+    if ik_guard:
+        rep["ik_guard"]["rest_px"] = rest_probe(rig43, atlas_out, recipe, os.path.join(out_dir, "work"))
+
+    budget_path, joints_path = _budget_files(rig_path, budget, joints)
+    if budget_path:
+        from . import budget_motion as bmo
+        bj = bmo.load(budget_path, joints_path)
+        groups = joint_groups(bridged, roles, bj)
+        fit = fit_budget(rig43, atlas_out, recipe, bj, groups, os.path.join(out_dir, "work"), set(loops))
+        for a in recipe["animations"]:
+            amp = {b: fit[a["name"]]["factors"][g] for g in groups for b in groups[g]["bones"]
+                   if fit[a["name"]]["factors"][g] != 1}
+            if amp:
+                a["boneAmplitude"] = amp
+        reqs = art_requests(fit, recipe, groups, roles)
+        rep["budget"] = {"budget": os.path.abspath(budget_path), "joints": os.path.abspath(joints_path),
+                         "hold_seconds": bmo.HOLD_SECONDS, "fps": bmo.FPS, "groups": groups, "fit": fit,
+                         "artreq": reqs}
+        if reqs:
+            with open(os.path.join(out_dir, "artreq.json"), "w") as f:
+                json.dump({"schema": "spinegen-artreq/1", "items": reqs}, f, indent=1, ensure_ascii=False)
+    else:
+        rep["budget"] = None
     recipe_path = os.path.join(out_dir, f"{name}.recipe.json")
     with open(recipe_path, "w") as f:
         json.dump(recipe, f, indent=1, ensure_ascii=False)
@@ -512,7 +799,6 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
 
     motion = os.path.join(out_dir, f"{name}.motion.json")
     rep["generate_stdout"] = kit("generate", rig43, recipe_path, "-o", motion, "--check")
-    loops = [a["name"] for a in recipe["animations"] if a["preset"] in ("fighter-idle-bounce", "fighter-idle-weave", "celebrate", "breathe")]
     checks = json.loads(kit("check", motion, "--loops", ",".join(loops), "--json"))
     rep["smoothness"] = [{"name": r["name"], "score": r["score"], "loop": r["loop"], "keys": r["keyCount"],
                           "errors": sum(i["severity"] == "error" for i in r["issues"]),
@@ -531,6 +817,41 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
     with open(os.path.join(out_dir, "bridge.json"), "w") as f:
         json.dump(rep, f, indent=1, ensure_ascii=False)
     return rep
+
+
+def _budget_files(rig_path, budget, joints):
+    """(budget.json, joints.json) to fit against, or (None, None). "auto": the ones the rig
+    builder and spinegen.budget leave beside rig.json, when both are there."""
+    if not budget:
+        return None, None
+    d = os.path.dirname(os.path.abspath(rig_path))
+    b = os.path.join(d, "budget.json") if budget == "auto" else budget
+    j = joints or os.path.join(d, "joints.json")
+    if not (os.path.exists(b) and os.path.exists(j)):
+        if budget == "auto":
+            return None, None
+        raise FileNotFoundError(f"budget {b} or joints {j} missing")
+    return b, j
+
+
+def rest_probe(rig43, atlas, recipe, work):
+    """Largest vertex distance between the setup pose and frame 0 of the first animation played
+    at amplitude 0 (every preset track at rest): what the IK guard alone does to the drawn
+    pose. 0 means a preset that starts at rest starts in the drawn pose."""
+    os.makedirs(work, exist_ok=True)
+    a = dict(recipe["animations"][0], name="rest_probe", amplitude=0)
+    rp, mp = os.path.join(work, "rest_probe.recipe.json"), os.path.join(work, "rest_probe.json")
+    with open(rp, "w") as f:
+        json.dump(dict(recipe, animations=[a]), f, indent=1)
+    kit("generate", rig43, rp, "-o", mp)
+    fa = oracle.dump(mp, atlas, runtime="4.3")["frames"][0]["slots"]
+    fb = oracle.dump(mp, atlas, anim="rest_probe", times=[0.0], runtime="4.3")["frames"][0]["slots"]
+    worst = 0.0
+    for slot, sa in fa.items():
+        va, vb = sa["vertices"] or [], fb[slot]["vertices"] or []
+        for i in range(0, min(len(va), len(vb)), 2):
+            worst = max(worst, math.hypot(va[i] - vb[i], va[i + 1] - vb[i + 1]))
+    return worst
 
 
 def _atlas_pages(atlas):
@@ -556,10 +877,16 @@ def main(argv=None):
     ap.add_argument("--leg-softness", type=float, default=LEG_SOFTNESS,
                     help="leg IK softness, fraction of leg length (0 keeps the rig's)")
     ap.add_argument("--no-ik-guard", action="store_true", help="recipe ikGuard false (the kit's 85-95%% reach guard off)")
+    ap.add_argument("--kit-guard", action="store_true",
+                    help="the kit's own 85-95%% guard instead of the bridge's per-chain one (from the setup reach)")
+    ap.add_argument("--budget", default="auto",
+                    help="budget.json to fit the presets' amplitudes to ('auto': beside rig.json; 'none': no fit)")
+    ap.add_argument("--joints", default=None, help="joints.json for --budget (default: beside rig.json)")
     ap.add_argument("--no-qa", action="store_true")
     args = ap.parse_args(argv)
     rep = run(args.rig, args.atlas, args.out, [p.strip() for p in args.presets.split(",") if p.strip()],
-              args.facing, args.name, args.arm_softness, not args.no_qa, args.leg_softness, not args.no_ik_guard)
+              args.facing, args.name, args.arm_softness, not args.no_qa, args.leg_softness, not args.no_ik_guard,
+              args.kit_guard, None if args.budget == "none" else args.budget, args.joints)
     for side, a in rep["arm_ik"]["arms"].items():
         print(f"arm IK {side}: {a['upper']} -> {a['fore']} onto {a['target']}, bendPositive {a['bend_positive']}, "
               f"softness {a['softness']} (target pushed {a.get('push_px', 0)} px past the wrist)")
@@ -570,6 +897,15 @@ def main(argv=None):
              if "setup_vertices_43_px" in rep else ""))
     for n in rep["leg_ik"]["notes"] + rep["arm_ik"]["notes"] + rep["recipe"]["notes"]:
         print("note:", n)
+    g = rep["ik_guard"]
+    print(f"IK guard: {g['mode']}" + (f"; amplitude-0 frame 0 vs setup {g['rest_px']:.3f} px" if "rest_px" in g else ""))
+    if rep["budget"]:
+        for an, fr in rep["budget"]["fit"].items():
+            cl = ", ".join(f"{j} ({c['why']}; {c['group']} x{c['factor']:.2f})" for j, c in fr["clamped"].items())
+            print(f"budget {an}: " + ("in budget as the preset is" if not fr["clamped"] else f"clamped {cl}")
+                  + ("" if fr["after"]["ok"] else "  STILL OVER"))
+        for it in rep["budget"]["artreq"]:
+            print("art request:", it["what"])
     print(f"recipe: size {rep['recipe']['size']}, roles {json.dumps(rep['recipe']['roles'], ensure_ascii=False)}")
     for s in rep["smoothness"]:
         print(f"  {s['name']:10s} score {s['score']:3d}  errors {s['errors']}  warnings {s['warnings']}  keys {s['keys']}")

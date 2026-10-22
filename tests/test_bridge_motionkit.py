@@ -245,3 +245,110 @@ def test_bridge_end_to_end(tmp_path):
         assert gates[gid]["pass"], (gid, gates[gid])
     assert gates["C1_ORACLE"]["skipped"]
     assert os.path.exists(tmp_path / "out" / "bridge.json")
+
+
+# ---------------------------------------------------------------- IK guard per chain, budget fit
+
+def test_guard_chains_leave_the_drawn_arm_alone():
+    """The per-chain guard's knee is the setup distance when the arm is drawn past 85 %
+    (straight arms, targets pushed out for softness), so the drawn pose maps to itself;
+    its ceiling stays short of where the softened solve goes straight."""
+    for bend in (0.0, 12.0, 90.0):
+        ir, _, _ = biped(bend_l=bend, bend_r=-bend)
+        out, rep = bm.add_arm_ik(ir)
+        g = bm.guard_chains(out)
+        assert set(g) == {"ik_hand_l", "ik_hand_r"}
+        for t, c in g.items():
+            assert c["knee"] >= c["setup"] - 1e-9 and c["knee"] >= bm.GUARD_KNEE * c["reach"] - 1e-9
+            assert c["knee"] < c["max"] <= max(c["straight_at"], c["knee"] + bm.GUARD_MIN_ROOM * c["reach"]) + 1e-9
+            side = t[-1]
+            assert c["straight_at"] == pytest.approx(rep["arms"][side]["arm_length"] + rep["arms"][side]["soft_eff"], abs=1e-3)
+            if bend == 90.0:  # a bent arm sits well inside 85 %: the kit's own knee
+                assert c["knee"] == pytest.approx(bm.GUARD_KNEE * c["reach"], abs=1e-3)
+            else:
+                assert c["knee"] == pytest.approx(c["setup"], abs=1e-3)
+
+
+def _fake_joint(name, bone, upper, soft, hard):
+    return {"name": name, "bone": bone, "upper": upper, "limits": {"+": (soft, hard), "-": (soft, hard)},
+            "by": {"+": ("fold@x", "fold@x"), "-": ("seam@a|b", "seam@a|b")}}
+
+
+def test_budget_judge_holds_transits_and_loops():
+    from spinegen import budget_motion as bmo
+    j = _fake_joint("elbow_l", "forearm_l", "upperarm_l", 30, 60)
+    fps = 60
+    hold = int(bmo.HOLD_SECONDS * fps)
+    # passes through 50 deg for a frame: a transit, inside hard
+    r = bmo.judge([0, 20, 50, 20, 0], j, fps)
+    assert r["ok"] and r["+"]["peak"] == 50 and not r["+"]["hold"]
+    # past soft for HOLD_SECONDS: a hold
+    r = bmo.judge([0] + [40] * hold + [0], j, fps)
+    assert not r["ok"] and r["+"]["hold"] and r["worst_dir"] == "+" and "held past theta_soft" in r["why"]
+    # one frame past hard: a transit violation, whichever direction
+    r = bmo.judge([0, -61, 0], j, fps)
+    assert not r["ok"] and r["-"]["transit"] and r["worst_dir"] == "-"
+    # a loop's last and first frames join up into one hold
+    half = [40] * (hold // 2 + 1)
+    seq = half + [0] * 10 + half
+    assert bmo.judge(seq, j, fps)["ok"]
+    assert not bmo.judge(seq, j, fps, loop=True)["ok"]
+
+
+def test_joint_groups_follow_the_arm_ik():
+    ir = with_legs(biped()[0])
+    out, _ = bm.add_arm_ik(ir)
+    roles = {"hip": "hip", "body": "hip", "chest": "torso"}
+    joints = [{"name": n, "bone": b} for n, b in (("shoulder_l", "upperarm_l"), ("elbow_l", "forearm_l"),
+                                                   ("elbow_r", "forearm_r"), ("knee_l", "calf_l"), ("ankle_l", "foot_l"))]
+    g = bm.joint_groups(out, roles, joints)
+    assert g["arm_l"] == {"bones": ["ik_hand_l"], "joints": ["shoulder_l", "elbow_l"]}
+    assert g["arm_r"] == {"bones": ["ik_hand_r"], "joints": ["elbow_r"]}
+    assert g["body"] == {"bones": ["hip", "torso"], "joints": ["knee_l", "ankle_l"]}
+
+
+def test_art_requests_name_the_cause():
+    groups = {"arm_l": {"bones": ["ik_hand_l"], "joints": ["elbow_l"]}, "body": {"bones": ["hip"], "joints": []}}
+    recipe = {"animations": [{"name": "celebrate", "preset": "celebrate"}, {"name": "idle", "preset": "fighter-idle-bounce"}]}
+    clamp = {"group": "arm_l", "factor": 0.4, "why": "transit", "before": [0, 171], "after": [0, 85],
+             "soft": [90, 96], "hard": [98, 114]}
+    fit = {"celebrate": {"factors": {"arm_l": 0.4, "body": 1.0}, "clamped": {"elbow_l": dict(clamp, hard_by="fold@arm")}},
+           "idle": {"factors": {"arm_l": 0.1, "body": 1.0}, "clamped": {"elbow_l": dict(clamp, hard_by="seam@a|b")}}}
+    items = {i["anim"]: i for i in bm.art_requests(fit, recipe, groups, {})}
+    assert items["celebrate"]["kind"] == "attachment" and "raised" in items["celebrate"]["what"]
+    assert items["idle"]["kind"] == "joint_art" and "seam" in items["idle"]["what"]
+    fit["celebrate"]["factors"]["arm_l"] = 0.9  # carried mostly: no request
+    assert [i["anim"] for i in bm.art_requests(fit, recipe, groups, {})] == ["idle"]
+
+
+def test_bridge_fits_the_budget_and_keeps_frame_zero(tmp_path):
+    """End to end with a budget that cannot carry the kit's celebrate: the fit scales the
+    arms down until no joint leaves it and 4.3.13 counts no fold, writes the art request,
+    and the per-chain guard leaves the drawn pose alone at rest (the kit's own does not)."""
+    _ready()
+    ir, images, joints = biped(bend_l=3.0, bend_r=-3.0)  # arms drawn almost straight
+    rig = tmp_path / "in" / "rig.json"
+    irmod.save(ir, str(rig))
+    atlas, _ = atlasmod.write(str(tmp_path / "in" / "biped.atlas"), images)
+    lim = {"soft": 40.0, "hard": 60.0, "limit_by": "fold@x", "hard_by": "fold@x"}
+    budget = {"schema": "spinegen-budget/1", "joints": {j["name"]: {"+": lim, "-": lim} for j in joints}}
+    with open(tmp_path / "in" / "budget.json", "w") as f:
+        json.dump(budget, f)
+    with open(tmp_path / "in" / "joints.json", "w") as f:
+        json.dump({"joints": joints}, f)
+    rep = bm.run(str(rig), atlas, str(tmp_path / "out"), name="biped", presets=("celebrate",), qa=False)
+    fit = rep["budget"]["fit"]["celebrate"]
+    assert fit["before"]["ok"] is False and fit["after"]["ok"] is True
+    assert {"elbow_l", "elbow_r"} <= set(fit["clamped"])
+    assert all(fit["factors"][g] < 1 for g in ("arm_l", "arm_r"))
+    for j in ("elbow_l", "elbow_r"):
+        lo, hi = fit["after"]["joints"][j]["max_minus"], fit["after"]["joints"][j]["max_plus"]
+        assert -60 <= lo and hi <= 60
+    with open(rep["files"]["recipe"]) as f:
+        recipe = json.load(f)
+    assert set(recipe["animations"][0]["boneAmplitude"]) == {"ik_hand_l", "ik_hand_r"}
+    assert rep["ik_guard"]["mode"] == "per chain" and rep["ik_guard"]["rest_px"] < 0.5
+    assert os.path.exists(tmp_path / "out" / "artreq.json")
+    kitg = bm.run(str(rig), atlas, str(tmp_path / "kit"), name="biped", presets=("celebrate",), qa=False,
+                  kit_guard=True, budget=None)
+    assert kitg["ik_guard"]["rest_px"] > 1  # the kit's 85-95 % guard bends a straight arm at rest

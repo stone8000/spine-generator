@@ -5,7 +5,7 @@
 import { bake, type Motion1D } from './bake.ts';
 import { wave, poses, strike, spring, shake, padTo, type PosePoint, type StrikeParams } from './motions.ts';
 import { findPreset, type PresetContext, type PresetOutput } from './presets.ts';
-import { solveScreen, sampled, type Channel, type LocalTrack, type ScreenTrack } from './solve.ts';
+import { solveScreen, sampled, type Channel, type IkGuardChain, type LocalTrack, type ScreenTrack } from './solve.ts';
 import {
   assertSpine43, setupFrames, writeAnimation, upsertPhysics, parseSkeleton, sampleAnimation,
   type SpineJson, type BakedTrack, type TimelineName, type EventKey,
@@ -59,6 +59,8 @@ export interface RecipeAnimation {
   timeScale?: number;
   /** Overall amplitude: scales every motion around its rest value (0 for moves and turns, 1 for scale). */
   amplitude?: number;
+  /** Per-bone amplitude on top of `amplitude`: scales every track (screen and local) of that bone the same way. */
+  boneAmplitude?: Record<string, number>;
 }
 
 export interface Recipe {
@@ -72,6 +74,8 @@ export interface Recipe {
   maxSegment?: number;
   /** Keep screen-driven IK targets inside 95 % of their chain's reach so elbows/knees never snap (default true). */
   ikGuard?: boolean;
+  /** Per IK target: its own guard knee / max (world units from the chain root), or false for none. */
+  ikGuardChains?: Record<string, IkGuardChain | false>;
   roles: Record<string, string | string[]>;
   animations: RecipeAnimation[];
 }
@@ -124,16 +128,18 @@ function retime(m: Motion1D, k: number): Motion1D {
 }
 
 /** Apply the animation-level speed and amplitude to everything a preset produced. */
-function retimeAndScale(out: PresetOutput, timeScale: number, amplitude: number): PresetOutput {
+function retimeAndScale(out: PresetOutput, timeScale: number, amplitude: number, perBone: Record<string, number> = {}): PresetOutput {
   if (!(timeScale > 0)) throw new Error('timeScale 必須大於 0');
-  if (timeScale === 1 && amplitude === 1) return out;
-  const amp = (m: Motion1D, ch: Channel): Motion1D =>
-    amplitude === 1 ? m : { ...m, value: isScale(ch) ? (t) => 1 + (m.value(t) - 1) * amplitude : (t) => m.value(t) * amplitude };
+  if (timeScale === 1 && amplitude === 1 && !Object.keys(perBone).length) return out;
+  const amp = (m: Motion1D, ch: Channel, bone: string): Motion1D => {
+    const a = amplitude * (perBone[bone] ?? 1);
+    return a === 1 ? m : { ...m, value: isScale(ch) ? (t) => 1 + (m.value(t) - 1) * a : (t) => m.value(t) * a };
+  };
   return {
     ...out,
     duration: out.duration / timeScale,
-    screen: out.screen.map((s) => ({ ...s, motion: amp(retime(s.motion, timeScale), s.channel) })),
-    local: out.local.map((l) => ({ ...l, motion: amp(retime(l.motion, timeScale), l.channel) })),
+    screen: out.screen.map((s) => ({ ...s, motion: amp(retime(s.motion, timeScale), s.channel, s.bone) })),
+    local: out.local.map((l) => ({ ...l, motion: amp(retime(l.motion, timeScale), l.channel, l.bone) })),
     events: out.events.map((e) => ({ ...e, time: Math.round((e.time / timeScale) * 1000) / 1000 })),
   };
 }
@@ -195,13 +201,14 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
     }
     out.events.push(...(anim.events ?? []));
     if (!out.duration) throw new Error(`動畫 ${anim.name}：沒有任何動作`);
-    out = retimeAndScale(out, anim.timeScale ?? 1, anim.amplitude ?? 1);
+    for (const b of Object.keys(anim.boneAmplitude ?? {})) boneExists(b);
+    out = retimeAndScale(out, anim.timeScale ?? 1, anim.amplitude ?? 1, anim.boneAmplitude);
 
     const D = out.duration;
     const fit = (m: Motion1D, label: string) => (out.loop ? fitLoop(m, D, label) : padTo(m, D));
     const screen = out.screen.map((s) => ({ ...s, motion: fit(s.motion, `${anim.name}/${s.bone}/${s.channel}`) }));
     const local = out.local.map((l) => ({ ...l, motion: fit(l.motion, `${anim.name}/${l.bone}/${l.channel}`) }));
-    const solved = solveScreen(json, screen, local, D, out.loop, 240, recipe.ikGuard ?? true);
+    const solved = solveScreen(json, screen, local, D, out.loop, 240, recipe.ikGuard ?? true, recipe.ikGuardChains);
 
     // merge everything that lands on the same bone channel; a solved channel already includes any local track the
     // solver applied on that bone, so the local one must not be added again

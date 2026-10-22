@@ -65,6 +65,12 @@ export function sampled(values: number[], duration: number, loop: boolean): Moti
   };
 }
 
+/** A per-chain IK reach guard: identity up to `knee`, then eased so the target never passes `max` (world units from the chain root). */
+export interface IkGuardChain {
+  knee: number;
+  max: number;
+}
+
 /**
  * Turn screen tracks into local tracks for this rig. Local tracks passed in are applied as given (they also move
  * descendants). Returns the solved local tracks for every screen-driven bone/channel.
@@ -77,6 +83,7 @@ export function solveScreen(
   loop: boolean,
   rate = 240,
   ikGuard = true,
+  guardChains: Record<string, IkGuardChain | false> = {},
 ): LocalTrack[] {
   if (!screen.length) return [];
   const data = parseSkeleton({ ...json, animations: {} });
@@ -117,15 +124,19 @@ export function solveScreen(
     const reach = chain.reduce((sum: number, b: Bone) => sum + b.data.length * b.getAppliedPose().getWorldScaleX(), 0);
     if (reach > 0) ikChains.set(c.target, { root: chain[0], reach });
   }
+  // A chain in `guardChains` uses its own knee / max (world units from the chain root) instead of 85 % / 95 %:
+  // e.g. an arm drawn straight, whose setup target already sits past 95 % (the default guard would bend it at
+  // rest), or an IK with softness whose solve only goes straight at reach + softness. `false` turns it off.
   const guardReach = (bone: string, x: number, y: number): [number, number] => {
-    const ik = ikGuard ? ikChains.get(bone) : undefined;
+    const own = guardChains[bone];
+    const ik = ikGuard && own !== false ? ikChains.get(bone) : undefined;
     if (!ik) return [x, y];
     const r = ik.root.getAppliedPose();
     const dx = x - r.worldX;
     const dy = y - r.worldY;
     const d = Math.hypot(dx, dy);
-    const knee = 0.85 * ik.reach;
-    const room = 0.1 * ik.reach;
+    const knee = own ? own.knee : 0.85 * ik.reach;
+    const room = own ? Math.max(own.max - own.knee, 1e-6) : 0.1 * ik.reach;
     if (d <= knee) return [x, y];
     const k = (knee + room * Math.tanh((d - knee) / room)) / d; // smooth: linear below 85 %, never past 95 %
     return [r.worldX + dx * k, r.worldY + dy * k];

@@ -89,6 +89,41 @@ test('celebrate lifts the fists past reach: without the guard both arms lock str
   }
 });
 
+/** Shoulder -> fist-target distance per sample of a punch, with the default guard, none, or per-chain thresholds. */
+function reachTrace(recipeExtra: Partial<Recipe>) {
+  const recipe: Recipe = { roles: fighterRoles, animations: [{ name: 'a', preset: 'punch', params: { reach: 130 } }], ...recipeExtra };
+  const { json, summary } = compileRecipe(fighter, recipe);
+  const s = sampleAnimation(parseSkeleton(json), 'a', { rate: 240, seconds: summary[0].duration, loop: false });
+  const sh = s.bones.get('upperArmF')!, fi = s.bones.get('ik-fist-front')!;
+  return sh.x.map((x, i) => Math.hypot(fi.x[i] - x, fi.y[i] - sh.y[i]));
+}
+
+test('ikGuardChains: per-target knee / max replace 85 % / 95 %; identity up to the knee; false turns one chain off', () => {
+  const off = reachTrace({ ikGuard: false });
+  const d0 = off[0];
+  const own = reachTrace({ ikGuardChains: { 'ik-fist-front': { knee: d0, max: d0 + 10 } } });
+  assert.ok(Math.abs(own[0] - d0) < 1e-6, `frame 0 untouched (${own[0]} vs ${d0})`);
+  assert.ok(Math.max(...own) <= d0 + 10 + 1e-6, `never past max (${Math.max(...own).toFixed(2)} vs ${(d0 + 10).toFixed(2)})`);
+  assert.ok(Math.max(...off) > d0 + 30, 'the punch itself goes well past it');
+  const none = reachTrace({ ikGuardChains: { 'ik-fist-front': false } });
+  assert.ok(none.every((v, i) => Math.abs(v - off[i]) < 1e-6), 'false = no guard on that chain');
+});
+
+test('boneAmplitude scales only that bone\'s tracks', () => {
+  const run = (boneAmplitude?: Record<string, number>) => {
+    const recipe: Recipe = { ikGuard: false, roles: fighterRoles, animations: [{ name: 'a', preset: 'celebrate', boneAmplitude }] }; // guard off: it is not linear
+    const { json, summary } = compileRecipe(fighter, recipe);
+    const s = sampleAnimation(parseSkeleton(json), 'a', { rate: 240, seconds: summary[0].duration, loop: true });
+    return { front: s.bones.get('ik-fist-front')!.y, back: s.bones.get('ik-fist-back')!.y, hip: s.bones.get('hip')!.y };
+  };
+  const full = run(), half = run({ 'ik-fist-front': 0.5 }), rest = run({ 'ik-fist-front': 0 });
+  const err = Math.max(...full.front.map((v, i) => Math.abs((half.front[i] - rest.front[i]) * 2 - (v - rest.front[i]))));
+  assert.ok(err < 0.2, `front fist motion halves (worst ${err.toFixed(3)})`);
+  assert.ok(Math.max(...full.front) - Math.min(...full.front) > 40, 'the fist does move');
+  assert.deepEqual(half.back, full.back, 'other fist unchanged');
+  assert.deepEqual(half.hip, full.hip, 'hip unchanged');
+});
+
 test('jump: crouches, peaks at the height on frame 13–14, lands at 0.8 s, settles', () => {
   const { s, summary } = build('jump', { height: 120, crouch: 25 });
   assert.deepEqual(summary.events, ['takeoff@0.18s', 'land@0.8s']);

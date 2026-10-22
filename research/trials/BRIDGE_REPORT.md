@@ -1,7 +1,8 @@
 # 銜接報告：spinegen → Spine 4.3 → motion kit → 4.3 裁判（2026-10-22）
 
-定案：**Spine 4.3 是主要目標**，4.2 留給舊遊戲。這一輪做了四件事：IR 的 4.3 輸出、QA 換成 4.3.13 也能跑、
-spinegen 骨架接上 motion kit 的預設動作、看圖。
+定案：**Spine 4.3 是主要目標**，4.2 留給舊遊戲。前幾輪做了四件事：IR 的 4.3 輸出、QA 換成 4.3.13 也能跑、
+spinegen 骨架接上 motion kit 的預設動作、看圖。**B5（最新）**：預設動作照圖的預算（budget.json）縮幅度、IK 保護改成每條鏈自己的門檻；
+猴子改用 motion-research 最新的 rig（肘的袖子長度逐肘挑、腳踝整列串接、配件分父骨權重；和 `p2/r12` 逐位元相同）。
 
 ## 指令
 
@@ -25,7 +26,70 @@ python3 research/bridge_compare.py $W/compare/celebrate_legs_capped_vs_soft.png 
 python3 research/bridge_compare.py $W/compare/punch_arms_guard.png arms punch 0,8,11 $W/v1_capped/monkey_joint $W/monkey_joint $W/exp_soft/joint_noguard
 ```
 
-輸出都在 `/home/user/spinegen-work/bridge/`（不進 repo）。
+輸出都在 `/home/user/spinegen-work/bridge/`（不進 repo）。B5 的指令（rig 重建在 `$W/rigs`，輸出在 `$W/v3`）：
+
+```bash
+L=/home/user/spinegen-work/p2/monkey_layers; R=$W/rigs; V=$W/v3
+python3 -m spinegen.rigbuild $L --mode joint -o $R/monkey_joint --fit-reach 'elbow_l,elbow_r=2,2.25,2.5,3,3.5'
+python3 -m spinegen.rigbuild $L --mode rigid -o $R/monkey_rigid
+python3 -m spinegen.budget $R/monkey_joint/rig.json $R/monkey_joint/monkey.atlas --joints $R/monkey_joint/joints.json \
+    -o $R/monkey_joint/budget.json --artreq $R/monkey_joint/artreq.json --max-angle 150        # rigid 同樣
+# 銜接：預設會讀 rig.json 旁邊的 budget.json / joints.json（--budget none 關掉），IK 保護每條鏈自己的門檻（--kit-guard 用 kit 原本的）
+python3 -m spinegen.bridge_motionkit $R/monkey_joint/rig.json $R/monkey_joint/monkey.atlas -o $V/monkey_joint --name monkey_joint
+python3 -m spinegen.bridge_motionkit $R/monkey_rigid/rig.json $R/monkey_rigid/monkey.atlas -o $V/monkey_rigid --name monkey_rigid
+python3 research/bridge_sheets.py $V/monkey_rigid $V/monkey_joint -o $V/sheets --all-frames
+# 對照：$V/exp/joint_{kitguard,nobudget,kitguard_nobudget,noguard_nobudget}、rigid_nobudget（同樣指令加 --kit-guard / --budget none / --no-ik-guard）
+# 任何 4.3 檔對預算：每個關節每一格的角度、hold／transit 判定、摺疊數
+python3 -m spinegen.budget_motion $V/monkey_joint/monkey_joint.motion.json $V/monkey_joint/monkey_joint.atlas \
+    --budget $R/monkey_joint/budget.json --joints $R/monkey_joint/joints.json --loops idle,celebrate
+```
+
+## B5 預算與 IK 保護（`spinegen/budget_motion.py`、`bridge_motionkit` 3b／3c、kit 的 `boneAmplitude`／`ikGuardChains`）
+
+**量法**（`budget_motion`）：在 4.3.13 播（60 fps、physics 開，和 G1 一樣），每個關節的角度 = 關節骨相對於關節帶 `upper` 骨的世界旋轉，
+減掉 setup 的同一個值（就是預算掃描轉的那個局部角；腳掛在 IK 目標下也照樣量小腿對腳）。超過 θ_soft 連續 0.1 秒以上算「停在那裡」（hold，
+循環頭尾相接），任何一格超過 θ_hard 算 transit 違規，加上 G1 摺疊數。
+
+**縮幅度**（`fit_budget`）：關節分組：手臂 IK 鏈上的肩、肘 → 那隻手的拳頭目標；其他（髖、膝、踝：腳釘在地上，腿只會跟著身體彎）→ 身體（hip／chest 角色）。
+每組一個幅度倍數（kit 新增的 `boneAmplitude`：這根骨的畫面軌和局部軌整條縮放），超出預算的組往下二分、沒超出的往回長，到 0.04 以內；
+各組互相牽動（身體動、拳頭不動，手肘一樣會彎），二分完還是超出時，再在上面二分一個共同倍數（0 就是 setup，一定在預算內）。
+`bridge.json` 的 `budget.fit` 每支動畫列出：被縮的關節、原因、倍數、縮前／縮後角度。手臂留不到 3/4 就寫一條補圖需求（`artreq.json`）：
+限制是切圖接縫（rigid）就要關節的圖，否則要一隻畫成那個姿勢的手臂。
+
+**IK 保護**（`guard_chains`，kit 新增 `ikGuardChains`）：kit 的保護在臂長 85% 以內不動、最多到 95%。猴子的手臂畫得幾乎打直（手腕在臂長 99.8%），
+目標又為了 softness 往外推，所以靜止時就在 95% 外面：kit 的保護從第 0 格就把手拉進來。現在每條鏈：knee = max(85% 臂長, setup 的目標距離)，
+max = knee 往「softness 解完全打直的距離（臂長 + softness）」走 3/4。左手 knee 330.3、max 337.3、打直 339.6；右手 338.2／348.0／351.3。
+檢查（`rest_probe`）：第一支預設幅度 0 播第 0 格對 setup。
+
+猴子（30／60 fps，4.3.13）：
+
+| | joint 之前（kit 保護、沒有預算） | **joint B5** | rigid 之前 | **rigid B5** |
+|---|---|---|---|---|
+| kit 分數 idle／punch／celebrate／hit | 100／100／55（9 警告）／100 | **100／100／100／100** | 100／100／55／100 | 100／100／55（9 警告，helmet）／100 |
+| qa G1（單格最多／摺疊三角形・格） | 8／317 | **0／0** | 0 | 0 |
+| 預算：超出的關節 | celebrate 兩肘（+171、−168；hard 114、96） | 無 | 每支動畫：肘、膝，punch／celebrate 加肩 | 無 |
+| 被縮的組（倍數） | — | celebrate：左手 0.41、右手 0.53；其他 1 | — | idle 左 0.08／右 0／身體 0.13；punch 0.25／0／0.18；celebrate 0.005／0／0.13；hit 0.26／0／0.12 |
+| 幅度 0 的第 0 格對 setup | **56.7 px** | **0.000 px** | 58.3 px | 0.000 px |
+| 第 0 格對 setup（實際動畫） | idle 58.9 px、punch 56.8 px | idle **39.6 px**、punch **0.00 px** | | |
+| 手肘第 0 格（idle 左／右、punch 右） | 39.8°／−32.0°、−32.2° | **23.9°／4.2°、0.0°** | | |
+| celebrate 手肘範圍 | 左 130…171°、右 −168…−120° | **左 56…85°、右 −87…−74°**（soft 96、90） | | |
+| 其他 qa 4.3.13 | L1–L9、G3、M1（0 px）、P3 過；P1 不過 | 同左；P1 16.4 px（punch 右袖口；之前 15.8） | 同左，P1 15.8 px | **全過**（P1 1.2 px：幾乎不動） |
+
+（「之前」：同一副新 rig，用 `--kit-guard --budget none` 跑，`$W/v3/exp/{joint,rigid}_kitguard_nobudget`；只換保護 `exp/joint_nobudget`、只開預算 `exp/joint_kitguard`。）
+各自的效果：**預算**單獨就把 celebrate 修到 G1 0、kit 分數 100（kit 保護或新保護都一樣）；**新保護**單獨讓 punch 第 0 格回到原畫（0.00 px）、idle 手肘第 0 格從
+39.8°／−32.0° 變 23.9°／4.2°，kit 分數和 kit 保護一樣（idle 100）；完全不加保護 idle 掉到 90（2 警告）。
+
+**idle 的第 0 格還是離 setup 39.6 px**：這不是保護（幅度 0 時 0.000 px，關掉保護也一樣 39.6 px），是預設本身的相位：第 0 格是髖最低（下沉 13.5 px）、
+兩拳各在自己的相位上；整個循環最接近 setup 的一格也還差 15.5 px（t = 0.65 s），所以換起點也做不到 < 0.5 px。要 idle 從原畫開始，得在預設加「從靜止淡入」
+的開頭（不是循環的一部分）或讓循環繞 setup 走，這是 kit 的事。
+
+**rigid 的預算幾乎什麼都不讓動**：切圖的肘 2–12°、膝 2–8° 就開縫（G4 seam），所以 idle／punch／hit 的手臂只剩 0–26%，身體 12–18%。這是對的答案
+（rigid 的圖撐不住這些動作），補圖需求寫的是「關節要有重疊的圖，或改用 joint 模式」，7 條。rigid celebrate 的 9 個警告全在 helmet：身體幾乎不動時，
+「典型加速度」只剩 156，helmet 的 runtime physics 小抖動就超過倍數門檻；分數是相對值的副作用，不是看得到的頓挫。
+
+**celebrate 現在是什麼**：雙拳舉到皮帶高度（左 0.41 × 抬 180 px ≈ 74 px、右 0.53 × 180 ≈ 95 px，上下各再 ±15–20 px），手肘往外彎 56–87°，
+身體照原本彈 18 px：看起來像「雙手扠腰在彈」，不是慶祝。要真的舉手，art request 已經寫出來（`$W/v3/monkey_joint/artreq.json`，左右各一條：
+一隻畫成舉高、彎肘、拳頭過肩的手臂，celebrate 時換上）。
 
 ## B1 `spinegen/emit/spine43.py`
 
@@ -103,7 +167,20 @@ kit 的警告分兩種：腿的（臀部上下時膝蓋「啪」一下伸直）�
 關掉保護第 0 格比較接近原畫，但 idle 掉到 90，punch 的出拳手臂幾乎打直（最大彎 12°）。預設維持 kit 的保護。
 手 softness 的代價：kit 的拳頭軌跡現在從推出去的目標開始算，看得到的拳頭位置和上一版差最多 11 px（idle／punch／hit）、22 px（celebrate）。
 
-## 看圖（`sheets/*.png` 每支動畫 rigid／joint；`compare/*.png` 是上一版、預設、關保護的同一格並排）
+## 看圖 B5（`$W/v3/sheets/*.png`，4.3.13 的世界頂點直接畫）
+
+藝術閘門不過的格數（`--all-frames`，30 fps）：joint idle 30／61、punch 3／26、celebrate 35／37、hit 5／27（之前 43、18、37、4）；
+rigid 8／61、1／26、4／37、3／27（之前 61、26、35、27：rigid 現在幾乎不動）。
+
+- **celebrate**（joint）：不再摺疊。兩拳在皮帶高度，手肘向外彎，最高和最低兩格幾乎一樣：像扠腰彈跳，不像慶祝。看得到的毛病都是已知的圖：
+  手裡的綠色褲子碎片、腋下軀幹圖裡的紅色袖子碎片和深色楔形。35／37 格不過：G5 洞 1–4 個（彎出去的手臂和軀幹圍住的背景，和 P2 蹲下時手和大腿圍住的一樣，
+  不是破圖），以及 G2 腳踝面積 0.87（腿 softness 讓小腿穿過靴口 15 px，見膝蓋的取捨）；沒有摺疊、沒有接縫。rigid：幾乎靜止。
+- **idle**（joint）：雙手垂在畫的位置附近（之前被保護收到腰邊），身體上下彈；最高那格手邊有小片綠色碎片。rigid：幾乎靜止。
+- **punch**（joint）：蓄力那格就是原畫的垂手（之前右手肘一開始就彎 32°）；出拳那格右臂往旁邊舉 41°、手肘彎 39°，拳頭在腰側前方，還是「側舉」不是「直拳」，
+  右腋下的深色楔形還在（預算沒擋：肩 +41° 在 soft 60° 以內，楔形是軀幹圖裡塗的陰影，art request 早就列了）。rigid：右手完全不動（倍數 0），左手 25%。
+- **hit**（joint）：身體往後縮、頭低下，正常；右手邊一小片綠色碎片。
+
+## 看圖 B3（`sheets/*.png` 每支動畫 rigid／joint；`compare/*.png` 是上一版、預設、關保護的同一格並排）
 
 - **腿 softness 的取捨**（`compare/idle_legs_capped_vs_soft.png`、`celebrate_legs_capped_vs_soft.png`）：臀部往下時，上一版膝蓋確實彎下去
   （celebrate 最低那格是 O 型腿蹲下），現在腿幾乎是直的，褲管往下蓋住靴口 10–15 px。這是 softness 的數學：腿畫成全直時，
@@ -120,10 +197,17 @@ kit 的警告分兩種：腿的（臀部上下時膝蓋「啪」一下伸直）�
 2. **C1 只有 4.2**：4.3 檔案靠 4.2 輸出的 C1 加上 equiv43（只在 physics none 時證明相同）。
 3. **膝蓋：沒有兩全的銜接器設定**。腿畫成全直時，硬 IK 蹲得下去但會啪一下伸直；softness 不會啪，但蹲不下去、褲管蓋進靴子 10–15 px。
    要兩個都有，得在角色上把膝蓋先彎 5–15°（kit 的交付規格也這樣寫）。臀部上升時 12–18 px 的「腿不夠長」兩種設定都一樣，也是角色的事。
-4. **預設和這個角色對不上**：celebrate 會摺手、出拳變側舉，要的是給垂手角色的預設。第 0 格不是原畫姿勢：IK 保護開著時 idle 40°／32°、
-   punch 右手 32°；關掉保護 idle 24°／4.5°、punch 0°，但 kit 分數下降。
+4. **預設和這個角色對不上**（B5 後）：celebrate 照預算縮成扠腰彈跳（G1 0），真的慶祝要補一隻舉高的手臂（artreq 已寫）；出拳還是側舉，要給垂手角色的預設。
+   保護造成的第 0 格彎曲已經沒了（幅度 0 時 0.000 px、punch 第 0 格 0.00 px），但 **idle 第 0 格離原畫 39.6 px**：預設的相位，循環裡最接近也差 15.5 px，
+   要 kit 加「從靜止淡入」的開頭。
+8. **預算是一次一個關節**：膝蓋、腳踝各自都在預算內，但腿 softness 讓小腿穿過靴口（celebrate 15 px），G2 腳踝面積 0.87 在 joint 的 sheets 上一直不過；
+   `budget_motion` 只看單關節角度和 G1，沒看組合造成的 G2／G4。要嘛把 art_gates 的組合判定接進 fit，要嘛先解膝蓋（第 3 點）。
+9. **rigid 的預算讓預設幾乎不動**（手臂 0–26%、身體 12–18%）：數字是對的（切圖關節 2–12° 就開縫），但這樣的 rigid 輸出沒有用；rigid 要動就要補關節的圖。
+   另外 rigid celebrate 的 kit 分數 55 是相對門檻的副作用（身體幾乎不動時 helmet physics 的小抖動算成頓挫）。
+10. joint 預算裡兩個肘的 hard_by 是 `hole@None`（`spinegen.budget` 的 G5 洞沒有對到 slot 名稱）；只影響標籤，不影響角度。
 5. rigbuild（另一條線在改）給 4.2 輸出的腿 softness 還是壓在 slack 以下；銜接器只在輸出 4.3 時補上。rigbuild 若改用「推目標」，4.2 也會有。
 6. 正面角色的 `facing` 是隨便選的（`--facing 1`；`--facing -1` 也能跑，idle 90、celebrate 70，前後拳互換）。銜接器會丟掉骨架原本的動畫；要保留，得在那些動畫裡把手臂 IK 的 mix key 成 0。
 7. 補圖需求還在：手裡的褲子碎片、腋下的陰影、軀幹圖裡的袖子顏色。
 
-測試：`python3 -m pytest tests -q` 249 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` 44 個，全部通過。
+測試：`python3 -m pytest tests -q` 273 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` 46 個，全部通過。
+B5 新增：銜接器 5 個（保護門檻、hold／transit／循環接頭判定、分組、補圖需求的原因、端到端用合成預算把 celebrate 縮進預算），kit 2 個（`ikGuardChains`、`boneAmplitude`）。
