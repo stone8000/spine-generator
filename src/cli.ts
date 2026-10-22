@@ -10,10 +10,12 @@ import { previewHtml } from './preview.ts';
 import { guessRecipe } from './roles.ts';
 import { assertSpine43 } from './spineJson.ts';
 import { loadJson, saveJson } from './io.ts';
+import { cmdCharacter, CHARACTER_HELP } from './characterCli.ts';
 
 const HELP = `spine-motion · Spine 4.3 流暢動作產生器
 
 用法：
+${CHARACTER_HELP}
   spine-motion presets                         列出所有動作預設與參數
   spine-motion init <骨架.json> [-o 配方.json] [--facing 1|-1]
                                                依骨骼名稱猜角色，產生配方草稿
@@ -143,6 +145,7 @@ export function main(argv: string[]): number {
       case 'generate': cmdGenerate(args); break;
       case 'check': cmdCheck(args); break;
       case 'preview': cmdPreview(args); break;
+      case 'character': cmdCharacter(args); break;
       default: console.log(HELP); return cmd ? 1 : 0;
     }
     return 0;

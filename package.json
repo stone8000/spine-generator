@@ -12,6 +12,7 @@
   },
   "scripts": {
     "motion": "node bin/spine-motion.js",
+    "character": "node bin/spine-motion.js character",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",
     "demo": "node bin/spine-motion.js generate examples/rigs/fighter.json examples/recipes/fighter.recipe.json -o examples/out/fighter.motion.json --check --preview && node bin/spine-motion.js generate examples/rigs/symbol.json examples/recipes/symbol.recipe.json -o examples/out/symbol.motion.json --check --preview",

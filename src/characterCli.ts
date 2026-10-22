@@ -1,0 +1,173 @@
+/**
+ * `spine-motion character <圖層資料夾>`: one command from an art delivery (layer PNGs, optional layers.json) to a
+ * Spine 4.3 skeleton with six animations, a check report, an offline preview page and a preview GIF.
+ */
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, copyFileSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve, relative } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { decodePngAlpha } from './png.ts';
+import { buildCharacter, characterRows, layerName, parseOrder, previewFrames } from './character.ts';
+import { previewHtml } from './preview.ts';
+import type { AlphaMap } from './autorig.ts';
+import { PARTS, type Joints } from './rigTemplate.ts';
+
+export const CHARACTER_HELP = `  spine-motion character <圖層資料夾> [-o 輸出資料夾] [--name 名稱] [--joints 關節.json]
+                         [--celebrate 參數.json] [--no-gif] [--bones]
+                                               一行做完角色：圖層 PNG → Spine 4.3 骨架＋6 個動作、
+                                               檢查報告、預覽頁與預覽 GIF`;
+
+const SCRIPTS = fileURLToPath(new URL('../scripts/trial/', import.meta.url));
+// folder names that say "these are the layers", so the character is named after the folder above
+const GENERIC = /^(layers?|交件|圖層|parts|png)$/i;
+
+function arg(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+/** First existing file among names, looked up in the layers folder, then the folder above it. */
+function findBeside(dir: string, names: string[]): string | undefined {
+  for (const d of [dir, dirname(dir)]) for (const n of names) if (existsSync(join(d, n))) return join(d, n);
+  return undefined;
+}
+
+function readJson(file: string, what: string): unknown {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new Error(`${what} ${file} 讀不到或不是 JSON：${(e as Error).message}`);
+  }
+}
+
+/** Runs render_gif.py with python3 / python / py; returns why it couldn't, or undefined when the GIF was written. */
+function renderGif(imagesDir: string, framesFile: string, out: string, bones: boolean): string | undefined {
+  const script = join(SCRIPTS, 'render_gif.py');
+  for (const py of process.platform === 'win32' ? ['python', 'py', 'python3'] : ['python3', 'python']) {
+    const r = spawnSync(py, [script, 'gif', imagesDir, framesFile, out, ...(bones ? ['--bones'] : [])], { encoding: 'utf8' });
+    if (r.error) continue; // not installed under this name
+    if (r.status === 0) return undefined;
+    if (/No module named ['"]?PIL/.test(r.stderr)) return `${py} 沒有 Pillow，執行 \`${py} -m pip install pillow\` 後重跑即可產生 GIF`;
+    return `${py} 產生 GIF 失敗：${r.stderr.trim().split('\n').pop()}`;
+  }
+  return '找不到 Python 3，裝好 Python 與 Pillow（pip install pillow）後重跑即可產生 GIF；其他檔案不受影響';
+}
+
+export function cmdCharacter(args: string[]): void {
+  const dirArg = args.find((a, i) => !a.startsWith('-') && !['-o', '--name', '--joints', '--celebrate'].includes(args[i - 1]));
+  if (!dirArg) throw new Error('用法：spine-motion character <圖層資料夾>（放部件 PNG，可附 layers.json）');
+  const dir = resolve(dirArg);
+  if (!existsSync(dir)) throw new Error(`找不到資料夾 ${dirArg}`);
+  const folder = basename(dir);
+  const name = arg(args, '--name') ?? (GENERIC.test(folder) ? basename(dirname(dir)) : folder);
+  const outDir = resolve(arg(args, '-o') ?? join(dirname(dir), `${name}_spine`));
+  const show = (f: string) => {
+    const r = relative(process.cwd(), f);
+    return r.startsWith('..') ? f : r || '.';
+  };
+
+  // ---- read the delivery
+  const files = readdirSync(dir).filter((f) => /\.png$/i.test(f));
+  const known = new Set(PARTS.map((p) => p.name));
+  const alphas = new Map<string, AlphaMap>();
+  const source = new Map<string, string>();
+  const skipped: string[] = [];
+  for (const f of files) {
+    const n = layerName(f);
+    if (!known.has(n)) {
+      skipped.push(f); // full.png, previews, sheets
+      continue;
+    }
+    try {
+      alphas.set(n, decodePngAlpha(new Uint8Array(readFileSync(join(dir, f)))));
+      source.set(n, join(dir, f));
+    } catch (e) {
+      throw new Error(`${f}：${(e as Error).message}`);
+    }
+  }
+  if (!alphas.size) throw new Error(`${show(dir)} 裡沒有圖層 PNG（檔名要照 docs/生圖交付規格.md，例如 head.png、torso.png）`);
+  const sizes = new Set([...alphas.values()].map((a) => `${a.width}×${a.height}`));
+  if (sizes.size > 1) throw new Error(`圖層尺寸不一致（${[...sizes].join('、')}）：每張都要是同一張畫布，部件留在原位`);
+  const first = alphas.values().next().value!;
+  const canvas = { width: first.width, height: first.height };
+
+  const used: string[] = [];
+  const orderFile = findBeside(dir, ['layers.json']);
+  const order = orderFile ? parseOrder(readJson(orderFile, '疊圖順序')) : undefined;
+  if (orderFile) used.push(`疊圖順序：${show(orderFile)}`);
+  const jointsFile = arg(args, '--joints') ?? findBeside(dir, ['joints.json', 'joints_manual.json']);
+  const joints = jointsFile ? (readJson(jointsFile, '關節') as Joints) : undefined;
+  if (jointsFile) used.push(`關節：${show(jointsFile)}`);
+  const celebrateFile = arg(args, '--celebrate') ?? findBeside(dir, ['celebrate.params.json']);
+  let params: Record<string, Record<string, number>> | undefined;
+  if (celebrateFile) {
+    const c = readJson(celebrateFile, '慶祝參數') as { params?: Record<string, number> } & Record<string, number>;
+    params = { celebrate: c.params ?? c };
+    used.push(`慶祝參數：${show(celebrateFile)}`);
+  }
+
+  console.log(`角色「${name}」：${alphas.size} 個圖層，畫布 ${canvas.width}×${canvas.height}`);
+  for (const u of used) console.log(`  使用 ${u}`);
+  if (!jointsFile) console.log('  關節：自動猜（要手動調，見報告的「關節」一節）');
+  if (skipped.length) console.log(`  略過非圖層檔：${skipped.join('、')}`);
+
+  // ---- build, animate, check
+  console.log('建骨架、產生 6 個動作、檢查流暢度與接縫…');
+  const r = buildCharacter(alphas, { name, canvas, joints, order, params });
+  const rows = characterRows(r);
+  mkdirSync(join(outDir, 'images'), { recursive: true });
+  for (const [n, f] of source) copyFileSync(f, join(outDir, 'images', `${n}.png`));
+  writeFileSync(join(outDir, `${name}.json`), JSON.stringify(r.json, null, 1));
+  writeFileSync(join(outDir, 'joints.json'), JSON.stringify(r.joints, null, 1));
+  const loops = r.summary.filter((s) => s.loop).map((s) => s.name);
+  writeFileSync(join(outDir, '預覽.html'), previewHtml(r.json, name, loops), 'utf8');
+
+  // ---- preview GIF (Python + Pillow composites the real art)
+  let gifNote: string | undefined = 'skipped';
+  const gif = join(outDir, '預覽.gif');
+  if (!args.includes('--no-gif')) {
+    const framesFile = join(outDir, 'frames.json');
+    console.log('合成預覽 GIF…');
+    writeFileSync(framesFile, JSON.stringify(previewFrames(r, alphas)));
+    gifNote = renderGif(join(outDir, 'images'), framesFile, gif, args.includes('--bones'));
+    rmSync(framesFile, { force: true });
+  }
+
+  // ---- report
+  const missingOptional = PARTS.filter((p) => !p.required && !alphas.has(p.name)).map((p) => p.name);
+  const seamFail = rows.filter((x) => x.seams.length);
+  const low = rows.filter((x) => x.score < 80);
+  const jointIssues = r.warnings; // checkJoints + rig warnings (layers.json names, IK fit)
+  const ok = !seamFail.length && !low.length && !jointIssues.length;
+  const md: string[] = [`# ${name} · 角色動作報告`, ''];
+  md.push(ok ? '**結論：可以用。** 6 個動作流暢度都在 80 以上、沒有接縫露底、關節檢查沒有問題。' : '**結論：需要看一下。** 下面標 ⚠ 的項目照建議處理後重跑同一行指令即可。', '');
+  md.push('## 動作', '', '| 動畫 | 長度 | 流暢度 | 接縫 | 說明 |', '|---|---|---|---|---|');
+  for (const x of rows) {
+    md.push(`| ${x.name} | ${x.duration.toFixed(2)} s | ${x.score}${x.score < 80 ? ' ⚠' : ''} | ${x.seams.length ? '⚠ ' + x.seams.join('、') : '✓'} | ${x.problems.length ? x.problems.join('<br>') : ''} |`);
+  }
+  md.push('', '流暢度 100 是滿分，80 以上看起來就順；接縫 ⚠ 表示那個關節在那一秒露出背景（破圖）。', '');
+  md.push('## 關節與骨架', '', jointsFile ? `用 \`${show(jointsFile)}\` 的關節。` : '自動猜的關節，存在 `joints.json`。', '');
+  if (jointIssues.length) md.push(...jointIssues.map((s) => `- ⚠ ${s}`), '', '修法：用瀏覽器開 `studio/spine-motion-studio.html` →「從圖層建立角色」選這些 PNG，把紅點拖到對的位置；或直接改 `joints.json` 的座標（圖片像素，y 向下），再用 `--joints joints.json` 重跑。', '');
+  else md.push('- ✓ 關節與骨架檢查沒有問題', '');
+  md.push('## 圖層', '', `- ${alphas.size} 層，畫布 ${canvas.width}×${canvas.height}`, `- 疊圖順序：${orderFile ? '照 `layers.json`' : '模板預設（交件附 `layers.json` 就會照它疊）'}`);
+  if (missingOptional.length) md.push(`- 沒有的選用圖層：${missingOptional.join('、')}`);
+  if (skipped.length) md.push(`- 略過的檔案：${skipped.join('、')}`);
+  if (params) md.push(`- 慶祝參數：\`${JSON.stringify(params.celebrate)}\``);
+  md.push('', '## 檔案', '', '| 檔案 | 用途 |', '|---|---|');
+  md.push(`| \`${name}.json\` + \`images/\` | Spine 4.3 骨架＋6 個動畫。Spine 編輯器 Import Data 匯入，或直接給遊戲載入 |`);
+  md.push('| `預覽.gif` | 6 個動作連著播（真實圖層） |', '| `預覽.html` | 離線預覽頁（骨架線、洋蔥皮、軌跡、曲線） |', '| `joints.json` | 這次用的 19 個關節點，可以改了再用 `--joints` 重跑 |');
+  writeFileSync(join(outDir, '報告.md'), md.join('\n') + '\n', 'utf8');
+
+  // ---- console summary
+  console.log('');
+  for (const x of rows) console.log(`  ${x.name.padEnd(11)} 流暢度 ${String(x.score).padStart(3)}${x.score < 80 ? ' ⚠' : '  '}  接縫 ${x.seams.length ? '⚠ ' + x.seams.join('、') : '✓'}`);
+  for (const s of jointIssues) console.log(`  ⚠ ${s}`);
+  console.log('');
+  console.log(ok ? '結論：可以用。' : '結論：需要看一下，詳見報告。');
+  console.log(`輸出：${show(outDir)}/`);
+  console.log(`  ${name}.json + images/   Spine 4.3（Import Data）`);
+  console.log('  報告.md                 檢查報告');
+  console.log('  預覽.html               離線預覽頁');
+  if (!gifNote) console.log('  預覽.gif                動作預覽 GIF');
+  else if (gifNote !== 'skipped') console.log(`  （沒有產生 GIF：${gifNote}）`);
+}

@@ -21,11 +21,19 @@ def dump(layers, out):
             open(os.path.join(out, f[:-4] + ".alpha"), "wb").write(a.tobytes())
 
 
+# a font with Chinese glyphs for the labels: Windows, macOS, Linux (Noto CJK)
+FONTS = ["C:/Windows/Fonts/msjhbd.ttc", "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc",
+         "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"]
+
+
 def font(size):
-    try:
-        return ImageFont.truetype("C:/Windows/Fonts/msjhbd.ttc", size)
-    except OSError:
-        return ImageFont.load_default()
+    for f in FONTS:
+        try:
+            return ImageFont.truetype(f, size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
 
 
 def backdrop(w, h):

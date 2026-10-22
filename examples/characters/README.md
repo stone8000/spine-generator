@@ -8,3 +8,5 @@
 | [`boxer/`](boxer/) | 照規格用程式畫的測試角色（16 層，含頭髮） | 完全不手動調整就跑得出 6 個動作，用來抓求解器的 bug |
 
 渲染腳本在 [`scripts/trial/`](../../scripts/trial/)：`render_gif.py dump` 把 PNG 轉成 alpha，`render_frames.ts` 用工具本身的程式建骨架、產生動畫、做流暢度與接縫檢查並算出每幀變換，`render_gif.py gif` 再用真實圖層合成 GIF，`sheet.py` 把 GIF 排成逐幀總覽。
+
+一行做完整條流程：`spine-motion character <圖層資料夾>`，見 [`docs/一行做角色.md`](../../docs/一行做角色.md)。
