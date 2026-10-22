@@ -240,8 +240,8 @@ def main(argv=None):
                 bad = summarize(gates)
                 if bad:
                     fail_frames += 1
-                    for k, v in bad.items():
-                        worst[k] = max(worst.get(k, 0), v or 0)
+                    for k, v in bad.items():  # G2 is an area ratio: lower is worse
+                        worst[k] = min(worst.get(k, 1.0), v) if k.startswith("G2") else max(worst.get(k, 0), v or 0)
                 if i in dict(picks):
                     drawn[i] = (fr, bad)
             r_rec.update(judged_frames=len(judged), failing_frames=fail_frames, worst=worst)
