@@ -60,8 +60,14 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            side at shoulders and hips. halfwidth = the largest inscribed
            radius of the lower limb's art near the joint (the same rule as
            art_gates.estimate_halfwidth); band half-length = mesh.BAND_EXTENT
-           halfwidths, shortened so neighbouring bands on one bone never
-           overlap. The ankle of a PLANTED foot is one-sided: its band runs
+           halfwidths each way, or the template joint's "reach" {upper,
+           lower} (an asymmetric band: the elbow runs 3.5 halfwidths up the
+           sleeve and 2 down the forearm), shortened so neighbouring bands
+           on one bone never overlap (half the gap each, unless one needs
+           less) and so no band runs past a rigid joint down its lower bone
+           (_stop_at_rigid_joints: the elbow stops at the wrist, the hand
+           stays rigid). A joint's "rows" and "row_points" shape its rows
+           (mesh.build). The ankle of a PLANTED foot is one-sided: its band runs
            from the ankle up the shin (the upper half of the band it would
            have had), so everything below the ankle is 100% foot and stays
            on the ground in a crouch; a centred band put up to half of the
@@ -598,37 +604,80 @@ class _Builder:
                 kind = "ramp"
             if kind != "helper":
                 helper = None
-            bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "extent": mesh.BAND_EXTENT,
+            want = spec.get("reach") or {}
+            reach = [float(want.get("upper", mesh.BAND_EXTENT)), float(want.get("lower", mesh.BAND_EXTENT))]
+            bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "reach": reach,
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
-                            "kind": kind, "budget": spec.get("budget")}
+                            "kind": kind, "budget": spec.get("budget"),
+                            "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0))}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
             band["pivot"] = band["center"]
             band["planted"] = self.bones[band["lower"]]["parent"] in targets
-        # two bands on one layer must not overlap: they share the distance between them
+        self._stop_at_rigid_joints(bands)
+        # two bands on one layer must not overlap: they share the distance
+        # between them, half each, except that a band reaching less than its
+        # half leaves the rest to the other (a short shoulder band lets a long
+        # elbow band run up the sleeve; two default bands still meet halfway)
+        new = {j: list(b["reach"]) for j, b in bands.items()}
         for a, ba in bands.items():
             for b, bb in bands.items():
                 if a != b and set(ba["layers"]) & set(bb["layers"]):
                     d = float(np.linalg.norm(ba["center"] - bb["center"]))
-                    ba["extent"] = min(ba["extent"], 0.5 * d / ba["halfwidth"])
+                    ia = 1 if (bb["center"] - ba["center"]) @ ba["axis"] > 0 else 0  # a's half toward b
+                    ib = 1 if (ba["center"] - bb["center"]) @ bb["axis"] > 0 else 0
+                    ra, rb = ba["reach"][ia] * ba["halfwidth"], bb["reach"][ib] * bb["halfwidth"]
+                    new[a][ia] = min(new[a][ia], max(0.5 * d, d - rb) / ba["halfwidth"])
+        for j, b in bands.items():
+            b["reach"] = new[j]
+            if not self.t["joints"][j].get("reach"):
+                b["reach"] = [min(new[j])] * 2  # no reach in the template: symmetric, the measured default
         # a planted foot is 100% foot below the ankle (module doc): its band
         # becomes the shin-side half of the band it would have had, so it
         # cannot reach the knee's band either
         for jname, band in bands.items():
             if band["planted"]:
-                band["extent"] *= 0.5
-                band["center"] = band["pivot"] - band["extent"] * band["halfwidth"] * band["axis"]
-                self.notes.append(f"joint {jname}: planted foot; band from the ankle {2 * band['extent']:.2f} "
+                half = 0.5 * band["reach"][0]
+                band["reach"] = [half, half]
+                band["center"] = band["pivot"] - half * band["halfwidth"] * band["axis"]
+                self.notes.append(f"joint {jname}: planted foot; band from the ankle {2 * half:.2f} "
                                   f"halfwidths up the shin, nothing below the ankle")
+        for jname, band in bands.items():
+            band["extent"] = 0.5 * (band["reach"][0] + band["reach"][1])
+            if abs(band["reach"][0] - band["reach"][1]) > 1e-9:
+                self.notes.append(f"joint {jname}: band reaches {band['reach'][0]:.2f} halfwidths toward "
+                                  f"{band['upper']}, {band['reach'][1]:.2f} toward {band['lower']}")
         for band in bands.values():
             band["lateral"] = self._lateral(band)
         return bands
 
+    def _stop_at_rigid_joints(self, bands):
+        """A band's lower half ends at the next joint down its lower bone
+        when the template keeps that joint rigid (band "none"): the elbow's
+        band stops at the wrist.
+
+        WHY: a rigid joint means the part beyond it moves as one piece with
+        its bone (the template's wrists: a mascot's hand image carries the
+        forearm, so a wrist band would steal the elbow's length). A band
+        running past it bends that part with the elbow: the monkey's fist
+        curled with a 3-halfwidth elbow band (P2 F3). On the monkey the
+        default 2-halfwidth band already ends 2-6 px short of the wrists."""
+        for jname, band in bands.items():
+            for tj in self.spec[band["lower"]]["tails"]:
+                if tj not in self.jxy or self.t["joints"].get(tj, {}).get("band", "none") != "none":
+                    continue
+                d = float((self.jxy[tj] - band["center"]) @ band["axis"]) / band["halfwidth"]
+                if 0 < d < band["reach"][1]:
+                    band["reach"][1] = d
+                    self.notes.append(f"joint {jname}: band stops at the rigid joint {tj}, "
+                                      f"{d:.2f} halfwidths down {band['lower']}")
+                break
+
     def _lateral(self, band):
         """Band reach sideways, in halfwidths: enough to take in all the art
         of the layers that carry it within its length (weights.band_mask)."""
-        ext = band["extent"] * band["halfwidth"]
+        up, lo = (r * band["halfwidth"] for r in band["reach"])
         bones = [{"name": n, "head": tuple(self.bones[n]["head"]), "tail": tuple(self.bones[n]["tail"])}
                  for n in (band["upper"], band["lower"])]
         j = _weight_joint(dict(band, lateral=weights.LATERAL))
@@ -639,7 +688,7 @@ class _Builder:
             ii, jj = np.nonzero(self._layer_mask(L))
             pts = np.stack([L["x"] + jj + 0.5, L["y"] + ii + 0.5], 1)
             s, lat = weights.band_coords(pts, j, bones)
-            near = np.abs(s) <= ext + 2.0
+            near = (s >= -up - 2.0) & (s <= lo + 2.0)
             if near.any():
                 reach = max(reach, float(lat[near].max()) / band["halfwidth"] + LATERAL_PAD)
         return reach
@@ -795,10 +844,10 @@ class _Builder:
             bones = [{"name": n, "head": tuple(self.bones[n]["head"]), "tail": tuple(self.bones[n]["tail"])}
                      for n in (b["upper"], b["lower"], b["helper"]) if n]
             s, lat = weights.band_coords(m["verts"], _weight_joint(b), bones)
-            ext = b["extent"] * b["halfwidth"] + weights.END_TOL
+            up, lo = (r * b["halfwidth"] + weights.END_TOL for r in b["reach"])
             near = lat <= b["lateral"] * b["halfwidth"]
-            for side, keep, drop in ((s > ext, b["lower"], (b["upper"], b["helper"])),
-                                     (s < -ext, b["upper"], (b["lower"], b["helper"]))):
+            for side, keep, drop in ((s > lo, b["lower"], (b["upper"], b["helper"])),
+                                     (s < -up, b["upper"], (b["lower"], b["helper"]))):
                 rows = side & near
                 for n in drop:
                     if n:
@@ -826,7 +875,7 @@ class _Builder:
         for b in bands:
             j = _weight_joint(b)
             s, lat = weights.band_coords(m["verts"], j, list(bones.values()))
-            ext = b["extent"] * b["halfwidth"]
+            ext = np.where(s < 0, b["reach"][0], b["reach"][1]) * b["halfwidth"]  # this side's half
             f = np.clip((np.abs(s) - ACC_FADE[0] * ext) / ((ACC_FADE[1] - ACC_FADE[0]) * ext), 0.0, 1.0)
             f[lat > b["lateral"] * b["halfwidth"]] = 1.0
             fade = np.minimum(fade, f)
@@ -1035,12 +1084,19 @@ class _Builder:
         out = []
         for jname, b in self.bands.items():
             # center = the joint the bone turns about; a one-sided (planted)
-            # band also names where it deforms (art_gates.band_triangles)
+            # or asymmetric band also names where it deforms: band_center
+            # and extent (half its length) are the window G2 reads
+            # (art_gates.band_triangles)
+            up, lo = b["reach"]
             band = {"center": self.cv.to_world(b.get("pivot", b["center"])).tolist(), "upper": b["upper"],
                     "helper": b["helper"], "lower": b["lower"], "halfwidth": b["halfwidth"],
-                    "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": b["extent"]}
+                    "axis": self.cv.dir_to_world(b["axis"]).tolist(), "extent": 0.5 * (up + lo)}
             if b.get("planted"):
                 band["band_center"] = self.cv.to_world(b["center"]).tolist()
+            elif abs(up - lo) > 1e-9:
+                mid = b["center"] + 0.5 * (lo - up) * b["halfwidth"] * b["axis"]
+                band["band_center"] = self.cv.to_world(mid).tolist()
+                band["reach"] = [up, lo]
             out.append({"name": jname, "id": b["budget"], "bone": b["lower"], "dirs": [1, -1], "band": band})
         return {"schema": SCHEMA_BUDGET_JOINTS, "template": self.t["name"], "mode": self.mode,
                 "note": "world coordinates (y up); '+' = counter-clockwise local rotation", "joints": out}
@@ -1220,12 +1276,13 @@ def _leg_bend(hip, knee, ankle):
 # ---------------------------------------------------------------- helpers
 
 def _mesh_band(b):
-    return {"center": tuple(b["center"]), "axis": tuple(b["axis"]), "halfwidth": b["halfwidth"], "extent": b["extent"]}
+    return {"center": tuple(b["center"]), "axis": tuple(b["axis"]), "halfwidth": b["halfwidth"],
+            "reach": tuple(b["reach"]), "rows": b.get("rows", mesh.BAND_ROWS), "row_points": b.get("row_points", 0)}
 
 
 def _weight_joint(b):
     return {"center": tuple(b["center"]), "upper": b["upper"], "helper": b["helper"], "lower": b["lower"],
-            "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "extent": b["extent"],
+            "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "reach": tuple(b["reach"]),
             "lateral": b.get("lateral", weights.LATERAL), "exclusive": True}
 
 
@@ -1241,6 +1298,7 @@ def _round_band(b):
     return {"center": [round(float(v), 3) for v in b["center"]], "axis": [round(float(v), 5) for v in b["axis"]],
             "pivot": [round(float(v), 3) for v in b.get("pivot", b["center"])], "planted": bool(b.get("planted")),
             "halfwidth": round(b["halfwidth"], 3), "extent": round(b["extent"], 4),
+            "reach": [round(float(v), 4) for v in b["reach"]],
             "lateral": round(b.get("lateral", weights.LATERAL), 3), "upper": b["upper"],
             "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"]}
 

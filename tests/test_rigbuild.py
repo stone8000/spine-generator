@@ -248,6 +248,88 @@ def test_joint_modes_override_and_choice(layers_dir):
     assert "seam@a|b" in why["elbow_r"]
 
 
+def _template(**joints):
+    """biped_mascot with some joints' entries replaced (raw form, then expanded)."""
+    from spinegen import template as tmpl
+    with open(os.path.join(tmpl.TEMPLATE_DIR, "biped_mascot.json")) as f:
+        raw = json.load(f)
+    for name, spec in joints.items():
+        raw["joints"][name] = spec
+    return tmpl.expand(raw)
+
+
+SYMMETRIC_ELBOW = {"band": "both", "helper": "elbow_mid_{s}", "budget": "arm_{s}.elbow"}
+
+
+def test_elbow_band_reaches_up_the_sleeve_and_stops_at_the_wrist(layers_dir):
+    """The template's elbow band is asymmetric (reach 3.5 up the sleeve);
+    asked for more than the forearm holds, it stops at the rigid wrist; a
+    band with no reach in the template stays symmetric (the measured
+    default), and the budget's G2 window covers the asymmetric band
+    (band_center, extent = half its length)."""
+    res = rigbuild.build(layers_dir, mode="joint")
+    bands = res["report"]["bands"]
+    assert bands["elbow_l"]["reach"] == [3.5, 2.0] and bands["knee_l"]["reach"][0] == bands["knee_l"]["reach"][1]
+    hw = bands["elbow_l"]["halfwidth"]
+    j = next(x for x in res["joints"]["joints"] if x["name"] == "elbow_l")["band"]
+    mid = np.asarray(j["center"]) + 0.5 * (2.0 - 3.5) * hw * np.asarray(j["axis"])
+    assert np.allclose(j["band_center"], mid) and j["extent"] == pytest.approx(2.75)
+    # asking for a forearm half longer than the forearm: clipped at the wrist
+    with open(os.path.join(layers_dir, "joints.json")) as f:
+        jd = json.load(f)
+    elbow, wrist = (np.asarray(jd["joints"][k]["xy"], float) for k in ("elbow_l", "wrist_l"))
+    long = rigbuild.build(layers_dir, mode="joint",
+                          template=_template(**{"elbow_{s}": dict(SYMMETRIC_ELBOW, reach={"upper": 2, "lower": 9})}))
+    b = long["report"]["bands"]["elbow_l"]
+    d = float((wrist - elbow) @ np.asarray(b["axis"])) / b["halfwidth"]
+    assert b["reach"][1] == pytest.approx(d, abs=1e-3) and d < 9
+    assert any("stops at the rigid joint wrist_l" in n for n in long["report"]["notes"])
+    # every vertex at or past the wrist (the synthetic forearm's art ends there) is 100% forearm
+    att = next(a for _, s, _, a in irmod.iter_attachments(long["ir"]) if s == "forearm_l")
+    V = np.asarray(att["vertices"], float).reshape(-1, 2)
+    wr = rigbuild.Canvas(json.load(open(os.path.join(layers_dir, "layers.json")))).to_world(wrist)
+    ax = np.array([b["axis"][0], -b["axis"][1]])
+    past = (V - wr) @ ax > -0.5
+    assert past.any() and all(att["weights"][i] == [["forearm_l", 1.0]] for i in np.flatnonzero(past))
+
+
+def test_neighbouring_bands_share_by_need(layers_dir):
+    """Two bands on one layer (shoulder and elbow on the upper arm): half
+    the gap each, but a band reaching less than its half leaves the rest to
+    the other (rigbuild.joint_bands)."""
+    def reaches(shoulder_lower, elbow_upper):
+        t = _template(**{"shoulder_{s}": {"band": "lower", "budget": "arm_{s}.shoulder",
+                                          "reach": {"upper": 2.0, "lower": shoulder_lower}},
+                         "elbow_{s}": dict(SYMMETRIC_ELBOW, reach={"upper": elbow_upper, "lower": 2.0})})
+        bands = rigbuild.build(layers_dir, mode="joint", template=t)["report"]["bands"]
+        sh, el = bands["shoulder_l"], bands["elbow_l"]
+        d = float(np.linalg.norm(np.subtract(sh["center"], el["center"])))
+        return sh["reach"][1] * sh["halfwidth"], el["reach"][0] * el["halfwidth"], d
+    sh, el, d = reaches(0.5, 50.0)           # a short shoulder band: the elbow takes the rest
+    assert sh + el == pytest.approx(d, abs=0.05) and el > 0.5 * d
+    sh, el, d = reaches(50.0, 50.0)          # both want more than the gap: half each
+    assert sh == pytest.approx(0.5 * d, abs=0.05) and el == pytest.approx(0.5 * d, abs=0.05)
+    sh, el, d = reaches(0.5, 1.0)            # room for both: neither changes
+    assert sh + el < d
+
+
+def test_template_elbow_holds_past_90_where_the_symmetric_band_stops(layers_dir, tmp_path):
+    """P2 A1 on the synthetic arm: the template's elbow (3.5 halfwidths up
+    the sleeve, 4 forearm rows, 2 points per row) holds more than 100 deg
+    under G2's per-triangle range, where the old symmetric 2-halfwidth band
+    stopped at 90 deg on one triangle of the upper arm (tri@upper_arm_l)."""
+    from spinegen import budget
+    out = {}
+    for name, t in (("new", "biped_mascot"), ("old", _template(**{"elbow_{s}": SYMMETRIC_ELBOW}))):
+        res = rigbuild.build(layers_dir, mode="joint", template=t)
+        paths = rigbuild.write(str(tmp_path / name), res)
+        ir, images = raster.load_rig(paths["rig"]), raster.load_images(paths["atlas"])
+        b = budget.scan(ir, images, res["joints"], 4.0, 150.0, only={"elbow_l"})
+        out[name] = b["joints"]["elbow_l"]["+"]
+    assert out["old"]["soft"] <= 92 and out["old"]["limit_by"].startswith("tri@upper_arm")
+    assert out["new"]["soft"] >= 110
+
+
 # ---------------------------------------------------------------- feet
 
 def test_crouch_keeps_the_soles_planted(built):

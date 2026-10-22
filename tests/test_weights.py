@@ -277,3 +277,31 @@ def test_helper_elbow_holds_120_degrees_in_spine_core(tmp_path):
     assert h[120.0]["band_union"] >= 0.9
     assert out["ramp"][150.0]["folds"] > 0
     assert out["ramp"][120.0]["band_union"] < h[120.0]["band_union"] - 0.1
+
+
+@pytest.mark.parametrize("helper", [False, True])
+def test_asymmetric_reach_ramp(arm_mesh, helper):
+    """"reach" [upper, lower]: with a helper, upper -> helper over the upper
+    reach and helper -> lower over the lower one (the helper owns the joint
+    whatever the lengths); without one, one linear ramp over the whole band.
+    A symmetric reach is the old extent exactly."""
+    bones = arm_bones(helper)
+    up, lo = 1.6, 0.8
+    j = dict(elbow_joint(helper), reach=(up, lo))
+    V = arm_mesh["verts"]
+    m, ramp = weights.joint_ramp(V, j, bones)
+    s = (V[m] - ELBOW) @ np.array([1.0, 0.0])
+    assert s.min() >= -up * HW - weights.END_TOL - 1e-9 and s.max() <= lo * HW + weights.END_TOL + 1e-9
+    if helper:
+        a = np.clip((s + up * HW) / (up * HW), 0, 1)
+        b = np.clip(s / (lo * HW), 0, 1)
+        assert np.allclose(ramp, np.stack([1 - a, b, a - b], 1))
+    else:
+        t = np.clip((s + up * HW) / ((up + lo) * HW), 0, 1)
+        assert np.allclose(ramp, np.stack([1 - t, t], 1))
+    sym = dict(elbow_joint(helper), reach=(1.5, 1.5))
+    m1, r1 = weights.joint_ramp(V, sym, bones)
+    m2, r2 = weights.joint_ramp(V, elbow_joint(helper, extent=1.5), bones)
+    assert np.array_equal(m1, m2) and np.allclose(r1, r2)
+    with pytest.raises(ValueError):
+        weights.joint_ramp(V, dict(sym, reach=(1.5, 0.0)), bones)

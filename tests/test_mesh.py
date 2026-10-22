@@ -331,3 +331,44 @@ def test_vertex_counts_against_the_22px_grid():
     assert a["vertices"] < b["vertices"] <= a["vertices"] + 50     # 8 rows across the limb
     b2 = mesh.build(alpha, (0, 0), bands=[elbow_band(p0, p1, rows=2)])["stats"]
     assert a["vertices"] < b2["vertices"] < b["vertices"]          # 6 rows: cheaper
+
+
+def test_asymmetric_band_rows_follow_each_half():
+    """"reach" [upper, lower] scales each half's rows by its own length,
+    "rows" [upper, lower] sets each half's count; symmetric reach is the
+    old extent exactly (P2 A1: a long sleeve half, a short forearm half)."""
+    band = dict(elbow_band(*arm()[1:]), reach=(3.0, 1.5), rows=(3, 4))
+    hw = band["halfwidth"]
+    pos = mesh.band_row_positions(band)
+    want = np.array([-1, -2 / 3, -1 / 3, -mesh.CENTER_PAIR]) * 3.0 * hw
+    want = np.concatenate([want, np.array([mesh.CENTER_PAIR, 0.25, 0.5, 0.75, 1.0]) * 1.5 * hw])
+    assert np.allclose(pos, want)
+    assert mesh.band_reach(band) == (3.0 * hw, 1.5 * hw)
+    sym = elbow_band(*arm()[1:], extent=1.5)
+    assert np.allclose(mesh.band_row_positions(dict(sym, reach=(1.5, 1.5))), mesh.band_row_positions(sym))
+
+
+def test_row_points_make_each_lean_row_a_chain_of_edges():
+    """With row_points k a lean ("ends") row keeps k interior points and is
+    a chain of constrained edges through them: no triangle crosses it, and
+    a band without the option meshes exactly as before."""
+    alpha, p0, p1 = arm()
+    band = dict(elbow_band(p0, p1), reach=(2.5, 1.5), rows=(3, 4), row_points=2)
+    m = mesh.build(alpha, (0, 0), bands=[band], **LEAN)
+    edges = {tuple(sorted(e)) for t in m["tris"].tolist() for e in ((t[0], t[1]), (t[1], t[2]), (t[0], t[2]))}
+    c, a = np.asarray(band["center"]), np.asarray(band["axis"])
+    nrm = np.array([-a[1], a[0]])
+    for row in m["band_rows"][0]:
+        assert len(row) == 4 and row[0] < m["hull"] and row[1] < m["hull"]
+        chain = [row[0]] + sorted(row[2:], key=lambda i: (m["verts"][i] - m["verts"][row[0]]) @ nrm
+                                  * np.sign((m["verts"][row[1]] - m["verts"][row[0]]) @ nrm)) + [row[1]]
+        for u, v in zip(chain[:-1], chain[1:]):
+            assert tuple(sorted((u, v))) in edges
+    s = (m["verts"] - c) @ a
+    for t in m["tris"]:
+        lo, hi = s[t].min(), s[t].max()
+        assert not any(lo < o - 0.05 and hi > o + 0.05 for o in mesh.band_row_positions(band))
+    assert m["stats"]["vertices"] == m["hull"] + 2 * len(m["band_rows"][0])
+    plain = dict(band, row_points=0)
+    ref = mesh.build(alpha, (0, 0), bands=[plain], **LEAN)
+    assert ref["stats"]["vertices"] == ref["hull"]

@@ -89,7 +89,9 @@ def compute(verts, tris, outline, bones, joints=(), mode="auto", max_influences=
     joints    [{"center", "upper", "helper" (name or None), "lower", "halfwidth",
                optional "axis" (default: mean direction of the upper and lower
                bones), "extent" (band half-length in halfwidths, default
-               mesh.BAND_EXTENT; give the mesh band the same), "lateral" (band
+               mesh.BAND_EXTENT; give the mesh band the same), "reach"
+              ([upper, lower] halfwidths from the centre, overriding
+              extent: an asymmetric band, joint_reach), "lateral" (band
               reach sideways in halfwidths, default LATERAL; see band_mask),
               "exclusive" (True: band vertices carry only the joint's bones; by
               default other bones keep the heat weight they had there)}]; every bone a
@@ -170,6 +172,25 @@ def as_matrix(weights, names):
 
 # ---------------------------------------------------------------- joint bands
 
+def joint_reach(joint):
+    """(upper, lower) px the band reaches from its centre along the axis,
+    toward the upper and the lower bone.
+
+    `reach` [upper, lower] in halfwidths, else `extent` both ways. WHY two
+    lengths: a band only has to be long where the art is wide for its
+    length. The elbow's sleeve side has a whole upper arm to spread over,
+    while the forearm side must stop before a rigid wrist or it bends the
+    hand (P2 A1); one symmetric extent has to pick between the two."""
+    hw = float(joint["halfwidth"])
+    if joint.get("reach") is not None:
+        up, lo = (float(v) for v in joint["reach"])
+    else:
+        up = lo = float(joint.get("extent", BAND_EXTENT))
+    if up <= 0 or lo <= 0:
+        raise ValueError(f"joint at {tuple(joint['center'])}: band reach must be > 0 both ways, not {(up, lo)}")
+    return up * hw, lo * hw
+
+
 def joint_frame(joint, bones):
     """(center, unit axis from upper toward lower, halfwidth, band half-length)."""
     by = {b["name"]: b for b in bones}
@@ -212,8 +233,12 @@ def band_mask(verts, joint, bones, strict=False):
     wider than LATERAL x halfwidth (a flared hem) would otherwise leave its
     outer vertices on heat weights next to ramped ones, and fold there."""
     s, lat = band_coords(verts, joint, bones)
-    _, _, hw, ext = joint_frame(joint, bones)
-    along = np.abs(s) < ext - END_TOL if strict else np.abs(s) <= ext + END_TOL
+    _, _, hw, _ = joint_frame(joint, bones)
+    up, lo = joint_reach(joint)
+    if strict:
+        along = (s > -up + END_TOL) & (s < lo - END_TOL)
+    else:
+        along = (s >= -up - END_TOL) & (s <= lo + END_TOL)
     return along & (lat <= float(joint.get("lateral", LATERAL)) * hw)
 
 
@@ -222,16 +247,18 @@ def joint_ramp(verts, joint, bones):
 
     ramp columns: [upper, lower] or, with a helper, [upper, lower, helper].
     t runs 0 -> 1 across the band; with a helper the ramp is piecewise:
-    upper -> helper over the first half, helper -> lower over the second, so
-    no vertex mixes more than two of the three ([E1] pw_mid)."""
+    upper -> helper over the upper half (centre - reach up .. centre),
+    helper -> lower over the lower half, so no vertex mixes more than two
+    of the three ([E1] pw_mid) and the helper owns the centre whatever the
+    two halves' lengths (joint_reach)."""
     m = band_mask(verts, joint, bones)
     s, _ = band_coords(np.asarray(verts, float).reshape(-1, 2)[m], joint, bones)
-    _, _, _, ext = joint_frame(joint, bones)
-    t = np.clip((s + ext) / (2 * ext), 0.0, 1.0)
+    up, lo = joint_reach(joint)
     if joint.get("helper"):
-        a = np.clip(2 * t, 0, 1)
-        b = np.clip(2 * t - 1, 0, 1)
+        a = np.clip((s + up) / up, 0, 1)
+        b = np.clip(s / lo, 0, 1)
         return m, np.stack([1 - a, b, a - b], 1)
+    t = np.clip((s + up) / (up + lo), 0.0, 1.0)
     return m, np.stack([1 - t, t], 1)
 
 
