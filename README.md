@@ -46,6 +46,8 @@
 
 先按「範例：圖層角色」看正確的結果，「範例：有問題的圖層」看接縫檢查怎麼抓出肩膀沒畫、頭在下巴切平的圖。
 
+完整的角色範例（圖層、關節、動作結果與驗證報告）在 [`examples/characters/`](examples/characters/)：[大盜猴](examples/characters/bandit-monkey/)是 AI 生圖的真實交件（含自訂疊圖順序 `layers.json`），[拳擊手](examples/characters/boxer/)是照規格畫的測試角色。
+
 ---
 
 ## 安裝（命令列工具）

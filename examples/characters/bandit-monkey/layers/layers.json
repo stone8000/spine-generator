@@ -1,0 +1,23 @@
+{
+  "canvas": {
+    "width": 1024,
+    "height": 1536
+  },
+  "order": [
+    "arm_back_upper.png",
+    "leg_back_upper.png",
+    "leg_back_lower.png",
+    "leg_front_upper.png",
+    "leg_front_lower.png",
+    "pelvis.png",
+    "neck.png",
+    "torso.png",
+    "arm_back_lower.png",
+    "fist_back.png",
+    "head.png",
+    "arm_front_upper.png",
+    "arm_front_lower.png",
+    "fist_front.png"
+  ],
+  "note": "Rear forearm/glove pass in front of chest; hanging rope passes in front of front thigh. Use this order for this boxing pose."
+}

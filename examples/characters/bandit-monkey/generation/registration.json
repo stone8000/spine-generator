@@ -1,0 +1,296 @@
+[
+  {
+    "name": "arm_back_upper",
+    "visiblePixels": 23081,
+    "hiddenPixels": 20999,
+    "rawBounds": [
+      213,
+      287,
+      622,
+      840
+    ],
+    "hiddenRegistration": [
+      190,
+      290,
+      210,
+      300
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "arm_back_lower",
+    "visiblePixels": 37705,
+    "hiddenPixels": 3520,
+    "rawBounds": [
+      249,
+      510,
+      560,
+      816
+    ],
+    "hiddenRegistration": [
+      180,
+      445,
+      250,
+      220
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "fist_back",
+    "visiblePixels": 22968,
+    "hiddenPixels": 0,
+    "rawBounds": [
+      247,
+      380,
+      566,
+      744
+    ],
+    "hiddenRegistration": [
+      332,
+      304,
+      176,
+      193
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "leg_back_upper",
+    "visiblePixels": 56053,
+    "hiddenPixels": 21152,
+    "rawBounds": [
+      47,
+      368,
+      612,
+      889
+    ],
+    "hiddenRegistration": [
+      180,
+      700,
+      310,
+      425
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "leg_back_lower",
+    "visiblePixels": 66429,
+    "hiddenPixels": 8985,
+    "rawBounds": [
+      54,
+      549,
+      550,
+      1392
+    ],
+    "hiddenRegistration": [
+      59,
+      960,
+      340,
+      465
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "pelvis",
+    "visiblePixels": 40713,
+    "hiddenPixels": 8991,
+    "rawBounds": [
+      100,
+      432,
+      933,
+      1008
+    ],
+    "hiddenRegistration": [
+      270,
+      615,
+      365,
+      300
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "leg_front_upper",
+    "visiblePixels": 47379,
+    "hiddenPixels": 32730,
+    "rawBounds": [
+      285,
+      324,
+      887,
+      854
+    ],
+    "hiddenRegistration": [
+      450,
+      700,
+      350,
+      425
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "leg_front_lower",
+    "visiblePixels": 75200,
+    "hiddenPixels": 8985,
+    "rawBounds": [
+      284,
+      214,
+      968,
+      1325
+    ],
+    "hiddenRegistration": [
+      575,
+      960,
+      355,
+      440
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "neck",
+    "visiblePixels": 0,
+    "hiddenPixels": 14610,
+    "rawBounds": [
+      391,
+      355,
+      647,
+      477
+    ],
+    "hiddenRegistration": [
+      465,
+      300,
+      145,
+      200
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "torso",
+    "visiblePixels": 47082,
+    "hiddenPixels": 61200,
+    "rawBounds": [
+      296,
+      321,
+      786,
+      1105
+    ],
+    "hiddenRegistration": [
+      300,
+      280,
+      390,
+      425
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "head",
+    "visiblePixels": 88153,
+    "hiddenPixels": 0,
+    "rawBounds": [
+      178,
+      204,
+      921,
+      910
+    ],
+    "hiddenRegistration": [
+      336,
+      76,
+      444,
+      360
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "arm_front_upper",
+    "visiblePixels": 14629,
+    "hiddenPixels": 18788,
+    "rawBounds": [
+      526,
+      305,
+      915,
+      837
+    ],
+    "hiddenRegistration": [
+      555,
+      375,
+      165,
+      270
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "arm_front_lower",
+    "visiblePixels": 25426,
+    "hiddenPixels": 5030,
+    "rawBounds": [
+      333,
+      450,
+      802,
+      915
+    ],
+    "hiddenRegistration": [
+      575,
+      475,
+      210,
+      205
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  },
+  {
+    "name": "fist_front",
+    "visiblePixels": 35115,
+    "hiddenPixels": 0,
+    "rawBounds": [
+      597,
+      416,
+      926,
+      788
+    ],
+    "hiddenRegistration": [
+      663,
+      305,
+      225,
+      228
+    ],
+    "canvasTranslation": [
+      20,
+      32
+    ]
+  }
+]
