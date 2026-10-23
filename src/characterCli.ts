@@ -14,7 +14,8 @@ import type { AlphaMap } from './autorig.ts';
 import { PARTS, type Joints } from './rigTemplate.ts';
 
 export const CHARACTER_HELP = `  spine-motion character <圖層資料夾> [-o 輸出資料夾] [--name 名稱] [--joints 關節.json]
-                         [--celebrate 參數.json] [--budget 角度預算.json] [--no-gif] [--bones]
+                         [--celebrate 參數.json] [--params 動作參數.json] [--budget 角度預算.json]
+                         [--no-gif] [--bones]
                                                一行做完角色：圖層 PNG → Spine 4.3 骨架＋6 個動作、
                                                檢查報告、預覽頁與預覽 GIF`;
 
@@ -55,7 +56,7 @@ function renderGif(imagesDir: string, framesFile: string, out: string, bones: bo
 }
 
 export function cmdCharacter(args: string[]): void {
-  const dirArg = args.find((a, i) => !a.startsWith('-') && !['-o', '--name', '--joints', '--celebrate', '--budget'].includes(args[i - 1]));
+  const dirArg = args.find((a, i) => !a.startsWith('-') && !['-o', '--name', '--joints', '--celebrate', '--params', '--budget'].includes(args[i - 1]));
   if (!dirArg) throw new Error('用法：spine-motion character <圖層資料夾>（放部件 PNG，可附 layers.json）');
   const dir = resolve(dirArg);
   if (!existsSync(dir)) throw new Error(`找不到資料夾 ${dirArg}`);
@@ -105,6 +106,13 @@ export function cmdCharacter(args: string[]): void {
     const c = readJson(celebrateFile, '慶祝參數') as { params?: Record<string, number> } & Record<string, number>;
     params = { celebrate: c.params ?? c };
     used.push(`慶祝參數：${show(celebrateFile)}`);
+  }
+  // per-animation params, e.g. { "punch": { "reach": 170 }, "celebrate": { "swing": 30 } }; celebrate.params.json wins for celebrate
+  const paramsFile = arg(args, '--params') ?? findBeside(dir, ['motion.params.json']);
+  if (paramsFile) {
+    const all = readJson(paramsFile, '動作參數') as Record<string, Record<string, number>>;
+    params = { ...all, ...(params && { celebrate: { ...all.celebrate, ...params.celebrate } }) };
+    used.push(`動作參數：${show(paramsFile)}`);
   }
   const budgetFile = arg(args, '--budget') ?? findBeside(dir, ['budget.json']);
   const budget = budgetFile ? parseBudget(readJson(budgetFile, '角度預算')) : undefined;
@@ -176,7 +184,7 @@ export function cmdCharacter(args: string[]): void {
   md.push('## 圖層', '', `- ${alphas.size} 層，畫布 ${canvas.width}×${canvas.height}`, `- 疊圖順序：${orderFile ? '照 `layers.json`' : '模板預設（交件附 `layers.json` 就會照它疊）'}`);
   if (missingOptional.length) md.push(`- 沒有的選用圖層：${missingOptional.join('、')}`);
   if (skipped.length) md.push(`- 略過的檔案：${skipped.join('、')}`);
-  if (params) md.push(`- 慶祝參數：\`${JSON.stringify(params.celebrate)}\``);
+  if (params) md.push(`- 動作參數：\`${JSON.stringify(params)}\``);
   md.push('', '## 檔案', '', '| 檔案 | 用途 |', '|---|---|');
   md.push(`| \`${name}.json\` + \`images/\` | Spine 4.3 骨架＋6 個動畫。Spine 編輯器 Import Data 匯入，或直接給遊戲載入 |`);
   md.push('| `預覽.gif` | 6 個動作連著播（真實圖層） |', '| `預覽.html` | 離線預覽頁（骨架線、洋蔥皮、軌跡、曲線） |', '| `joints.json` | 這次用的 19 個關節點，可以改了再用 `--joints` 重跑 |');
