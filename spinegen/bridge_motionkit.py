@@ -3,7 +3,7 @@
     python -m spinegen.bridge_motionkit <rig.json> <atlas> -o <outdir>
         [--presets fighter-idle-bounce,punch,celebrate,hit-react] [--facing 1|-1]
         [--name NAME] [--arm-softness 0.1] [--leg-softness 0.15] [--no-ik-guard | --kit-guard]
-        [--budget auto|none|budget.json] [--joints joints.json] [--no-qa]
+        [--budget auto|none|budget.json] [--joints joints.json] [--no-intro] [--no-qa]
 
 WHY
   spinegen builds rigs that hold big angles (meshes across the joints,
@@ -61,8 +61,19 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
        hair <- accessory chains under the head, chain <- other accessory
        chains; an accessory the IR already drives with runtime physics is
        left to it (baking the kit's hair physics on top would move it twice).
+       crouch <- the hip, when the legs' IK targets are not under it (feet
+       planted under the root): the kit's jump then dips and lands on the
+       hip, so the legs bend, and the root carries only the flight.
      size is the kit's own estimate (`spine-motion init`), so preset
      distances follow the rig exactly as the kit would scale them.
+     INTRO (--no-intro turns it off): an idle loop (fighter-idle-*,
+     breathe) gets the kit's recipe `intro`, a one-shot `<name>_in` one
+     cycle long that starts on the drawn pose and ends on the loop's frame
+     0 (smootherstep envelope: speed and acceleration join). An idle preset
+     starts mid-cycle (the monkey's: hips at their lowest, 39.6 px off the
+     drawn pose, no frame of the cycle closer than 15.5 px), and a loop
+     cannot both close on itself and start at rest. Play `<name>_in`, then
+     queue `<name>` looping. bridge.json `intro` has both joins in px.
   3b. IK GUARD PER CHAIN (recipe `ikGuardChains`; guard_chains): the kit's
      guard keeps a fist target within 85-95 % of the arm's bone lengths;
      an arm drawn straight sits past that at rest (the monkey: 99.8 %, and
@@ -91,7 +102,9 @@ STEPS (each writes into <outdir>; nothing goes next to the input)
      `check --json` for the per-animation scores.
   5. qa/run.mjs check --runtime 4.3 with an IR summary (counts, constraint
      order, planted feet for M1: the kit never lifts a foot target, so every
-     preset animation plants both feet for its whole length).
+     preset animation plants both feet for its whole length, except the
+     jump's flight between its `takeoff` and `land` events, when the root
+     carries the feet).
   bridge.json in <outdir> holds every number of every step, including the
   setup pose of the bridged 4.3 file against the plain 4.3 emit, both played
   by spine-core 4.3.13 (`setup_vertices_43_px`).
@@ -414,15 +427,46 @@ def roles_from_template(ir, arm_report, facing=1):
         roles["hair"] = max(hair, key=len)
     if other:
         roles["chain"] = max(other, key=len)
+    hip = roles.get("hip")
+    if hip and planted_feet(ir, hip):
+        # the kit's jump moves the root; with the feet's IK targets outside the hip (planted), the dip and the
+        # landing go on the hip so the legs bend, and the root carries only the flight
+        roles["crouch"] = hip
     return roles, notes
 
 
-def make_recipe(roles, presets, size, facing=1, ik_guard=True):
+def planted_feet(ir, hip):
+    """Leg IK targets that the hip does not carry (under the root, say): feet that stay where they are when the
+    body moves."""
+    parent = {b["name"]: b["parent"] for b in ir["bones"]}
+    role = {b["name"]: b.get("role") or "" for b in ir["bones"]}
+
+    def under(b, a):
+        while b is not None:
+            if b == a:
+                return True
+            b = parent[b]
+        return False
+    return [c["target"] for c in ir["ik"] if len(c["bones"]) == 2 and all(role[b].startswith("leg_") for b in c["bones"])
+            and not under(c["target"], hip)]
+
+
+INTRO_PRESETS = ("fighter-idle-bounce", "fighter-idle-weave", "breathe")  # idles: the first thing a player shows
+LOOP_PRESETS = ("fighter-idle-bounce", "fighter-idle-weave", "celebrate", "breathe")
+
+
+def make_recipe(roles, presets, size, facing=1, ik_guard=True, intro=True):
+    """The kit recipe. `intro`: an idle loop also gets the kit's one-shot opening `<name>_in` (recipe `intro`,
+    one cycle long), which starts on the drawn pose and ends on the loop's frame 0: an idle preset starts mid-cycle
+    (the monkey's: hips at their lowest, 39.6 px of vertices off the drawn pose), and a loop cannot both close on
+    itself and start at rest unless its cycle passes through the rest pose."""
     anims = []
     for p in presets:
         a = {"name": ANIM_NAMES.get(p, p.replace("-", "_")), "preset": p}
         if p.startswith("fighter-idle"):
             a["params"] = {"hair": "keys" if roles.get("hair") else "none"}
+        if intro and p in INTRO_PRESETS:
+            a["intro"] = True
         anims.append(a)
     return {"fps": 30, "facing": facing, "size": size, "ikGuard": bool(ik_guard), "roles": roles, "animations": anims}
 
@@ -696,9 +740,62 @@ def qa_ir(ir, motion_json):
     counts["animations"] = len(anims)
     counts["events"] = len(skel.get("events", {}))  # the kit's swing / impact / hit
     feet = sorted({fp["bone"] for fp in ir.get("foot_plant", [])})
-    plants = [{"bone": b, "anim": a} for a in anims for b in feet]
+    plants = []
+    for a, body in anims.items():
+        ev = {e["name"]: e.get("time", 0.0) for e in body.get("events", [])}
+        if "takeoff" in ev and "land" in ev:  # the kit's jump: the root flies between them, the feet with it
+            dur = _anim_duration(body)
+            spans = [s for s in ([0.0, ev["takeoff"]], [ev["land"], dur]) if s[1] > s[0]]
+            plants += [{"bone": b, "anim": a, "spans": spans} for b in feet]
+        else:
+            plants += [{"bone": b, "anim": a} for b in feet]
     return {"counts": counts, "foot_plant": plants,
             **{k: [{"name": c["name"], "order": c["order"]} for c in ir[k]] for k in ("ik", "transform", "path", "physics")}}
+
+
+def _anim_duration(body):
+    """Last key or event time of a Spine 4.3 animation body."""
+    t = [e.get("time", 0.0) for e in body.get("events", [])]
+
+    def walk(x):
+        if isinstance(x, dict):
+            if "time" in x and isinstance(x["time"], (int, float)):
+                t.append(x["time"])
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk({k: v for k, v in body.items() if k != "events"})
+    return max(t, default=0.0)
+
+
+def intro_probe(motion, atlas, recipe):
+    """Per animation with an intro: the largest vertex distance of `<name>_in` frame 0 from the setup pose, and of its
+    last frame from the loop's frame 0 (spine-core 4.3.13, physics none: the poses the keys make)."""
+    out = {}
+    setup = oracle.dump(motion, atlas, runtime="4.3", physics="none")["frames"][0]["slots"]
+    with open(motion) as f:
+        anims = json.load(f)["animations"]
+    for a in recipe["animations"]:
+        if not a.get("intro"):
+            continue
+        name_in = a.get("introName", a["name"] + "_in")
+        d_in = _anim_duration(anims[name_in])
+        f0 = oracle.dump(motion, atlas, anim=name_in, times=[0.0, d_in], runtime="4.3", physics="none")["frames"]
+        g0 = oracle.dump(motion, atlas, anim=a["name"], times=[0.0], runtime="4.3", physics="none")["frames"][0]["slots"]
+        out[a["name"]] = {"intro": name_in, "seconds": round(d_in, 4), "frame0_vs_setup_px": _slots_dist(f0[0]["slots"], setup),
+                          "end_vs_loop_frame0_px": _slots_dist(f0[-1]["slots"], g0)}
+    return out
+
+
+def _slots_dist(fa, fb):
+    worst = 0.0
+    for slot, sa in fa.items():
+        va, vb = sa["vertices"] or [], fb[slot]["vertices"] or []
+        for i in range(0, min(len(va), len(vb)), 2):
+            worst = max(worst, math.hypot(va[i] - vb[i], va[i + 1] - vb[i + 1]))
+    return worst
 
 
 def setup_vertices_43(plain43, rig43, atlas):
@@ -729,7 +826,7 @@ def qa_check(motion_json, atlas, ir_summary_path, out_path):
 # ---------------------------------------------------------------- the bridge
 
 def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, arm_softness=0.1, qa=True,
-        leg_softness=LEG_SOFTNESS, ik_guard=True, kit_guard=False, budget="auto", joints=None):
+        leg_softness=LEG_SOFTNESS, ik_guard=True, kit_guard=False, budget="auto", joints=None, intro=True):
     ir = irmod.load(rig_path)
     name = name or ir.get("name") or "rig"
     os.makedirs(out_dir, exist_ok=True)
@@ -762,13 +859,13 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
     ensure_kit()
     size, guessed = kit_size(rig43)
     roles, notes = roles_from_template(bridged, arms, facing)
-    recipe = make_recipe(roles, presets, size, facing, ik_guard)
+    recipe = make_recipe(roles, presets, size, facing, ik_guard, intro)
     if ik_guard and not kit_guard:
         recipe["ikGuardChains"] = {t: {"knee": g["knee"], "max": g["max"]} for t, g in guard_chains(bridged).items()}
         rep["ik_guard"] = {"mode": "per chain", "chains": guard_chains(bridged)}
     else:
         rep["ik_guard"] = {"mode": "kit default" if ik_guard else "off"}
-    loops = [a["name"] for a in recipe["animations"] if a["preset"] in ("fighter-idle-bounce", "fighter-idle-weave", "celebrate", "breathe")]
+    loops = [a["name"] for a in recipe["animations"] if a["preset"] in LOOP_PRESETS]
     if ik_guard:
         rep["ik_guard"]["rest_px"] = rest_probe(rig43, atlas_out, recipe, os.path.join(out_dir, "work"))
 
@@ -799,6 +896,8 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
 
     motion = os.path.join(out_dir, f"{name}.motion.json")
     rep["generate_stdout"] = kit("generate", rig43, recipe_path, "-o", motion, "--check")
+    if intro and oracle.available("4.3")[0]:
+        rep["intro"] = intro_probe(motion, atlas_out, recipe)
     checks = json.loads(kit("check", motion, "--loops", ",".join(loops), "--json"))
     rep["smoothness"] = [{"name": r["name"], "score": r["score"], "loop": r["loop"], "keys": r["keyCount"],
                           "errors": sum(i["severity"] == "error" for i in r["issues"]),
@@ -882,11 +981,13 @@ def main(argv=None):
     ap.add_argument("--budget", default="auto",
                     help="budget.json to fit the presets' amplitudes to ('auto': beside rig.json; 'none': no fit)")
     ap.add_argument("--joints", default=None, help="joints.json for --budget (default: beside rig.json)")
+    ap.add_argument("--no-intro", action="store_true",
+                    help="no one-shot fade-in opening <idle>_in before the idle loops")
     ap.add_argument("--no-qa", action="store_true")
     args = ap.parse_args(argv)
     rep = run(args.rig, args.atlas, args.out, [p.strip() for p in args.presets.split(",") if p.strip()],
               args.facing, args.name, args.arm_softness, not args.no_qa, args.leg_softness, not args.no_ik_guard,
-              args.kit_guard, None if args.budget == "none" else args.budget, args.joints)
+              args.kit_guard, None if args.budget == "none" else args.budget, args.joints, not args.no_intro)
     for side, a in rep["arm_ik"]["arms"].items():
         print(f"arm IK {side}: {a['upper']} -> {a['fore']} onto {a['target']}, bendPositive {a['bend_positive']}, "
               f"softness {a['softness']} (target pushed {a.get('push_px', 0)} px past the wrist)")
@@ -906,6 +1007,9 @@ def main(argv=None):
                   + ("" if fr["after"]["ok"] else "  STILL OVER"))
         for it in rep["budget"]["artreq"]:
             print("art request:", it["what"])
+    for an, it in rep.get("intro", {}).items():
+        print(f"intro {it['intro']} ({it['seconds']} s): frame 0 vs setup {it['frame0_vs_setup_px']:.3f} px; "
+              f"end vs {an} frame 0 {it['end_vs_loop_frame0_px']:.3f} px")
     print(f"recipe: size {rep['recipe']['size']}, roles {json.dumps(rep['recipe']['roles'], ensure_ascii=False)}")
     for s in rep["smoothness"]:
         print(f"  {s['name']:10s} score {s['score']:3d}  errors {s['errors']}  warnings {s['warnings']}  keys {s['keys']}")

@@ -206,6 +206,38 @@ def test_roles_come_from_the_template():
     recipe = bm.make_recipe(roles, bm.DEFAULT_PRESETS, 1.2)
     assert [a["name"] for a in recipe["animations"]] == ["idle", "punch", "celebrate", "hit"]
     assert recipe["animations"][0]["params"] == {"hair": "keys"} and recipe["size"] == 1.2
+    # the idle opens on the drawn pose (the kit's one-shot <name>_in); one-shots and celebrate get none
+    assert [a.get("intro") for a in recipe["animations"]] == [True, None, None, None]
+    assert not any("intro" in a for a in bm.make_recipe(roles, bm.DEFAULT_PRESETS, 1.2, intro=False)["animations"])
+    assert "crouch" not in roles  # no leg IK
+
+
+def test_crouch_role_only_over_planted_feet():
+    ir, _, _ = biped()
+    legged = with_legs(ir)
+    out, arms = bm.add_arm_ik(legged)
+    roles, _ = bm.roles_from_template(out, arms)
+    assert roles["crouch"] == roles["hip"] and bm.planted_feet(out, roles["hip"]) == ["ik_foot_l", "ik_foot_r"]
+    carried = irmod.clone(out)
+    for b in carried["bones"]:
+        if b["name"].startswith("ik_foot_"):
+            b["parent"] = roles["hip"]  # targets the hip carries: the feet move with the body, nothing to split
+    assert "crouch" not in bm.roles_from_template(carried, arms)[0]
+
+
+def test_qa_plants_the_feet_except_in_flight(tmp_path):
+    ir, _, _ = biped()
+    legged = with_legs(ir)
+    legged["foot_plant"] = [{"bone": "foot_l", "anim": "x", "spans": [[0, 1]]}]
+    motion = {"animations": {
+        "idle": {"bones": {"hip": {"translatey": [{"time": 0, "value": 0}, {"time": 2.0, "value": 0}]}}},
+        "jump": {"bones": {"root": {"translatey": [{"time": 0, "value": 0}, {"time": 1.2, "value": 0}]}},
+                 "events": [{"name": "takeoff", "time": 0.18}, {"name": "land", "time": 0.8}]}}}
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(motion))
+    plants = bm.qa_ir(legged, str(path))["foot_plant"]
+    assert {"bone": "foot_l", "anim": "idle"} in plants
+    assert {"bone": "foot_l", "anim": "jump", "spans": [[0.0, 0.18], [0.8, 1.2]]} in plants
 
 
 def _ready():
@@ -349,6 +381,11 @@ def test_bridge_fits_the_budget_and_keeps_frame_zero(tmp_path):
     assert set(recipe["animations"][0]["boneAmplitude"]) == {"ik_hand_l", "ik_hand_r"}
     assert rep["ik_guard"]["mode"] == "per chain" and rep["ik_guard"]["rest_px"] < 0.5
     assert os.path.exists(tmp_path / "out" / "artreq.json")
+    # an idle with the kit's opening: idle_in starts on the drawn pose and ends on idle's frame 0
+    idle = bm.run(str(rig), atlas, str(tmp_path / "idle"), name="biped", presets=("fighter-idle-bounce",), qa=False)
+    it = idle["intro"]["idle"]
+    assert it["intro"] == "idle_in" and it["frame0_vs_setup_px"] < 0.5 and it["end_vs_loop_frame0_px"] < 0.5
+    assert {s["name"] for s in idle["smoothness"]} == {"idle_in", "idle"}
     kitg = bm.run(str(rig), atlas, str(tmp_path / "kit"), name="biped", presets=("celebrate",), qa=False,
                   kit_guard=True, budget=None)
     assert kitg["ik_guard"]["rest_px"] > 1  # the kit's 85-95 % guard bends a straight arm at rest
