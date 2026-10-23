@@ -34,7 +34,7 @@ def frames(d, depth, dx=0.0):
     atlas = glob.glob(os.path.join(d, "*.atlas"))[0]
     r = raster.Renderer(ir, raster.load_images(atlas), missing="skip")
     b = irmod.by_name(ir["bones"])
-    hips = b[ir["ik"][0]["bones"][0]]["parent"]
+    hips = b[irmod.leg_chains(ir)[0]["thigh"]]["parent"]
     out = []
     for pose in (None, {hips: {"x": b[hips]["x"] + dx, "y": b[hips]["y"] - depth * ir["H"]}}):
         fr = r.frame(pose)
@@ -43,9 +43,9 @@ def frames(d, depth, dx=0.0):
         a = rgba[..., 3:4] / 255.0
         img = Image.fromarray((rgba[..., :3] * a + 255 * (1 - a)).astype(np.uint8))
         dr = ImageDraw.Draw(img)
-        for c in ir["ik"]:
-            side = c["name"].rsplit("_", 1)[-1]
-            pts = [tuple(fr.canvas.to_px([w[n][4:6]])[0]) for n in (c["bones"][0], c["bones"][1], c["target"])]
+        for leg in irmod.leg_chains(ir):
+            side = leg["side"]
+            pts = [tuple(fr.canvas.to_px([w[n][4:6]])[0]) for n in (leg["thigh"], leg["shin"], leg["target"])]
             dr.line(pts, fill=MARK.get(side, (0, 0, 0)), width=2)
             for x, y in pts:
                 dr.ellipse([x - 5, y - 5, x + 5, y + 5], outline=MARK.get(side, (0, 0, 0)), width=3)

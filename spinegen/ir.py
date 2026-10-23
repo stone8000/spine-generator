@@ -283,6 +283,39 @@ def dead_by_order_42(ir):
     return [(kind, c) for kind, c in constraints(ir) if id(c) not in taken]
 
 
+def leg_chains(ir):
+    """[{"name", "side", "style", "thigh", "shin", "target", "knee_target",
+    "constraints"}]: the leg IK chains of a rig, in either leg style
+    (spinegen.rigbuild LEG STYLES).
+
+    "outward" (the mascot's): one two-bone IK, thigh + shin -> the foot
+    target; knee_target None.
+    "forward" (a realistic front view): a one-bone IK on the thigh onto a
+    knee target and a one-bone IK on its child, the shin, onto the foot
+    target (both with compress: the knee bends toward the camera, so the
+    leg foreshortens instead of bending sideways).
+
+    "target" is always the FOOT target (what a planted foot hangs from),
+    "name" the constraint on the thigh, "constraints" every IK of the leg."""
+    parent = {b["name"]: b["parent"] for b in ir["bones"]}
+    ones = {c["bones"][0]: c for c in ir.get("ik", []) if len(c["bones"]) == 1}
+    out = []
+    for c in ir.get("ik", []):
+        if len(c["bones"]) == 2:
+            out.append({"name": c["name"], "side": c["name"].rsplit("_", 1)[-1], "style": "outward",
+                        "thigh": c["bones"][0], "shin": c["bones"][1], "target": c["target"],
+                        "knee_target": None, "constraints": [c["name"]]})
+        elif len(c["bones"]) == 1:
+            thigh = c["bones"][0]
+            lower = next((o for b, o in ones.items() if parent.get(b) == thigh), None)
+            if lower is None:
+                continue
+            out.append({"name": c["name"], "side": c["name"].rsplit("_", 1)[-1], "style": "forward",
+                        "thigh": thigh, "shin": lower["bones"][0], "target": lower["target"],
+                        "knee_target": c["target"], "constraints": [c["name"], lower["name"]]})
+    return out
+
+
 def duration(anim):
     t = 0.0
     for tl in anim["timelines"]:

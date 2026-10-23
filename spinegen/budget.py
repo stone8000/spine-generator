@@ -92,6 +92,7 @@ import time
 import numpy as np
 
 from . import art_gates as ag
+from . import ir as irmod
 from . import lbs, raster
 
 SCHEMA = "spinegen-budget/1"
@@ -455,17 +456,18 @@ IK_DISLOCATE = 1.0     # px: an ankle (shin tip) this far off its foot is a brok
 
 
 def ik_legs(ir):
-    """[{"name", "side", "thigh", "shin", "target", "foot", "hips"}] for each
-    two-bone leg IK whose target carries a foot bone (rigbuild's legs)."""
+    """[{"name", "side", "thigh", "shin", "style", "target", "foot", "hips"}]
+    for each leg IK chain (spinegen.ir.leg_chains: a two-bone "outward" leg
+    or a one-bone thigh + shin "forward" leg) and the foot bone its target
+    carries (rigbuild's legs)."""
     by = {b["name"]: b for b in ir["bones"]}
     out = []
-    for c in ir.get("ik", []):
-        if len(c["bones"]) != 2:
-            continue
-        thigh, shin = c["bones"]
-        feet = [b["name"] for b in ir["bones"] if b["parent"] == c["target"]]
-        out.append({"name": c["name"], "side": c["name"].rsplit("_", 1)[-1], "thigh": thigh, "shin": shin,
-                    "target": c["target"], "foot": feet[0] if feet else None, "hips": by[thigh]["parent"]})
+    for leg in irmod.leg_chains(ir):
+        thigh, shin, target = leg["thigh"], leg["shin"], leg["target"]
+        knees = {l["knee_target"] for l in irmod.leg_chains(ir)}
+        feet = [b["name"] for b in ir["bones"] if b["parent"] == target and b["name"] not in knees]
+        out.append({"name": leg["name"], "side": leg["side"], "thigh": thigh, "shin": shin, "style": leg["style"],
+                    "target": target, "foot": feet[0] if feet else None, "hips": by[thigh]["parent"]})
     return out
 
 
@@ -498,6 +500,7 @@ class LegProbe:
         self.joints = [j for j in joints if j["bone"] in names]
         self.jrs = {j["name"]: ag.joint_rest(self.rest, j) for j in self.joints}
         self.world0 = ev.world_dict(ev.world())
+        self.forward_bones = {leg[k] for leg in legs if leg.get("style") == "forward" for k in ("thigh", "shin")}
         self.length = {leg["name"]: _dist(self.world0[leg["thigh"]], self.world0[leg["shin"]])
                        + float(by[leg["shin"]].get("length") or 0.0) for leg in legs}
 
@@ -567,17 +570,18 @@ class LegProbe:
             glob["hard"].append(glob["soft"][-1])
         if not g["ghost_paint"]["pass"]:
             glob["soft"].append(_label("ghost_paint", g["ghost_paint"], None))
+        wd = self.ev.world_dict(world)
         for j in self.joints:
             jr = self.jrs[j["name"]]
             for key, fn in (("seam", ag.seam_gap), ("ghost_band", ag.ghost_band), ("area", ag.band_area_ratio)):
-                res = fn(self.rest, fr, j)
+                res = fn(self.rest, fr, j, expected=self._foreshortening(wd, j)) if key == "area" else \
+                    fn(self.rest, fr, j)
                 g[f"{key}:{j['name']}"] = res
                 if not res["pass"]:
                     lab = _label(key, res, jr)
                     per[j["name"]]["soft"].append(lab)
                     if key == "seam":
                         per[j["name"]]["hard"].append(lab)
-        wd = self.ev.world_dict(world)
         disl = 0.0
         for leg in self.legs:
             if leg["foot"]:
@@ -589,6 +593,18 @@ class LegProbe:
                 "hard_by": hard[0] if hard else None, "limits": fails, "joints": per, "global": glob,
                 "valid": disl <= IK_DISLOCATE, "turns": self.turns(wd), "dislocated_px": round(disl, 3),
                 "values": {k: _num(v["value"]) for k, v in g.items()}}
+
+    def _foreshortening(self, wd, j):
+        """The area a "forward" leg's joint is MEANT to keep (G2's
+        `expected`): the smaller axial scale (world x-axis length now over
+        setup) of the joint's two bones that are forward-leg bones; 1 for
+        any other joint (an "outward" leg bends, it does not foreshorten)."""
+        s = 1.0
+        for b in (j["band"]["upper"], j["band"]["lower"]):
+            if b in self.forward_bones:
+                m, m0 = wd[b], self.world0[b]
+                s = min(s, math.hypot(m[0], m[2]) / (math.hypot(m0[0], m0[2]) or 1.0))
+        return s
 
     def _fold_joints(self, fr):
         """{joint: {slot: folded triangles}}: each folded triangle goes to the

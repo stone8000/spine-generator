@@ -25,6 +25,26 @@ WHY (SOTA §7 P2: make the art hold big angles)
   and the legs get two-bone IK onto planted foot targets so a crouch bends
   the knees instead of skating the feet (M1).
 
+LEG STYLES (template "leg_style", --leg-style auto|outward|forward)
+  "outward"  the two-bone leg IK below: a crouch bends each knee away from
+             the midline. Right for a front-view mascot's short, flared
+             legs; on a realistic character's long, straight trousers it
+             is a bow-legged frog squat already at 0.03 H (the Hard Time
+             warden, P5_REPORT).
+  "forward"  the knee bends toward the camera, which a front view shows as
+             the leg getting SHORTER along its own line: a knee target
+             ik_knee_<s> under the foot target, pulled toward the hips by
+             a world translate constraint (knee_follow_<s>: vertically the
+             template's knee_drop share of the hips' move, sideways the
+             knee's place on the hip-ankle line, so the knee stays on that
+             line), a one-bone IK with compress on the thigh onto it and
+             one with compress + stretch on the shin onto the foot target.
+             Same joint bands, half-angle helpers and planted feet
+             (_forward_legs).
+  "auto"     "forward" when the legs are long for the body AND slender
+             (_resolve_leg_style), else "outward". spinegen.ir.leg_chains
+             reads either kind of leg back from an IR.
+
 WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
   bones    one per template bone whose joint is known (joints.json), placed
            at the joint and aimed at the joint its tail names; a bone with
@@ -57,7 +77,8 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            solving the other way would flip it at setup. softness: the
            template's fraction of leg length, capped so the setup pose is
            unchanged (a nearly straight setup leg leaves almost no room;
-           the report gives the cap).
+           the report gives the cap). That is the "outward" leg style;
+           see LEG STYLES for "forward".
   meshes   every layer through mesh.build. In "joint" mode a layer gets a
            band at each joint it crosses (its art comes within one
            halfwidth of the joint) where the template says it bends:
@@ -182,6 +203,10 @@ AXIS_SNAP = 10.0      # deg: scale keys swap x/y when a bone now points 90 +- th
 FOLDED_MIN = 135.0    # deg: a "both" joint bent more than this at setup is kept rigid (joint_bands)
 AXIS_MEAN_MAX = 45.0  # deg: a "both" band runs along the mean of its bones only when they are this close
 KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
+LEG_STYLES = ("auto", "outward", "forward")  # template "leg_style" / --leg-style (LEG STYLES)
+FORWARD_SIDE_MAX = 0.1  # crouch(): a forward knee moves sideways at most this fraction of the hips' drop ...
+FORWARD_SIDE_PX = 2.0   # ... or this many px
+FORWARD_BEND_MAX = 20.0  # deg: crouch(): a forward leg ends bent at most this much in the picture
 KNEE_TEST = 0.1       # the bend test lowers the hips by this fraction of the leg's length
 KNEE_TOL = 0.5        # px: a setup knee this close to the hip-ankle line counts as straight
 SETUP_TOL = 1e-3      # px: the chosen bend must reproduce the setup leg this closely
@@ -226,7 +251,7 @@ FIT_STEP = 2.0        # deg: fit_reach's budget scans (the budget's own default 
 
 
 def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source="auto", name=None,
-          joint_modes=None, mesh_profile="lean", recenter=True, bands=None, accessory_copies=True):
+          joint_modes=None, mesh_profile="lean", recenter=True, bands=None, accessory_copies=True, leg_style=None):
     """Build the rig. Returns {"ir", "images", "joints" (budget form),
     "report"}.
 
@@ -246,6 +271,8 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     accessory_copies  give each accessory a copy under the joint-band bones
                 next to its parent (default; ACCESSORY COPIES); False: the
                 accessory shares only its parent's weight (P2 R3)
+    leg_style   "auto" | "outward" | "forward" (LEG STYLES); default: the
+                template's leg_style.default ("auto")
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -276,6 +303,9 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     b.mesh_profile = mesh_profile
     b.recenter = recenter
     b.accessory_copies = accessory_copies
+    if leg_style is not None and leg_style not in LEG_STYLES:
+        raise ValueError(f"leg_style must be one of {LEG_STYLES}, not {leg_style!r}")
+    b.leg_style_asked = leg_style
     return b.run()
 
 
@@ -491,10 +521,14 @@ class _Builder:
         self.acc_report = {}    # accessory -> what it carried from the source (_carry_accessories)
         self.acc_copies = {}    # accessory copy bone -> {"of": accessory, "parent": band bone} (ACCESSORY COPIES)
         self.accessory_copies = True  # False: accessories share their parent's weight only (P2 R3; build() sets it)
+        self.leg_style_asked = None   # build()'s leg_style (None: the template's default)
+        self.leg_style, self.leg_style_why = "outward", {}  # resolved in run() (_resolve_leg_style)
+        self.knee_targets = {}        # forward legs: thigh IK name -> its knee target bone
 
     # ---- orchestration
 
     def run(self):
+        self.leg_style, self.leg_style_why = self._resolve_leg_style()
         self.skeleton()
         if self.recenter and self._recenter():
             self.bones, self.order = {}, []
@@ -520,6 +554,7 @@ class _Builder:
         report = {"schema": "spinegen-rigbuild/1", "name": self.name, "mode": self.mode,
                   "mesh_profile": self.mesh_profile, "joint_modes": {j: b["kind"] for j, b in self.bands.items()},
                   "template": self.t["name"], "layers": stats, "ik": self.ik_report,
+                  "leg_style": dict(self.leg_style_why, style=self.leg_style),
                   "bands": {j: _round_band(b) for j, b in self.bands.items()},
                   "totals": _totals(stats), "accessories": self.accessory_check(), "notes": self.notes}
         return {"ir": self.ir, "images": images, "joints": self.budget_joints(), "report": report}
@@ -567,6 +602,19 @@ class _Builder:
                                          "role": "helper", "limb_parent": h["parent"]}
                 self.order.insert(self.order.index(h["of"]) + 1, h["name"])
                 self.helpers.append(h)
+        self.knee_targets = {}
+        if self.leg_style == "forward":
+            for ik in t["ik"]:
+                thigh, shin = ik["bones"]
+                if not all(n in self.bones for n in (thigh, shin, ik["target"])):
+                    continue
+                name = f"ik_knee_{ik['side']}" if ik.get("side") else f"ik_knee_{ik['name']}"
+                head = self.bones[shin]["head"]
+                self.bones[name] = {"parent": ik["target"], "head": head.copy(), "tail": head.copy(), "len": 0.0,
+                                    "dir": np.array([1.0, 0.0]), "joint": None, "kind": "ik_target",
+                                    "role": "ik_target", "limb_parent": ik["target"]}
+                self.order.append(name)
+                self.knee_targets[ik["name"]] = name
         for acc in self.jdoc.get("accessories", []):
             parent = acc.get("parent")
             if parent not in self.bones:
@@ -626,6 +674,60 @@ class _Builder:
                                   f"({d / hw:+.2f} halfwidths)")
         return shifts
 
+    def _resolve_leg_style(self):
+        """(style, why): the leg style this character gets (LEG STYLES).
+        Asked explicitly (build's leg_style, --leg-style) it is taken as is.
+        "auto" reads two things off the art, and both must say "realistic"
+        for "forward":
+          leg_H     hip to ankle (joints.json, mean of the legs) over the
+                    character's height H (joints.json H, else the art's):
+                    a mascot's legs are a short part of a big-headed body;
+          slender   that length over the legs' mean width (the thigh and
+                    shin layers' opaque area / length): a long, straight
+                    trouser leg against a mascot's short, flared stump.
+        Measured: the Hard Time warden 0.43 H / 4.3, the monkey 0.28 H /
+        1.8, the tests' synthetic biped 0.354 H / 3.1. A template without
+        leg_style is always "outward"."""
+        spec = self.t.get("leg_style") or {}
+        asked = self.leg_style_asked or spec.get("default", "outward")
+        why = {"asked": asked}
+        if asked not in LEG_STYLES:
+            raise ValueError(f"leg_style must be one of {LEG_STYLES}, not {asked!r}")
+        if asked != "auto":
+            return asked, why
+        if not spec:
+            return "outward", dict(why, reason="the template has no leg_style")
+        lengths, slender = [], []
+        for ik in self.t["ik"]:
+            hj = self.spec.get(ik["bones"][0], {}).get("joint")
+            aj = self.spec.get(ik["target"], {}).get("joint")
+            if hj not in self.jxy or aj not in self.jxy:
+                continue
+            n = float(np.linalg.norm(self.jxy[hj] - self.jxy[aj]))
+            lengths.append(n)
+            area = sum(int(self._layer_mask(L).sum()) for L in self.layers if L.get("role") in ik["bones"])
+            if area and n:
+                slender.append(n * n / area)
+        if not lengths:
+            return "outward", dict(why, reason="no leg joints")
+        H = self.jdoc.get("H")
+        if not H:
+            lo, hi = math.inf, -math.inf
+            for L in self.layers:
+                rows = np.flatnonzero(self._layer_mask(L).any(1))
+                if len(rows):
+                    lo, hi = min(lo, L["y"] + rows[0]), max(hi, L["y"] + rows[-1] + 1)
+            H = hi - lo
+        leg_H = float(np.mean(lengths)) / float(H)
+        sl = float(np.mean(slender)) if slender else 0.0
+        lim_h = float(spec.get("auto_forward_min_leg_H", 0.38))
+        lim_s = float(spec.get("auto_forward_min_slender", 3.5))
+        style = "forward" if leg_H >= lim_h and sl >= lim_s else "outward"
+        return style, dict(why, leg_H=round(leg_H, 4), min_leg_H=lim_h, slender=round(sl, 3), min_slender=lim_s,
+                           H=round(float(H), 2),
+                           reason=f"legs {leg_H:.3f} H ({'>=' if leg_H >= lim_h else '<'} {lim_h:g}), "
+                                  f"length/width {sl:.2f} ({'>=' if sl >= lim_s else '<'} {lim_s:g})")
+
     def _knee_dir(self, ik):
         """World unit vector the template's "knee" rule says a crouch moves
         this leg's knee along, or None when the template fixes
@@ -672,6 +774,8 @@ class _Builder:
         smallest change that lets the knee follow anatomy. The art does not
         move, only the pivot."""
         out = {}
+        if self.leg_style == "forward":
+            return out  # the knee bends toward the camera: no side of the hip-ankle line is wrong
         for ik in self.t["ik"]:
             if not all(b in self.bones for b in ik["bones"] + [ik["target"]]):
                 continue
@@ -1004,7 +1108,9 @@ class _Builder:
         order = 0
         self.ik_report = {}
         bind = lbs.bind_pose(self.ir)
-        for ik in self.t["ik"]:
+        if self.leg_style == "forward":
+            order = self._forward_legs(bind)
+        for ik in ([] if self.leg_style == "forward" else self.t["ik"]):
             if not all(b in self.bones for b in ik["bones"] + [ik["target"]]):
                 continue
             thigh, shin = ik["bones"]
@@ -1066,6 +1172,76 @@ class _Builder:
                 c["limit"] = PHYS_LIMIT_FIX
             self.ir["physics"].append(c)
             order += 1
+
+    def _forward_legs(self, bind):
+        """The "forward" leg style's constraints (LEG STYLES); returns the
+        next free order. Per leg, in this order: a world translate
+        constraint knee_follow_<s> on the knee target toward the hips, a
+        one-bone IK on the thigh onto the knee target (compress), a one-bone
+        IK on the shin onto the foot target (compress + stretch: the shin
+        inherits the thigh's shortening along its axis, so it must be
+        allowed to stretch back to the foot in the thigh's frame)."""
+        order = 0
+        spec = dict((self.t.get("leg_style") or {}).get("forward") or {})
+        drop = float(spec.get("knee_drop", 0.3))
+        side_rule = spec.get("knee_side", "on_line")
+        legs = []
+        for ik in self.t["ik"]:
+            knee_t = self.knee_targets.get(ik["name"])
+            if knee_t is None:
+                continue
+            thigh, shin = ik["bones"]
+            hips = self.bones[thigh]["parent"]
+            hip, knee, ankle = (np.array(bind[n][4:6]) for n in (thigh, shin, ik["target"]))
+            d = hip - ankle
+            u = float((knee - ankle) @ d / (d @ d))  # the knee's place along ankle -> hip
+            mix_x = {"on_line": u, "foot": 0.0, "hips": 1.0}.get(side_rule)
+            if mix_x is None:
+                mix_x = float(side_rule)
+            off = lbs.to_local(bind[hips], *knee)
+            legs.append((ik, knee_t, thigh, shin, hips, u, mix_x, off))
+        for ik, knee_t, thigh, shin, hips, u, mix_x, off in legs:
+            self.ir["transform"].append({
+                "name": f"knee_follow_{ik['side']}", "order": order, "runs": True, "skin_required": False,
+                "kind": "transform", "bones": [knee_t], "target": hips, "local": False, "relative": False,
+                "offset": {"rotation": 0.0, "x": float(off[0]), "y": float(off[1]), "scale_x": 0.0, "scale_y": 0.0,
+                           "shear_y": 0.0},
+                "mix": {"rotate": 0.0, "x": float(mix_x), "y": drop, "scale_x": 0.0, "scale_y": 0.0, "shear_y": 0.0}})
+            order += 1
+        made = []
+        for ik, knee_t, thigh, shin, hips, u, mix_x, off in legs:
+            c = {"name": ik["name"], "order": order, "runs": True, "skin_required": False, "bones": [thigh],
+                 "target": knee_t, "mix": 1.0, "softness": 0.0, "bend_positive": True,
+                 "compress": bool(spec.get("compress", True)), "stretch": bool(spec.get("stretch", False)),
+                 "uniform": False}
+            self.ir["ik"].append(c)
+            made.append(c)
+            order += 1
+        for ik, knee_t, thigh, shin, hips, u, mix_x, off in legs:
+            c = {"name": f"shin_ik_{ik['side']}", "order": order, "runs": True, "skin_required": False,
+                 "bones": [shin], "target": ik["target"], "mix": 1.0, "softness": 0.0, "bend_positive": True,
+                 "compress": True, "stretch": True, "uniform": False}
+            self.ir["ik"].append(c)
+            made.append(c)
+            order += 1
+        for ik, knee_t, thigh, shin, hips, u, mix_x, off in legs:
+            names = [ik["name"], f"shin_ik_{ik['side']}"]
+            cs = [c for c in made if c["name"] in names]
+            tf = [c for c in self.ir["transform"] if c["name"] == f"knee_follow_{ik['side']}"]
+            rig = dict(self.ir, ik=cs, transform=tf, physics=[])
+            w = lbs.Evaluator(rig).world()
+            idx = irmod.bone_index(rig)
+            err = float(max(abs(np.asarray(w[idx[n]]) - np.asarray(bind[n])).max() for n in (thigh, shin)))
+            if err > SETUP_TOL:
+                self.notes.append(f"ik {ik['name']}: the forward leg moves the setup leg by {err:.2f} px")
+            base = {"style": "forward", "knee": "forward", "knee_dir": None, "knee_target": knee_t,
+                    "knee_drop": drop, "knee_side": side_rule, "knee_mix_x": round(mix_x, 4),
+                    "knee_along": round(u, 4), "bend_deg": round(self._bend(thigh, shin), 3),
+                    "setup_error_px": round(err, 6), "softness": 0.0, "straightened_px": 0.0}
+            self.ik_report[ik["name"]] = dict(base, planted=False, bones=[thigh], target=knee_t)
+            self.ik_report[names[1]] = dict(base, planted=bool(ik.get("planted")), bones=[shin],
+                                            target=ik["target"])
+        return order
 
     def _bend(self, thigh, shin):
         a, b = self.bones[thigh]["dir"], self.bones[shin]["dir"]
@@ -1507,7 +1683,7 @@ class _Builder:
         if foot is not None and foot in rev and rev[foot] in sbones:
             i = idx[rev[foot]]
             return lambda w: (w[i][4], w[i][5])
-        shin = rev.get(c["bones"][1])
+        shin = rev.get(c["bones"][-1])
         if shin in sbones and sbones[shin]["length"] > 0:
             i, L = idx[shin], sbones[shin]["length"]
             return lambda w: (w[i][4] + w[i][0] * L, w[i][5] + w[i][2] * L)
@@ -1664,7 +1840,7 @@ def foot_contacts(ir, within=2.0):
     vertices of each slot that a leg IK target carries (its bone hangs
     from the target) lying within `within` px of that slot's lowest setup
     vertex."""
-    targets = {c["target"] for c in ir["ik"]}
+    targets = {leg["target"] for leg in irmod.leg_chains(ir)}
     feet = {b["name"] for b in ir["bones"] if b["parent"] in targets} | targets
     ev = lbs.Evaluator(ir)
     world = ev.world()
@@ -1691,7 +1867,7 @@ def planted_vertices(ir):
     ev = lbs.Evaluator(ir)
     world = ev.world()
     ankle = {}
-    targets = {c["target"]: c for c in ir["ik"]}
+    targets = {leg["target"] for leg in irmod.leg_chains(ir)}
     for b in ir["bones"]:
         if b["parent"] in targets:
             ankle[b["name"]] = world[ev.index[b["parent"]]][5]
@@ -1719,7 +1895,7 @@ def shin_bottoms(ir, rows=SHIN_ROWS):
     more foot weight than shin weight in total and would drop out of the
     measurement exactly when it matters (the monkey's right calf: 23.5
     foot, 20.5 shin)."""
-    shins = {c["bones"][1] for c in ir["ik"]}
+    shins = {leg["shin"] for leg in irmod.leg_chains(ir)}
     slot_bone = {sl["name"]: sl["bone"] for sl in ir["slots"]}
     ev = lbs.Evaluator(ir)
     world = ev.world()
@@ -1763,14 +1939,15 @@ def crouch(ir, depth, skeleton=None, atlas=None, within=2.0, knee_dirs=None):
       "knees_ok"   every knee moved along its direction and ends on that
                    side, and two legs' bends agree within KNEE_SYM_DEG}."""
     bones = irmod.by_name(ir["bones"])
-    hips = {bones[c["bones"][0]]["parent"] for c in ir["ik"]}
+    legs = irmod.leg_chains(ir)
+    hips = {bones[leg["thigh"]]["parent"] for leg in legs}
     if len(hips) != 1:
         raise ValueError(f"cannot tell the hips bone from the leg IK chains ({sorted(hips)})")
     hips = hips.pop()
     pose = {hips: {"y": -float(depth)}}
     groups = {"sole": foot_contacts(ir, within), "foot": planted_vertices(ir), "shin": shin_bottoms(ir)}
     slots = sorted({n for g in groups.values() for n in g})
-    knees = [n for c in ir["ik"] for n in (c["bones"][0], c["bones"][1], c["target"])]
+    knees = [n for leg in legs for n in (leg["thigh"], leg["shin"], leg["target"])]
     if skeleton is not None:
         from . import oracle
         d0 = oracle.dump(skeleton, atlas)["frames"][0]
@@ -1802,21 +1979,36 @@ def crouch(ir, depth, skeleton=None, atlas=None, within=2.0, knee_dirs=None):
     out["contact_vertices"] = {n: len(i) for n, i in groups["sole"].items()}
     out["foot_vertices"] = {n: len(i) for n, i in groups["foot"].items()}
     out["knees"] = {}
-    for c in ir["ik"]:
-        t, k, a = c["bones"][0], c["bones"][1], c["target"]
+    for leg in legs:
+        t, k, a = leg["thigh"], leg["shin"], leg["target"]
         move = pos[1][k] - pos[0][k]
-        want = (knee_dirs or {}).get(c["name"])
+        if leg["style"] == "forward":
+            # the knee bends toward the camera: the leg shortens along its
+            # own line, the knee moves little sideways (LEG STYLES)
+            l0 = [float(np.linalg.norm(pos[0][k] - pos[0][t])), float(np.linalg.norm(pos[0][a] - pos[0][k]))]
+            l1 = [float(np.linalg.norm(pos[1][k] - pos[1][t])), float(np.linalg.norm(pos[1][a] - pos[1][k]))]
+            out["knees"][leg["name"]] = {
+                "style": "forward", "dx": float(move[0]), "dy": float(move[1]), "dir": None,
+                "side_px": float(abs(move[0])), "thigh_scale": l1[0] / l0[0] if l0[0] else None,
+                "shin_scale": l1[1] / l0[1] if l0[1] else None,
+                "bend_deg": _leg_bend(pos[1][t], pos[1][k], pos[1][a]),
+                "setup_bend_deg": _leg_bend(pos[0][t], pos[0][k], pos[0][a])}
+            continue
+        want = (knee_dirs or {}).get(leg["name"])
         want = np.asarray(want, float) if want is not None else \
             np.array([math.copysign(1.0, pos[0][t][0] - pos[0][hips][0]), 0.0])
         want = want / (np.linalg.norm(want) or 1.0)
         n = _knee_normal(pos[1][t], pos[1][a], want)
-        out["knees"][c["name"]] = {"dx": float(move[0]), "dy": float(move[1]), "dir": want.tolist(),
+        out["knees"][leg["name"]] = {"dx": float(move[0]), "dy": float(move[1]), "dir": want.tolist(),
                                    "along": float(move @ want), "end_px": float((pos[1][k] - pos[1][t]) @ n),
                                    "bend_deg": _leg_bend(pos[1][t], pos[1][k], pos[1][a]),
                                    "setup_bend_deg": _leg_bend(pos[0][t], pos[0][k], pos[0][a])}
     kn = list(out["knees"].values())
     out["knee_bend_diff_deg"] = abs(kn[0]["bend_deg"] - kn[1]["bend_deg"]) if len(kn) == 2 else None
-    out["knees_ok"] = bool(kn) and all(x["along"] > 0 and x["end_px"] > 0 for x in kn) and \
+    side_max = max(FORWARD_SIDE_PX, FORWARD_SIDE_MAX * abs(out["hips_drop"]))
+    out["knees_ok"] = bool(kn) and all(
+        (x["side_px"] <= side_max and x["bend_deg"] <= FORWARD_BEND_MAX and x["thigh_scale"] < 1.0)
+        if x.get("style") == "forward" else (x["along"] > 0 and x["end_px"] > 0) for x in kn) and \
         (out["knee_bend_diff_deg"] is None or out["knee_bend_diff_deg"] <= KNEE_SYM_DEG)
     return out
 
@@ -2028,6 +2220,10 @@ def main(argv=None):
                          "a constraint that swings harder than in the source)")
     ap.add_argument("--no-accessory-copies", action="store_true",
                     help="accessories share their parent's weight only (P2 R3; default: ACCESSORY COPIES)")
+    ap.add_argument("--leg-style", choices=LEG_STYLES, default=None,
+                    help="how the knees bend (LEG STYLES): outward = the mascot's two-bone IK, knees out; "
+                         "forward = toward the camera, the leg foreshortens; auto (the template default) picks "
+                         "by the legs' share of the height")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args(argv)
     modes = None
@@ -2052,7 +2248,7 @@ def main(argv=None):
         fitted, fit = fit_reach(a.layers_dir, a.joints, a.template, cands, a.fit_need,
                                 progress=lambda m: print("  " + m), mode=a.mode,
                                 source=None if a.no_source else "auto", name=a.name, joint_modes=modes,
-                                mesh_profile=a.mesh, recenter=not a.keep_joints)
+                                mesh_profile=a.mesh, recenter=not a.keep_joints, leg_style=a.leg_style)
         bands = dict(bands or {})
         for j, spec in fitted.items():
             bands[j] = dict(bands.get(j, {}), **spec)
@@ -2067,7 +2263,7 @@ def main(argv=None):
             cands.setdefault(jn, {})[key] = [float(v) for v in vals.split(",")]
         fitted, pfit = fit_crouch(a.layers_dir, a.joints, a.template, cands, progress=lambda m: print("  " + m),
                                   bands=bands, mode=a.mode, source=None if a.no_source else "auto", name=a.name,
-                                  joint_modes=modes, mesh_profile=a.mesh, recenter=not a.keep_joints)
+                                  joint_modes=modes, mesh_profile=a.mesh, recenter=not a.keep_joints, leg_style=a.leg_style)
         bands = json.loads(json.dumps(bands or {}))
         for j, spec in fitted.items():
             e = bands.setdefault(j, {})
@@ -2076,7 +2272,9 @@ def main(argv=None):
         for side, key in pfit["chosen"].items():
             print(f"  fit crouch, leg {side}: {key}")
     res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name, modes, a.mesh,
-                not a.keep_joints, bands, accessory_copies=not a.no_accessory_copies)
+                not a.keep_joints, bands, accessory_copies=not a.no_accessory_copies, leg_style=a.leg_style)
+    ls = res["report"]["leg_style"]
+    print(f"  leg style: {ls['style']} (asked {ls['asked']}" + (f"; {ls['reason']}" if ls.get("reason") else "") + ")")
     if pfit is not None:
         res["report"]["fit_crouch"] = pfit
     if fit is not None:
@@ -2121,6 +2319,11 @@ def main(argv=None):
               f"{px(c['foot_slide'])} px ({sum(c['foot_vertices'].values())} vertices); shin bottoms "
               f"{px(c['shin_bottom_slide'], '.2f')} px")
         for n, k in c["knees"].items():
+            if k.get("style") == "forward":
+                print(f"  {n}: knee moves {k['dx']:+.1f}, {k['dy']:+.1f} px (forward: {k['side_px']:.1f} px sideways); "
+                      f"thigh x{k['thigh_scale']:.3f}, shin x{k['shin_scale']:.3f}, bent {k['setup_bend_deg']:.1f} -> "
+                      f"{k['bend_deg']:.1f} deg")
+                continue
             print(f"  {n}: knee moves {k['dx']:+.1f}, {k['dy']:+.1f} px ({k['along']:+.1f} px the expected way); "
                   f"ends {k['end_px']:+.1f} px off the hip-ankle line, bent {k['setup_bend_deg']:.1f} -> "
                   f"{k['bend_deg']:.1f} deg")

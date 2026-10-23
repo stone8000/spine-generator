@@ -447,8 +447,8 @@ def planted_feet(ir, hip):
                 return True
             b = parent[b]
         return False
-    return [c["target"] for c in ir["ik"] if len(c["bones"]) == 2 and all(role[b].startswith("leg_") for b in c["bones"])
-            and not under(c["target"], hip)]
+    return [leg["target"] for leg in irmod.leg_chains(ir)
+            if all(role[b].startswith("leg_") for b in (leg["thigh"], leg["shin"])) and not under(leg["target"], hip)]
 
 
 INTRO_PRESETS = ("fighter-idle-bounce", "fighter-idle-weave", "breathe")  # idles: the first thing a player shows

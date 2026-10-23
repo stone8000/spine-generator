@@ -598,7 +598,8 @@ def band_triangles(rest, jr, extent=BAND_EXTENT, lateral=BAND_LATERAL, region="b
     return out
 
 
-def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=True):
+def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_RANGE, strict_tris=True,
+                    expected=1.0):
     """G2: posed / rest signed area of the joint window's triangles (each
     mesh oriented by its setup winding, so folded triangles subtract) >=
     min_ratio, and, with strict_tris (default, SOTA §5), every band or
@@ -607,8 +608,18 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
     ("band", "tris" or both); `worst` is the slot with the lowest ratio when
     the band fails, else the slot with the most triangles out of range;
     "tri_worst" names that slot's most extreme triangle (index into its
-    mesh, ratio)."""
+    mesh, ratio).
+
+    expected: the area ratio the pose MEANS to give (default 1): a leg
+    seen from the front whose knee bends toward the camera (rigbuild LEG
+    STYLES, "forward") is drawn foreshortened, its bones scaled along their
+    axes; the band and every triangle are then held to min_ratio and
+    tri_range times that, so the projection is not read as a squash."""
     jr = joint_rest(rest, joint)
+    expected = float(expected)
+    if expected != 1.0:
+        min_ratio = min_ratio * expected
+        tri_range = (tri_range[0] * expected, tri_range[1])
     ev = rest.renderer.ev
     refs = ev.fold_references()
     num = den = 0.0
@@ -659,9 +670,10 @@ def band_area_ratio(rest, frame, joint, min_ratio=MIN_BAND_RATIO, tri_range=TRI_
     if bad:
         w = worst if worst in extreme else max(extreme, key=lambda s: per[s]["tri_out_of_range"])
         tri_worst = {"slot": w, "tri": extreme[w][0], "ratio": extreme[w][1]}
+    extra = {"expected": expected} if expected != 1.0 else {}
     return _result("G2_AREA", float(ratio), band_ok and tris_ok, worst, joint=jr.name, min=min_ratio,
                    tri_min=float(tri_min), tri_max=float(tri_max), tri_out_of_range=bad, tri_range=list(tri_range),
-                   strict_tris=bool(strict_tris), by=by, tri_worst=tri_worst, slots=per)
+                   strict_tris=bool(strict_tris), by=by, tri_worst=tri_worst, slots=per, **extra)
 
 
 # ---------------------------------------------------------------- G4

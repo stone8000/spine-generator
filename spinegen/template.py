@@ -45,7 +45,8 @@ def load(name_or_path):
 def expand(raw):
     sides = raw.get("sides", {})
     out = {"schema": SCHEMA, "name": raw["name"], "sides": sides, "bones": [], "joints": {}, "helpers": [],
-           "ik": [], "match_order": [], "foot_contact": raw.get("foot_contact")}
+           "ik": [], "match_order": [], "foot_contact": raw.get("foot_contact"),
+           "leg_style": raw.get("leg_style")}
     for b in raw["bones"]:
         for side in _sides_of(b["name"], sides):
             e = _sub(b, side)
