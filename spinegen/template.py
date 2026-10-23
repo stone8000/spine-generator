@@ -116,8 +116,10 @@ def match_bones(source, t, exclude=()):
     Returns ({template bone: source bone}, notes). A source bone takes the
     first role in match_order that has a token set contained in its name
     tokens and the same side. When several source bones want one role, the
-    one nearest the root wins (then the one with more descendants); the
-    others stay unmatched (accessories) and are named in `notes`.
+    one under the source bone its template parent took wins, then the one
+    matching an earlier token set, then the one nearest the root (then the
+    one with more descendants); the others stay unmatched (accessories) and
+    are named in `notes`.
     """
     depth, kids = {}, {}
     for b in source:
@@ -139,9 +141,35 @@ def match_bones(source, t, exclude=()):
             if any(set(m) <= toks for m in spec["match"]):
                 by_role.setdefault(role, []).append(b["name"])
                 break
+    parent_of = {b["name"]: b.get("parent") for b in source}
+
+    def ancestors(n):
+        out = set()
+        p = parent_of.get(n)
+        while p is not None:
+            out.add(p)
+            p = parent_of.get(p)
+        return out
+
+    def match_index(role, n):
+        toks = set(tokens(n))
+        return next((k for k, m in enumerate(tb[role]["match"]) if set(m) <= toks), len(tb[role]["match"]))
+
     out, notes = {}, []
-    for role, cands in by_role.items():
-        cands.sort(key=lambda n: (depth[n], -kids[n], n))
+    # roles in template order (parents first), so a role can ask whether a
+    # candidate hangs below the source bone its template parent took: the
+    # Hard Time warden has a root-parented IK target "knee_l" next to the
+    # real shin "shin_l" (under the thigh), and "waist" above "chest" (the
+    # bone its arms hang from); nearest-the-root alone took the target and
+    # the waist (P5)
+    for role in [b["name"] for b in t["bones"] if b["name"] in by_role]:
+        cands = by_role[role]
+        parents = [out[p] for p in tb[role]["parents"] if p in out]
+
+        def key(n):
+            under = not parents or any(p in ancestors(n) for p in parents)
+            return (not under, match_index(role, n), depth[n], -kids[n], n)
+        cands.sort(key=key)
         out[role] = cands[0]
         if len(cands) > 1:
             notes.append(f"{role}: took {cands[0]!r}; {cands[1:]} also matched and stay accessories")

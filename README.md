@@ -15,6 +15,12 @@
 | 研究：量化基準、節拍表、外部最佳做法 | ✅ | `research/FINDINGS.md`、`research/beat_table.json`、`research/SOTA.md` |
 | P1 裁判與輸出骨幹 | ✅ 6 項驗收全過，兩輪反查後修正 | `research/P1_REPORT.md`、`qa/README.md` |
 | P2 讓圖撐得住（猴子現有的圖） | ⚠️ 5 項驗收：②③④ 通過，⑤ 部分通過，① 未過（剛性掃描比 README 手量嚴）。③ 肘 96 / 92 / 98 / 90°（固定 G2 視窗，含單一三角形；之前 78 / 64 / 62 / 58），頂點 0.53 倍格網，手 0 px。深蹲 0.05–0.13H、重心左右 ±40 px：摺疊 137 → 22 → **0**（S3：帶內權重剪枝 0.005、`--fit-crouch` 逐腿挑膝蓋長度和腳踝 ramp 次方），頂點 0.52 倍格網。袖口／褲管跟著輔助骨（S1 配件複本）：左袖 physics 位移 17 → 54 px（原版 58），褲管 mix 按原版擺幅調低。腿的預算改用 IK 姿勢量（S2，`budget.json` 的 `ik`；最早的限制是左髖胯下的縫，0.02H）。審查 F1–F6、R1–R3 已修 | `research/P2_REPORT.md` |
+| P3 補畫單（猴子） | ⚠️ 補畫單產生器完成（`spinegen/artreq.py`）：掃 249 個規劃姿勢的蒙皮遮擋者，猴子 24 項（22 要畫、2 請確認），每項有遮罩、截圖、中英提示詞；預期的碎片、腋下抹色與楔形、胯下的縫、肘窩收窄、celebrate／舉手換圖都在。自動補畫、姿勢表、`fist_front` 還沒做 | `research/P5_REPORT.md` 第一部分 |
+| P5 第二隻角色（典獄長） | ⚠️ 生成器重建：頂點 2634 → 606、B2 0.996、帶過來的 4 支動畫 G1 0、左肘 6 → 102 / 98°、膝 IK 姿勢 95°、蹲 0.05–0.13H ±40 px 0 摺疊、physics limit 60/80 → 5000。改了 7 處一般性的程式（猴子 rig 逐位元不變）。未過：P1_FPS_ROBUST（limit 修好後 4.03 px）、寫實比例的蹲像 O 型腿、拿警棍的肘 setup 折 163° 只能剛性 | `research/P5_REPORT.md` 第二部分 |
+
+P3、P5 的東西：
+- `spinegen/artreq.py`（補畫單：規劃姿勢、露出／縫／擠扁／碎片／換圖、遮罩、截圖、提示詞、給美術的 README）。
+- `research/p5_view.py`（原版與重建並排的 setup、動畫、強制姿勢圖）。
 
 P1 的東西：
 - `qa/`：Node 裁判，精確鎖定官方 `@esotericsoftware/spine-core@4.2.120`（與 `spine-canvaskit@4.2.120`），
@@ -35,7 +41,7 @@ P2 的東西：
 
 ```bash
 cd qa && npm ci && npm test        # 55 tests
-python3 -m pytest tests -q         # 248 tests（第三方檔案不存在時自動跳過）
+python3 -m pytest tests -q         # 259 tests（第三方檔案不存在時自動跳過）
 ```
 
 ## 目前的發現

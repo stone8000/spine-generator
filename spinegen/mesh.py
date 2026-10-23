@@ -117,6 +117,7 @@ from . import meshtopo
 
 ALPHA_MIN = 8          # alpha > 8 is art (Hard Time grid_mesh, E2)
 DILATE = 1             # px the mask grows before tracing (E2: 1 px, <= 0.7% opaque missed)
+ROW_MERGE = 0.01       # px: rows of two bands this close along a shared axis are one row (_band_points)
 MIN_ISLAND = 30        # px^2 after the DILATE growth: smaller separate specks are dropped (E2: same cut)
 MIN_HOLE = 30          # px^2: smaller holes are filled
 BAND_EXTENT = 2.0      # a joint band reaches +-BAND_EXTENT * halfwidth along the limb (module docstring)
@@ -424,7 +425,14 @@ def _outlines(mask, eps, size, slack=None):
             continue
         hole = _simplify(contours[i], eps, size, [outer] + holes, slack, hole=True)
         if hole is not None and len(hole) >= 3:
-            holes.append(hole)
+            # a hole whose simplified rim leaves the simplified outer polygon
+            # (a gap next to the outline: the Hard Time warden's fingers
+            # around the baton) makes a mesh no one-polygon hull can hold
+            # (qa L8); it is meshed solid instead (texture alpha still draws
+            # the gap)
+            op = np.asarray(outer, np.float32).reshape(-1, 1, 2)
+            if all(cv2.pointPolygonTest(op, (float(x), float(y)), False) > 0 for x, y in np.asarray(hole)):
+                holes.append(hole)
     return outer, holes
 
 
@@ -584,7 +592,27 @@ def _band_points(loops, bands, origin, ends_only=False):
     they snapped to), then its interior points."""
     inserts = [[] for _ in loops]  # per loop: (edge index, u, point, insert id)
     interior, rows, side = [], [], []
-    for band in bands:
+    # two bands on one layer whose rows land on the same line (each runs
+    # exactly half the gap between them: the Hard Time warden's shoulder
+    # and elbow bands met at 98 px) would put that line in twice, once as a
+    # straight constrained edge and once through the other's row points: a
+    # zero-width crack the triangulation splits the mesh along (qa L8). The
+    # row with fewer row points goes.
+    lines = []
+    for bi, band in enumerate(bands):
+        c = np.asarray(band["center"], float) - origin
+        a = np.asarray(band["axis"], float)
+        a = a / np.linalg.norm(a)
+        k = int(band.get("row_points", 0) or 0) if ends_only else 0
+        for ri, s in enumerate(band_row_positions(band)):
+            lines.append((bi, ri, c + s * a, a, k))
+    drop = set()
+    for i, (bi, ri, p, a, k) in enumerate(lines):
+        for j in range(i + 1, len(lines)):
+            bj, rj, q, b, kk = lines[j]
+            if bj != bi and abs(a[0] * b[1] - a[1] * b[0]) < 1e-3 and abs(float((q - p) @ a)) < ROW_MERGE:
+                drop.add((bi, ri) if k < kk else (bj, rj))
+    for bi, band in enumerate(bands):
         c = np.asarray(band["center"], float) - origin
         a = np.asarray(band["axis"], float)
         a = a / np.linalg.norm(a)
@@ -595,7 +623,10 @@ def _band_points(loops, bands, origin, ends_only=False):
         gap = max(2.0 * ext / max(len(offs) - 1, 1), 0.5 * hw)  # spacing along a row ~ spacing between rows
         band_rows = []
         k = int(band.get("row_points", 0) or 0) if ends_only else 0
-        for s in offs:
+        for ri, s in enumerate(offs):
+            if (bi, ri) in drop:
+                band_rows.append([])
+                continue
             band_rows.append(_row(loops, c + s * a, nrm, math.inf if ends_only else gap, inserts, interior,
                                   side if ends_only else None, count=k or None))
         rows.append(band_rows)
