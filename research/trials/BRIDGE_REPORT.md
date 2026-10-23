@@ -1,8 +1,108 @@
-# 銜接報告：spinegen → Spine 4.3 → motion kit → 4.3 裁判（2026-10-22）
+# 銜接報告：spinegen → Spine 4.3 → motion kit → 4.3 裁判（2026-10-23）
 
 定案：**Spine 4.3 是主要目標**，4.2 留給舊遊戲。前幾輪做了四件事：IR 的 4.3 輸出、QA 換成 4.3.13 也能跑、
-spinegen 骨架接上 motion kit 的預設動作、看圖。**B5（最新）**：預設動作照圖的預算（budget.json）縮幅度、IK 保護改成每條鏈自己的門檻；
-猴子改用 motion-research 最新的 rig（肘的袖子長度逐肘挑、腳踝整列串接、配件分父骨權重；和 `p2/r12` 逐位元相同）。
+spinegen 骨架接上 motion kit 的預設動作、看圖。B5：預設動作照圖的預算（budget.json）縮幅度、IK 保護改成每條鏈自己的門檻。
+**B6（最新，見下一節）**：合併 motion-research 的 S1–S3（配件複本骨、match_physics、`budget.ik_scan`、`--fit-crouch`、ramp 權重下限 0.005、G5 HOLE_FRAC），
+用 Track A 最後那副 rig 的同一組參數重建猴子（和 `p2/t3/final/monkey_joint` 逐位元相同），加了 breathe、jump，
+kit 加了「從靜止淡入」的開頭（idle 從原畫開始，0.000 px），jump 腳 IK 釘地時改用 hip 下蹲。
+
+## B6：S1–S3 合併、六支動畫、淡入開頭、三方對照
+
+```bash
+L=/home/user/spinegen-work/p2/monkey_layers; W=/home/user/spinegen-work/bridge/v4; R=$W/rigs
+MK=/home/user/hacksaw-character-motion/gobananas_monkey/spines/bananditBandit
+python3 -m spinegen.rigbuild $L --mode joint -o $R/monkey_joint --fit-reach 'elbow_l,elbow_r=2,2.25,2.5,3,3.5' \
+    --fit-crouch 'knee_{s}.lower=1.5,3;ankle_{s}.power=0.8,0.85,0.9,0.95,1,1.1,1.2'
+python3 -m spinegen.rigbuild $L --mode rigid -o $R/monkey_rigid
+python3 -m spinegen.budget $R/monkey_joint/rig.json $R/monkey_joint/monkey.atlas --joints $R/monkey_joint/joints.json \
+    -o $R/monkey_joint/budget.json --artreq $R/monkey_joint/artreq.json --trace --max-angle 150      # rigid 同樣
+P=fighter-idle-bounce,punch,celebrate,hit-react,breathe,jump
+python3 -m spinegen.bridge_motionkit $R/monkey_joint/rig.json $R/monkey_joint/monkey.atlas -o $W/monkey_joint --name monkey_joint --presets $P
+python3 -m spinegen.bridge_motionkit $R/monkey_rigid/rig.json $R/monkey_rigid/monkey.atlas -o $W/monkey_rigid --name monkey_rigid --presets $P
+python3 -m spinegen.budget_motion $W/monkey_joint/monkey_joint.motion.json $W/monkey_joint/monkey_joint.atlas \
+    --budget $R/monkey_joint/budget.json --joints $R/monkey_joint/joints.json --loops idle,celebrate,breathe   # rigid 同樣
+python3 research/bridge_sheets.py $W/monkey_rigid $W/monkey_joint -o $W/sheets --all-frames          # 藝術閘門每格
+python3 research/bridge_compare_sheets.py $MK/monkey.json $MK/monkey.atlas $W/monkey_rigid $W/monkey_joint -o $W/compare
+python3 research/p2_physics_motion.py $W/monkey_joint/monkey_joint.motion.json $W/monkey_joint/monkey_joint.atlas --runtime 4.3 \
+    --anims idle_in,idle,punch,celebrate,hit,breathe_in,breathe,jump --fps 60                          # 原版：$MK，idle,throwit,cheer,flinch
+```
+
+**重建**：joint 的 `rig.json`、`monkey.json`、`monkey.atlas`、`monkey.png`、`joints.json`、`motion.json`、`band_fit.json` 和 Track A 的
+`p2/t3/final/monkey_joint` **逐位元相同**；`build_report.json` 只多了每條關節帶的 `"power": 1.0` 欄位（報告格式在 Track A 建完後才加）。
+`budget.json` 除了兩個 `seconds` 計時欄位外完全相同。rigid 的建置也過（褲管配件在 rigid 是 0 個頂點，和以前一樣）。
+
+**銜接器這一輪的改動**
+- kit `intro`（`motionkit/src/recipe.ts` `fadeIn`）：循環動畫另外寫一支一次性的 `<name>_in`（一個循環長），每條軌道乘 smootherstep 包絡，
+  第 0 格是 setup，最後一格等於循環的第 0 格，速度、加速度也接得上；循環本身一個 key 都不變（測試逐 key 比對）。銜接器對 idle、breathe 預設開（`--no-intro` 關）。
+  播放：`setAnimation("idle_in")` 再 `addAnimation("idle", loop)`。**為什麼不是讓 idle 自己從原畫開始**：循環要頭尾相接，又要第 0 格是靜止，
+  整個循環就得經過靜止姿勢；idle 預設的每條軌道相位不同，循環裡最接近原畫的一格也差 15.5 px（B5），要做到就得改預設的動作本身（Iron Jaw 量的）。
+- 做淡入時找到 kit 的一個舊 bug：IK 目標這類「先在 runtime 解再取樣」的軌道，一次性動畫在頭尾用重複端點的 Catmull-Rom，**頭尾斜率只剩一半**
+  （淡入接循環時速度跳 18/s）。改成頭尾線性外插（`solve.ts sampled`）。punch、hit、jump 的 key 因此有一點點不同。
+- kit jump：選填角色 `crouch`。腳的 IK 目標掛在 root 下（猴子就是），root 只負責騰空，hip 照整條跳的曲線在畫面上走（畫面軌道會扣掉父骨），
+  所以下蹲、起跳、落地緩衝都由腿彎出來，上半身的路徑和原本完全相同（測試 < 0.3 px）。沒有 `crouch` 時照舊（整個人下沉）。
+  銜接器：腿 IK 目標不在 hip 底下就給 `crouch = hip`；這時 root 也併進 body 組一起縮（不然縮 hip 會把 hip 釘在畫面上、root 帶著腳飛走，rigid 的 jump 縮到 0 還是超出預算）。
+  qa 的 M1：jump 只在 `takeoff` 之前、`land` 之後釘腳。
+
+**數字**（4.3.13，60 fps；kit 分數 30 fps）
+
+| | idle_in | idle | punch | celebrate | hit | breathe_in | breathe | jump |
+|---|---|---|---|---|---|---|---|---|
+| kit 分數 joint | 100 | **60（8 警告）** | 100 | **85（3）** | 100 | 100 | 100 | 100 |
+| kit 分數 rigid | 100 | 100 | 100 | 55（9，helmet） | 100 | 100 | 100 | 100 |
+| 預算縮放 joint（左手／右手／身體） | 同 idle | 1／1／1 | 1／1／1 | 0.41／0.53／1 | 1／1／1 | 同 breathe | 1／1／1 | 1／1／1 |
+| 預算縮放 rigid | 同 idle | 0.08／0／0.13 | 0.25／0／0.18 | 0.005／0／0.13 | 0.26／0／0.12 | 同 breathe | 0.77／0／0.77 | 0.38／0.13／0.13 |
+| budget_motion：hold／transit／摺疊（兩副） | 0／0／0 | 0／0／0 | 0／0／0 | 0／0／0 | 0／0／0 | 0／0／0 | 0／0／0 | 0／0／0 |
+| qa 4.3 joint 不過的閘門 | — | — | P1 16.4 px（cuffR） | — | P1 4.6 px（pocket） | — | — | **P1 54.8 px**（pocket，起跳） |
+| qa 4.3 rigid | 全過 | 全過 | 全過 | 全過 | 全過 | 全過 | 全過 | 全過 |
+| 藝術閘門不過的格數 joint（每格） | 16／61 | 32／61 | 16／26 | 35／37 | 10／27 | 0／97 | 0／97 | 16／37 |
+| 藝術閘門 rigid | 3／61 | 10／61 | 8／26 | 0／37 | 4／27 | 0／97 | 0／97 | 6／37 |
+
+（qa 是每支動畫各自跑一次；整個檔案：L1–L9、G1 0、G3、M1 0 px、P3 都過，joint 只剩 P1，rigid 全過。）
+joint 藝術閘門不過的原因：G5 洞 1–12 個（彎出去的手臂／蹲下的腿和身體圍住的背景，P2 已知）、G2 腳踝面積 0.80–0.89（腿 softness 讓小腿穿過靴口，
+jump 下蹲最多穿 25 px）、G6b 0.59–0.91；punch 出拳那格 G4 elbow_r 20、G6a elbow_r 34（見看圖）。
+
+**淡入**：idle_in 第 0 格對 setup **0.000 px**、最後一格對 idle 第 0 格 **0.000 px**；breathe_in 0.000／6e-7 px。兩支 _in 的 kit 分數都 100，
+idle、breathe 本身的分數不變（joint idle 60 和沒加淡入時一樣，原因見下）。B5 的 39.6 px 是 idle 第 0 格對原畫，這個數字沒變；改的是播放順序從原畫開始。
+
+**joint idle 60、celebrate 85 是怎麼來的**（B5 是 100／100）：警告全在 S1 新加的**配件複本骨**（`cuffL_forearm_l`、`cuffR_forearm_r`、`pantL_shin_l`）。
+kit 的頓挫量的是**骨頭原點**的加速度；複本骨的原點放在配件原本的位置（上臂、大腿那頭），卻掛在前臂／小腿下，等於在關節另一邊伸出一根長槓桿，
+前臂一點角加速度就被放大（`cuffL_forearm_l` 4890 px/s² vs `cuffL` 610、前臂 961）。改量**頂點**（每個 slot 每個頂點，同一條 12× 中位數且 > 2000 的規則）：
+idle 在 B5 和 B6 都只有左大腿 2 格（1.48 s），袖子 0 格，最大頂點加速度 B5 1432 → B6 1722 px/s²（左上臂）——**圖上沒有新的頓挫**，是量法看到了不存在的槓桿。
+celebrate 的 3 個警告（`pantL_shin_l` 在 0.3／0.6／0.9 s）反而是**真的**：頂點量法在 B5、B6 都是左大腿／小腿 3 格（彈跳最低點膝蓋被腿 softness 拉直，15–16k px/s²），
+B5 時 kit 沒抓到是因為小腿骨原點就在膝蓋上（10×，差一點到 12×）。所以 B5 的 100 才是低估。這次沒有改 kit 的量法（見還沒解決 11）。
+
+**腿對 IK 姿勢預算**（`budget.json` 的 `ik.joints`，S2）：budget_motion 仍然用逐關節的 `joints` 判定；拿 joint 每支動畫的腿角度對 `ik.joints` 看，
+量過的方向都在 soft 內（例：jump 左髖 −13.7 vs 20.1、hit 右踝 −20.4 vs 25.5）。`ik.joints` 裡 knee_r +、knee_l − 是 0（IK 掃描從沒往那邊彎，是「沒量」不是限制），
+idle／hit／jump 的右膝 + 有 13–20°，這兩個方向只有逐關節的 96°／76° 可以對。
+
+**袖子、褲管的二次擺動**（physics update 對 none 的頂點位移最大值，px，60 fps）
+
+| slot | 原版 idle | 原版 throwit | 原版 cheer | 原版 flinch | joint idle | joint punch | joint celebrate | joint hit | joint jump |
+|---|---|---|---|---|---|---|---|---|---|
+| 左袖（left_arm_0_upper_arm） | 0.25 | **58.4** | 28.3 | 8.1 | 1.6 | 11.3 | 3.2 | 13.5 | 6.3 |
+| 右袖 | 0.12 | 17.5 | 18.3 | 6.6 | 1.6 | **66.6** | 3.3 | 12.6 | 6.1 |
+| 左褲管（left_leg_0_thigh） | 1.3 | 23.3 | 4.4 | 5.0 | 1.5 | 8.9 | 5.5 | 19.5 | 15.7 |
+| 右褲管 | 1.5 | 23.9 | 5.0 | 8.2 | 6.1 | 18.9 | 11.6 | 22.0 | 25.8 |
+
+rigid 全部 0（rigid 的袖口、褲管配件沒有頂點，和以前一樣）。breathe 只有袖子 0.2 px。動作不一樣，只能比量級：甩動最大的那支在原版是 throwit（左手丟、左袖 58），
+在 kit 是 punch（右手出拳、右袖 67），量級相同；celebrate 只有原版 cheer 的 1/9–1/6，因為預算把舉手縮成扠腰（手幾乎不甩）；
+hit、jump 的褲管比原版 flinch 大 2–4 倍（大腿在腿 IK 下隨髖轉，P2 issue 8，match_physics 只對原版動畫調過）。
+
+### 看圖：三方對照（`$W/compare/<anim>.png` 全身、`<anim>_joints.png` 肘／膝 2 倍）
+
+每列：原版猴子在 4.2.120 播它自己最接近的那支動畫（idle→idle、punch→throwit、celebrate→cheer、hit→flinch、breathe→idle；jump 和兩支 _in 沒有對應，放原畫）、
+rigid、joint（4.3.13）。欄是 kit 動畫的峰值格（用 joint 挑，rigid 同一時間；原版用同一條規則在自己的動畫上挑：髖最低／最高、前拳最遠……）。
+肘的近照中心是前臂骨原點，也就是袖口，所以看到的是袖口和前臂的毛；膝的近照是褲管中段。
+
+- **原版自己也會破**：throwit 出手、cheer 舉手、flinch 那格，手旁都有綠色碎片、袖子在肩膀撕開成紅色尖角，袖口在丟出那格翹出一片。這是原版 rig 的圖，不是我們的。
+- **punch**：joint 蓄力那格就是原畫。出拳那格右臂往外舉、手肘彎 39°，**右袖口被 physics 甩成一塊階梯狀的硬邊、下面露出深色楔形**（G4 elbow_r、G6a；右袖 67 px），
+  左邊肘窩有 3 px 的縫；整體還是「側舉」不是直拳。rigid：右手倍數 0，幾乎不動。
+- **celebrate**：joint 兩手扠腰、肘彎 56–87°，袖口圓順、沒有破，膝蓋近照乾淨；原版 cheer 是雙手往外張開。和 B5 一樣不是慶祝，補圖需求照舊。
+- **hit**：joint 往後縮、膝蓋微彎，手邊綠色碎片（已知的圖）；原版 flinch 有同樣的碎片和撕開的袖子。
+- **idle**／**idle_in**：joint 和 rigid 在第 0 格都是原畫；idle 髖最低那格膝蓋往外彎 10–13°、手邊一小片綠色。原版 idle 動得很少。
+- **jump**（joint）：下蹲那格身體往下、橫向壓扁，兩膝往外彎 25–28°、手肘跟著彎到 35–38°（手落在腰側）；騰空那格整隻離地約 180 px；
+  **落地那格右膝外側輪廓出現一個水平的階梯**（褲管複本骨被 physics 甩開，右褲管 25.8 px），左膝也有小一點的。rigid 的 jump 只剩 12%，看起來是原地小蹲。
+- **breathe**：兩副都只有胸口和肩膀幾 px，0 個閘門不過。
 
 ## 指令
 
@@ -208,6 +308,16 @@ rigid 8／61、1／26、4／37、3／27（之前 61、26、35、27：rigid 現�
 5. rigbuild（另一條線在改）給 4.2 輸出的腿 softness 還是壓在 slack 以下；銜接器只在輸出 4.3 時補上。rigbuild 若改用「推目標」，4.2 也會有。
 6. 正面角色的 `facing` 是隨便選的（`--facing 1`；`--facing -1` 也能跑，idle 90、celebrate 70，前後拳互換）。銜接器會丟掉骨架原本的動畫；要保留，得在那些動畫裡把手臂 IK 的 mix key 成 0。
 7. 補圖需求還在：手裡的褲子碎片、腋下的陰影、軀幹圖裡的袖子顏色。
+11. （B6）**kit 的頓挫用骨頭原點量**，配件複本骨的原點在關節另一邊，idle 7 個警告是槓桿放大、圖上沒有（頂點量法 0 格）。要嘛 kit 改量每根骨權重最大的頂點（或權重頂點的質心），
+    要嘛 rigbuild 把複本骨的原點放在新父骨的關節上（旋轉中心會跟著變，要重算 transform 的 offset）。沒改之前 joint idle 的 60 分不代表看得到的頓挫；celebrate 的 3 個是真的（腿 softness 在彈跳最低點把膝蓋拉直，第 3 點）。
+12. （B6）**P1 在 jump 54.8 px**（30 fps，pocket；60 fps 25.2 px）：起跳 0.27 s 內 root 往上 180 px，猴子原本的 physics 設定（pocket、cuff）在 30 fps 的步長下跟不上。
+    punch 16.4 px（cuffR）和 hit 4.6 px 也是同一件事。rigid 全過是因為 rigid 幾乎不動。要過得改 physics 的 strength／damping 或 runtime 用 60 fps 以上，不是銜接器的事。
+13. （B6）**物理甩開的配件複本骨在大動作時會切出階梯狀的硬邊**：punch 出拳的右袖口、jump 落地的右膝外側。P2 S1 的 match_physics 只對原版的九支動畫調過 mix；kit 的動作比原版大，
+    袖口 67 px（原版最大 58）。要嘛 match_physics 也看 kit 的動作，要嘛複本骨的跟隨在關節帶裡隨距離減弱。
+14. （B6）jump 的 `crouch` 只處理「腳 IK 掛在 root 下」；跳的時候腳一離地就跟著 root，腿在起跳那 0.1 s 還彎著（上半身路徑對、腳先離地）。rigid 的 jump 被預算縮到 12%。
+15. （B6）淡入是另一支動畫（`idle_in`），遊戲得照順序播；idle 自己的第 0 格仍然離原畫 39.6 px（第 4 點的數字不變，播放順序解決它）。烘焙的頭髮 physics（猴子沒有）在 _in 裡從靜止模擬，接到循環時會有一點不連續。
 
-測試：`python3 -m pytest tests -q` 273 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` 46 個，全部通過。
+測試（B6 後）：`python3 -m pytest tests -q` **281** 個、`cd qa && npm test` 87 個、`cd motionkit && npm test` **48** 個，全部通過。
+B6 新增：kit 2 個（intro 的頭尾銜接與循環不變、jump 的 crouch 拆法），銜接器 2 個（crouch 只在腳釘地時給、jump 的 M1 釘腳區間）並擴充 2 個（make_recipe 的 intro、端到端 idle_in 的頭尾 < 0.5 px）。
+B5 時：pytest 273、qa 87、kit 46。
 B5 新增：銜接器 5 個（保護門檻、hold／transit／循環接頭判定、分組、補圖需求的原因、端到端用合成預算把 celebrate 縮進預算），kit 2 個（`ikGuardChains`、`boneAmplitude`）。
