@@ -179,6 +179,7 @@ LIFT_MIN = 0.5        # px: a source foot that never rises more than this keeps 
 LIFT_FULL = 8.0       # px of lift over which a lifted target starts following the source foot's x
 BAKE_TOL = 0.25       # px: a baked key is dropped when its neighbours interpolate it this closely
 AXIS_SNAP = 10.0      # deg: scale keys swap x/y when a bone now points 90 +- this from its source
+FOLDED_MIN = 135.0    # deg: a "both" joint bent more than this at setup is kept rigid (joint_bands)
 AXIS_MEAN_MAX = 45.0  # deg: a "both" band runs along the mean of its bones only when they are this close
 KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
 KNEE_TEST = 0.1       # the bend test lowers the hips by this fraction of the leg's length
@@ -191,6 +192,8 @@ ACC_TAPER = 1.0       # halfwidths over which an accessory's share tapers to 0 t
 FIT_DEPTHS = (0.05, 0.07, 0.08, 0.10, 0.12, 0.13)  # fit_crouch's crouch grid: hips down, fractions of H
 FIT_SHIFTS = (-40.0, -30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0, 40.0)  # ... and sideways, px
 PHYS_MATCH_FPS = 60   # match_physics measures the physics swing at this rate (the source's physics fps)
+PHYS_LIMIT_MIN = 1000.0  # L6: a physics "limit" below this throttles follow-through (SOTA §2; Hard Time's 60/80)
+PHYS_LIMIT_FIX = 5000.0  # ... and is raised to the 4.2 runtime's default
 PHYS_MATCH_TOL = 0.1  # match_physics leaves a constraint alone when it swings at most this much more than the source
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
 
@@ -819,6 +822,17 @@ class _Builder:
                 continue
             helper = spec.get("helper") if spec.get("helper") in self.bones else None
             kind = "rigid" if self.mode == "rigid" else self.joint_modes.get(jname, "helper" if helper else "ramp")
+            if (kind != "rigid" and spec["band"] == "both" and up["len"] > 0 and lo["len"] > 0
+                    and jname not in self.joint_modes and lo["dir"] @ up["dir"] < math.cos(math.radians(FOLDED_MIN))):
+                # a limb folded back on itself at setup (the Hard Time
+                # warden's baton arm, 164 deg): one axis cannot order the
+                # two pieces (the forearm's art lies on the upper arm's side
+                # of the joint and would ramp onto the upper arm, which kept
+                # it at the shoulder when the elbow opened, P5); each piece
+                # stays on its own bone, as the cut-out it was
+                bend = math.degrees(math.acos(max(-1.0, min(1.0, float(lo["dir"] @ up["dir"])))))
+                self.notes.append(f"joint {jname}: folded {bend:.0f} deg at setup (> {FOLDED_MIN:g}); kept rigid")
+                kind = "rigid"
             if kind not in JOINT_MODES:
                 raise ValueError(f"joint {jname}: mode must be one of {JOINT_MODES}, not {kind!r}")
             if kind == "helper" and helper is None:
@@ -1043,6 +1057,13 @@ class _Builder:
                 continue
             c = json.loads(json.dumps(p))
             c.update(bone=bone, order=order, runs=True)
+            if float(c.get("limit", PHYS_LIMIT_FIX)) < PHYS_LIMIT_MIN:
+                # a velocity cap this low saturates at a few hundred units/s
+                # (inertia 0.5: ~120): every big move's follow-through is cut
+                # off (Hard Time's warden: 60 / 80; P1 L6, SOTA §2)
+                self.notes.append(f"physics {p['name']}: limit {c['limit']:g} < {PHYS_LIMIT_MIN:g} raised to "
+                                  f"{PHYS_LIMIT_FIX:g} (the runtime default; a low limit throttles follow-through)")
+                c["limit"] = PHYS_LIMIT_FIX
             self.ir["physics"].append(c)
             order += 1
 
@@ -1098,6 +1119,7 @@ class _Builder:
                 joints = [_weight_joint(b) for b in bands]
                 w = weights.compute(m["verts"], m["tris"], mesh.outlines(m), bones, joints)
                 w = self._hard_band_ends(m, bands, w)
+                w = self._planted_sole(L, m, w)
             if self.mode == "joint":
                 w = self._carry_accessories(L, m, bands, w)
             out[L["name"]] = (m, w)
@@ -1112,6 +1134,25 @@ class _Builder:
                 st["b2"] = weights.b2(m["verts"], w, bj, bones)
             stats.append(st)
         return out, stats
+
+    def _planted_sole(self, L, m, w):
+        """A planted foot's own layer is 100% foot at and below its ankle
+        (canvas y >= the ankle's), the line crouch() and planted_vertices()
+        check M1 on. _hard_band_ends measures along the ankle's axis and
+        only within the band's lateral reach: a wide boot's toe 60 px off a
+        tilted shin axis kept 4% shin from bone heat and slid 1.2 px in a
+        0.05 H crouch (the Hard Time warden, P5). No-op when the layer is
+        not a planted foot or no vertex qualifies (the monkey's boots)."""
+        b = self.bones.get(L["role"])
+        if b is None or b.get("kind") != "bone" or self.bones.get(b["parent"], {}).get("kind") != "ik_target":
+            return w
+        ay = float(b["head"][1])
+        out = []
+        for v, row in zip(m["verts"], w):
+            if v[1] >= ay - 1e-6 and any(n != L["role"] for n, _ in row):
+                row = [(L["role"], 1.0)]
+            out.append(row)
+        return out
 
     def _hard_band_ends(self, m, bands, w):
         """Past a band's end the joint is over: a vertex beyond the lower
@@ -1575,9 +1616,27 @@ def write_matched(outdir, res, layers_dir, paths=None):
     if not (res["ir"].get("physics") and src.get("file") and src.get("atlas") and os.path.exists(src["file"])
             and oracle.available()[0]):
         return paths, None
-    pm = match_physics(res["ir"], paths["skeleton"], paths["atlas"], src["file"], src["atlas"])
+    pm = match_physics(res["ir"], paths["skeleton"], paths["atlas"], _limit_fixed(src["file"], outdir), src["atlas"])
     res["report"]["physics_match"] = pm
     return write(outdir, res), pm
+
+
+def _limit_fixed(src_file, outdir):
+    """The source skeleton, or a copy of it in outdir with every physics
+    limit below PHYS_LIMIT_MIN raised as the rebuild raises it: match_physics
+    must compare against the source's swing WITHOUT the throttle, or it
+    would scale the repaired follow-through back down to the bug."""
+    with open(src_file) as f:
+        doc = json.load(f)
+    bad = [c for c in doc.get("physics", []) if float(c.get("limit", PHYS_LIMIT_FIX)) < PHYS_LIMIT_MIN]
+    if not bad:
+        return src_file
+    for c in bad:
+        c["limit"] = PHYS_LIMIT_FIX
+    path = os.path.join(outdir, "source_limit_fixed.json")
+    with open(path, "w") as f:
+        json.dump(doc, f)
+    return path
 
 
 def scale_physics_mix(ir, here, src, tol=PHYS_MATCH_TOL):

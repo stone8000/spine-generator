@@ -100,7 +100,7 @@ def unpack(skeleton, images, outdir=None, template="biped_mascot", skin=None, ma
         layer_imgs[name] = rgba[y0:y1, x0:x1].copy()
         layers.append({
             "name": name, "file": f"layers/{name}.png", "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0, "z": z,
-            "role": rename.get(src_slot["bone"], src_slot["bone"]),
+            "role": _role(att, src_slot, rename),
             "tags": ["mesh"] + (["hidden"] if hidden else []),
             "slot": slot, "attachment": key, "color": _tint_hex(src_slot, ev0.attachment(slot, key)), "blend": src_slot.get("blend") or "normal",
             "src": {"bone": src_slot["bone"], "type": att["type"],
@@ -251,6 +251,23 @@ def _alpha_box(alpha):
 def _tint_hex(slot, att):
     c = raster._hex_rgba(slot.get("color")) * raster._hex_rgba(att.get("color"))
     return "".join(f"{int(round(v * 255)):02x}" for v in c)
+
+
+def _role(att, slot, rename):
+    """The bone a layer belongs to: its slot's bone, or, for a weighted mesh
+    whose slot bone does not deform it (the Hard Time warden hangs every
+    slot on root and weights each mesh to its limb), the influence carrying
+    the most weight."""
+    if att["type"] == "mesh" and att.get("weights"):
+        tot = {}
+        for row in att["weights"]:
+            for inf in row:
+                w = next((v for v in inf[1:] if isinstance(v, (int, float))), 1.0)
+                tot[inf[0]] = tot.get(inf[0], 0.0) + float(w)
+        if slot["bone"] not in tot:
+            best = max(sorted(tot), key=tot.get)
+            return rename.get(best, best)
+    return rename.get(slot["bone"], slot["bone"])
 
 
 def _influences(att, slot):
