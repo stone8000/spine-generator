@@ -1,6 +1,7 @@
 """How far physics moves each slot's vertices, in the official runtime.
 
     python research/p2_physics_motion.py <skeleton.json> <atlas> [--anims a,b] [--fps 30] [--json out.json]
+        [--runtime 4.2|4.3]
 
 For each animation, spine-core (qa/run.mjs dump) plays it twice: physics
 "update" and physics "none"; the value per slot is the largest distance
@@ -28,11 +29,11 @@ QA = os.path.join(REPO, "qa", "run.mjs")
 DEFAULT_ANIMS = ("throwit", "cheer", "chestbeat", "flinch")
 
 
-def dump(skeleton, atlas, anim, physics, fps):
+def dump(skeleton, atlas, anim, physics, fps, runtime="4.2"):
     """{slot: (frames, n, 2) world vertices} of one runtime playback."""
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "d.json")
-        subprocess.run(["node", QA, "dump", "--skeleton", skeleton, "--atlas", atlas, "--anim", anim,
+        subprocess.run(["node", QA, "dump", "--runtime", runtime, "--skeleton", skeleton, "--atlas", atlas, "--anim", anim,
                         "--fps", str(fps), "--physics", physics, "--out", out], check=True)
         frames = json.load(open(out))["frames"]
     slots = {}
@@ -43,11 +44,11 @@ def dump(skeleton, atlas, anim, physics, fps):
     return slots
 
 
-def physics_motion(skeleton, atlas, anims=DEFAULT_ANIMS, fps=30):
+def physics_motion(skeleton, atlas, anims=DEFAULT_ANIMS, fps=30, runtime="4.2"):
     """{anim: {slot: max px}}: physics update vs none (module doc)."""
     out = {}
     for a in anims:
-        on, off = dump(skeleton, atlas, a, "update", fps), dump(skeleton, atlas, a, "none", fps)
+        on, off = dump(skeleton, atlas, a, "update", fps, runtime), dump(skeleton, atlas, a, "none", fps, runtime)
         out[a] = {s: float(np.linalg.norm(on[s] - off[s], axis=-1).max()) for s in on if s in off}
     return out
 
@@ -59,8 +60,9 @@ def main(argv=None):
     ap.add_argument("--anims", default=",".join(DEFAULT_ANIMS))
     ap.add_argument("--fps", type=float, default=30)
     ap.add_argument("--json")
+    ap.add_argument("--runtime", default="4.2", choices=("4.2", "4.3"), help="4.3 for a bridged (motion kit) file")
     a = ap.parse_args(argv)
-    res = physics_motion(a.skeleton, a.atlas, a.anims.split(","), a.fps)
+    res = physics_motion(a.skeleton, a.atlas, a.anims.split(","), a.fps, a.runtime)
     slots = sorted({s for r in res.values() for s in r})
     anims = list(res)
     print(f"{'slot':28s}" + "".join(f"{x:>11s}" for x in anims) + "      max")

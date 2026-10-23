@@ -186,6 +186,11 @@ def peaks(rig, anim):
         hx = pos(R["hip"])[:, 0]
         d = np.abs(hx - hx[0])
         return [(int(d.argmax()), "knocked back")]
+    if preset == "jump" and R.get("root"):
+        hy, ry = pos(R["hip"])[:, 1], pos(R["root"])[:, 1]
+        apex = int(ry.argmax()) if np.ptp(ry) > 1e-6 else int(hy.argmax())
+        rel = hy - ry  # the hip over the feet: lowest in the crouch and in the landing
+        return [(int(rel[:apex + 1].argmin()), "crouch"), (apex, "apex"), (apex + int(rel[apex:].argmin()), "landing")]
     d = np.zeros(len(frames))
     for b in frames[0]["bones"]:
         p = pos(b)

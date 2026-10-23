@@ -534,7 +534,9 @@ def joint_groups(ir, roles, joints):
             for b in c["bones"]:
                 in_arm[b] = g
     body = []
-    for r in ("hip", "body", "chest"):
+    # the root too when the hip is the jump's crouch bone: the hip's screen curve includes the flight, so scaling the
+    # hip alone would pin it on screen while the root (and the feet) still fly
+    for r in ("hip", "body", "chest") + (("root",) if roles.get("crouch") else ()):
         v = roles.get(r)
         if isinstance(v, str) and v not in body:
             body.append(v)
