@@ -160,3 +160,54 @@ test('text-slam: starts at 240 %, slams to 92 % at 0.1 s, settles at 100 %', () 
   near(Math.min(...sx), 0.92, 0.005, 'slam');
   near(sx[sx.length - 1], 1, 0.01, 'settle');
 });
+
+test('intro: a loop gets a one-shot <name>_in that starts on the setup pose and joins the loop in value and speed', () => {
+  const anim: RecipeAnimation = { name: 'idle', preset: 'fighter-idle-bounce', params: { hair: 'none' }, intro: true };
+  const plain = compileRecipe(fighter, { roles: fighterRoles, animations: [{ ...anim, intro: undefined }] });
+  const { json, summary } = compileRecipe(fighter, { roles: fighterRoles, animations: [anim] });
+  assert.deepEqual(summary.map((s) => [s.name, s.loop]), [['idle_in', false], ['idle', true]]);
+  assert.deepEqual(json.animations.idle, plain.json.animations.idle, 'the loop itself is unchanged');
+  const D = summary[0].duration;
+  near(D, summary[1].duration, 1e-9, 'intro = one cycle');
+  const data = parseSkeleton(json);
+  const intro = sampleAnimation(data, 'idle_in', { rate: 240, seconds: D, loop: false });
+  const loop = sampleAnimation(data, 'idle', { rate: 240, seconds: D, loop: true });
+  // the rest pose: the same recipe at amplitude 0
+  const still = compileRecipe(fighter, { roles: fighterRoles, animations: [{ ...anim, intro: undefined, amplitude: 0 }] });
+  const zero = sampleAnimation(parseSkeleton(still.json), 'idle', { rate: 240, seconds: 0, loop: true });
+  const n = intro.times.length - 1;
+  const m = loop.times.length - 1;
+  let first = 0, seam = 0, dv = 0;
+  for (const [bone, a] of intro.bones) {
+    const b = loop.bones.get(bone)!, z = zero.bones.get(bone)!;
+    first = Math.max(first, Math.hypot(a.x[0] - z.x[0], a.y[0] - z.y[0]));
+    seam = Math.max(seam, Math.hypot(a.x[n] - b.x[m], a.y[n] - b.y[m]));
+    // backward differences on both sides of the join (the loop's end is its start)
+    dv = Math.max(dv, Math.hypot(a.x[n] - a.x[n - 1] - (b.x[m] - b.x[m - 1]), a.y[n] - a.y[n - 1] - (b.y[m] - b.y[m - 1])) * 240);
+  }
+  assert.ok(first < 0.01, `intro frame 0 off the rest pose by ${first.toFixed(4)}`);
+  assert.ok(seam < 0.2, `intro end vs loop frame 0: ${seam.toFixed(3)}`);
+  assert.ok(dv < 3, `speed jump at the join: ${dv.toFixed(2)}/s`);
+  const [ri, rl] = checkSkeleton(json, { loops: ['idle'] });
+  assert.equal(ri.issues.filter((i) => i.severity !== 'info').length, 0, JSON.stringify(ri.issues));
+  assert.equal(rl.score, checkSkeleton(plain.json, { loops: ['idle'] })[0].score, 'the loop scores as before');
+  assert.throws(() => compileRecipe(fighter, { roles: fighterRoles, animations: [{ name: 'p', preset: 'punch', intro: true }] }), /intro/);
+});
+
+test('jump with a crouch bone: the root only flies, the hip takes the dip and the landing, the hip moves as before', () => {
+  const anim: RecipeAnimation = { name: 'jump', preset: 'jump', params: { height: 120, crouch: 25 } };
+  const plain = compileRecipe(fighter, { roles: fighterRoles, animations: [anim] });
+  const split = compileRecipe(fighter, { roles: { ...fighterRoles, crouch: 'hip' }, animations: [anim] });
+  const D = split.summary[0].duration;
+  const a = sampleAnimation(parseSkeleton(plain.json), 'jump', { rate: 240, seconds: D, loop: false });
+  const b = sampleAnimation(parseSkeleton(split.json), 'jump', { rate: 240, seconds: D, loop: false });
+  const ry = b.bones.get('root')!.y.map((v, i, r) => v - r[0]);
+  for (const t of [0.05, 0.12, 0.17, 0.85, 1.0, 1.19]) near(ry[idxAt(t)], 0, 0.05, `root on the ground at ${t}s`);
+  near(Math.max(...ry), 120, 0.5, 'flight height');
+  const ha = a.bones.get('hip')!, hb = b.bones.get('hip')!;
+  let worst = 0;
+  for (let i = 0; i < ha.y.length; i++) worst = Math.max(worst, Math.hypot(ha.x[i] - hb.x[i], ha.y[i] - hb.y[i]));
+  assert.ok(worst < 0.3, `hip path differs by ${worst.toFixed(3)}`);
+  const [r] = checkSkeleton(split.json, { loops: [] });
+  assert.equal(r.issues.filter((i) => i.severity === 'error').length, 0);
+});

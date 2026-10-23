@@ -61,6 +61,14 @@ export interface RecipeAnimation {
   amplitude?: number;
   /** Per-bone amplitude on top of `amplitude`: scales every track (screen and local) of that bone the same way. */
   boneAmplitude?: Record<string, number>;
+  /**
+   * Loops only: also write a one-shot opening `<name>_in` (or `introName`) that fades in from the setup pose. It lasts
+   * `intro` seconds (true = one cycle) and plays every track of the loop under a smootherstep envelope, ending exactly on
+   * the loop's frame 0 with the same velocity and acceleration, so `setAnimation(<name>_in)` + `addAnimation(<name>, loop)`
+   * starts on the drawn pose and joins the loop without a seam. The loop itself is unchanged.
+   */
+  intro?: number | boolean;
+  introName?: string;
 }
 
 export interface Recipe {
@@ -144,6 +152,52 @@ function retimeAndScale(out: PresetOutput, timeScale: number, amplitude: number,
   };
 }
 
+/** C2 ease 0 -> 1: zero slope and zero curvature at both ends (6u^5 - 15u^4 + 10u^3). */
+function smootherstep(u: number): number {
+  const x = Math.min(1, Math.max(0, u));
+  return x * x * x * (x * (6 * x - 15) + 10);
+}
+
+/**
+ * The opening of a loop: every track of `out` (already retimed and scaled) faded in from its rest value (0 for moves
+ * and turns, 1 for scale) over `seconds`, phased so it ends on the loop's t = 0. value(t) = rest + e(t / Ti) * (m(t - Ti)
+ * - rest), m periodic: at t = 0 it is the rest pose; at Ti it is m(0), and since e' = e'' = 0 there, slope and curvature
+ * are the loop's own. Events are dropped; physics specs are kept (a baked chain is simulated from rest).
+ */
+export function fadeIn(out: PresetOutput, seconds: number): PresetOutput {
+  if (!out.loop) throw new Error('intro 只適用循環動畫');
+  if (!(seconds > 0)) throw new Error('intro 必須大於 0 秒');
+  const T = out.duration;
+  const Ti = seconds;
+  const wrap = (t: number) => (((t - Ti) % T) + T) % T;
+  const shifted = (b: number) => {
+    const out: number[] = [];
+    for (let k = Math.floor(-Ti / T) - 1; k <= 1; k++) {
+      const t = b + Ti + k * T;
+      if (t > 1e-9 && t < Ti - 1e-9) out.push(t);
+    }
+    return out;
+  };
+  const fade = (track: Motion1D, ch: Channel, label: string): Motion1D => {
+    const m = fitLoop(track, T, label); // a track may be a shorter cycle that the loop repeats
+    const rest = isScale(ch) ? 1 : 0;
+    return {
+      duration: Ti,
+      loop: false,
+      breaks: (m.breaks ?? []).flatMap(shifted),
+      value: (t) => rest + smootherstep(t / Ti) * (m.value(wrap(t)) - rest),
+    };
+  };
+  return {
+    ...out,
+    duration: Ti,
+    loop: false,
+    screen: out.screen.map((s) => ({ ...s, motion: fade(s.motion, s.channel, `intro/${s.bone}/${s.channel}`) })),
+    local: out.local.map((l) => ({ ...l, motion: fade(l.motion, l.channel, `intro/${l.bone}/${l.channel}`) })),
+    events: [],
+  };
+}
+
 export interface CompileResult {
   json: SpineJson;
   summary: { name: string; duration: number; loop: boolean; timelines: number; keys: number; events: string[]; physics: number; bakedPhysics: number }[];
@@ -203,65 +257,75 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
     if (!out.duration) throw new Error(`動畫 ${anim.name}：沒有任何動作`);
     for (const b of Object.keys(anim.boneAmplitude ?? {})) boneExists(b);
     out = retimeAndScale(out, anim.timeScale ?? 1, anim.amplitude ?? 1, anim.boneAmplitude);
-
-    const D = out.duration;
-    const fit = (m: Motion1D, label: string) => (out.loop ? fitLoop(m, D, label) : padTo(m, D));
-    const screen = out.screen.map((s) => ({ ...s, motion: fit(s.motion, `${anim.name}/${s.bone}/${s.channel}`) }));
-    const local = out.local.map((l) => ({ ...l, motion: fit(l.motion, `${anim.name}/${l.bone}/${l.channel}`) }));
-    const solved = solveScreen(json, screen, local, D, out.loop, 240, recipe.ikGuard ?? true, recipe.ikGuardChains);
-
-    // merge everything that lands on the same bone channel; a solved channel already includes any local track the
-    // solver applied on that bone, so the local one must not be added again
-    const solvedKeys = new Set(solved.map((s) => `${s.bone}|${s.channel}`));
-    const merged = new Map<string, LocalTrack[]>();
-    for (const tr of [...local.filter((l) => !solvedKeys.has(`${l.bone}|${l.channel}`)), ...solved]) {
-      const k = `${tr.bone}|${tr.channel}`;
-      merged.set(k, [...(merged.get(k) ?? []), tr]);
+    const parts: [string, PresetOutput][] = [];
+    if (anim.intro) {
+      if (!out.loop) throw new Error(`動畫 ${anim.name}：intro 只適用循環動畫`);
+      parts.push([anim.introName ?? `${anim.name}_in`, fadeIn(out, anim.intro === true ? out.duration : anim.intro)]);
     }
-    const baked: BakedTrack[] = [];
-    let keyCount = 0;
-    for (const [k, list] of merged) {
-      const [bone, channel] = k.split('|') as [string, Channel];
-      const motion: Motion1D = {
-        duration: D,
-        loop: out.loop,
-        breaks: list.flatMap((l) => l.motion.breaks ?? []),
-        value: isScale(channel)
-          ? (t) => 1 + list.reduce((s, l) => s + (l.motion.value(t) - 1), 0)
-          : (t) => list.reduce((s, l) => s + l.motion.value(t), 0),
-      };
-      const keys = bake(motion, { tolerance: TOLERANCE[channel] * (isScale(channel) || channel === 'rotate' ? 1 : Math.max(size, 0.25)), fps, maxSegment: recipe.maxSegment });
-      keyCount += keys.length;
-      baked.push({ bone, timeline: TIMELINE[channel], keys });
-    }
-    writeAnimation(json, anim.name, baked, out.events);
-
-    // physics to bake: simulate it with the real runtime on a scratch copy, then store the result as rotate keys
-    const toBake = out.physics.filter((p) => p.bake);
-    if (toBake.length) {
-      const scratch = JSON.parse(JSON.stringify(json));
-      upsertPhysics(scratch, toBake);
-      const data = parseSkeleton(scratch);
-      const warmUp = out.loop ? D * Math.ceil(6 / D) : 0; // whole loops, so the recorded window starts at t = 0
-      const s = sampleAnimation(data, anim.name, { rate: 240, seconds: D, warmUp, loop: out.loop });
-      for (const p of toBake) {
-        const setupRot = data.findBone(p.bone)!.setupPose.rotation;
-        const values = s.bones.get(p.bone)!.localRot.map((r) => ((r - setupRot + 540) % 360) - 180);
-        const keys = bake(sampled(values, D, out.loop), { tolerance: 0.1, fps, maxSegment: recipe.maxSegment });
-        keyCount += keys.length;
-        const i = baked.findIndex((b) => b.bone === p.bone && b.timeline === 'rotate');
-        if (i >= 0) {
-          keyCount -= baked[i].keys.length;
-          baked[i] = { bone: p.bone, timeline: 'rotate', keys };
-        } else {
-          baked.push({ bone: p.bone, timeline: 'rotate', keys });
-        }
-      }
-      writeAnimation(json, anim.name, baked, out.events);
-    }
-    const keep = out.physics.filter((p) => !p.bake);
-    if (keep.length) upsertPhysics(json, keep);
-    summary.push({ name: anim.name, duration: D, loop: out.loop, timelines: baked.length, keys: keyCount, events: out.events.map((e) => `${e.name}@${e.time}s`), physics: keep.length, bakedPhysics: toBake.length });
+    parts.push([anim.name, out]);
+    for (const [name, part] of parts) summary.push(emitAnimation(json, recipe, size, fps, name, part));
   }
   return { json, summary };
+}
+
+/** Solve, bake and write one animation (and its physics) into `json`. */
+function emitAnimation(json: SpineJson, recipe: Recipe, size: number, fps: number, name: string, out: PresetOutput): CompileResult['summary'][number] {
+  const D = out.duration;
+  const fit = (m: Motion1D, label: string) => (out.loop ? fitLoop(m, D, label) : padTo(m, D));
+  const screen = out.screen.map((s) => ({ ...s, motion: fit(s.motion, `${name}/${s.bone}/${s.channel}`) }));
+  const local = out.local.map((l) => ({ ...l, motion: fit(l.motion, `${name}/${l.bone}/${l.channel}`) }));
+  const solved = solveScreen(json, screen, local, D, out.loop, 240, recipe.ikGuard ?? true, recipe.ikGuardChains);
+
+  // merge everything that lands on the same bone channel; a solved channel already includes any local track the
+  // solver applied on that bone, so the local one must not be added again
+  const solvedKeys = new Set(solved.map((s) => `${s.bone}|${s.channel}`));
+  const merged = new Map<string, LocalTrack[]>();
+  for (const tr of [...local.filter((l) => !solvedKeys.has(`${l.bone}|${l.channel}`)), ...solved]) {
+    const k = `${tr.bone}|${tr.channel}`;
+    merged.set(k, [...(merged.get(k) ?? []), tr]);
+  }
+  const baked: BakedTrack[] = [];
+  let keyCount = 0;
+  for (const [k, list] of merged) {
+    const [bone, channel] = k.split('|') as [string, Channel];
+    const motion: Motion1D = {
+      duration: D,
+      loop: out.loop,
+      breaks: list.flatMap((l) => l.motion.breaks ?? []),
+      value: isScale(channel)
+        ? (t) => 1 + list.reduce((s, l) => s + (l.motion.value(t) - 1), 0)
+        : (t) => list.reduce((s, l) => s + l.motion.value(t), 0),
+    };
+    const keys = bake(motion, { tolerance: TOLERANCE[channel] * (isScale(channel) || channel === 'rotate' ? 1 : Math.max(size, 0.25)), fps, maxSegment: recipe.maxSegment });
+    keyCount += keys.length;
+    baked.push({ bone, timeline: TIMELINE[channel], keys });
+  }
+  writeAnimation(json, name, baked, out.events);
+
+  // physics to bake: simulate it with the real runtime on a scratch copy, then store the result as rotate keys
+  const toBake = out.physics.filter((p) => p.bake);
+  if (toBake.length) {
+    const scratch = JSON.parse(JSON.stringify(json));
+    upsertPhysics(scratch, toBake);
+    const data = parseSkeleton(scratch);
+    const warmUp = out.loop ? D * Math.ceil(6 / D) : 0; // whole loops, so the recorded window starts at t = 0
+    const s = sampleAnimation(data, name, { rate: 240, seconds: D, warmUp, loop: out.loop });
+    for (const p of toBake) {
+      const setupRot = data.findBone(p.bone)!.setupPose.rotation;
+      const values = s.bones.get(p.bone)!.localRot.map((r) => ((r - setupRot + 540) % 360) - 180);
+      const keys = bake(sampled(values, D, out.loop), { tolerance: 0.1, fps, maxSegment: recipe.maxSegment });
+      keyCount += keys.length;
+      const i = baked.findIndex((b) => b.bone === p.bone && b.timeline === 'rotate');
+      if (i >= 0) {
+        keyCount -= baked[i].keys.length;
+        baked[i] = { bone: p.bone, timeline: 'rotate', keys };
+      } else {
+        baked.push({ bone: p.bone, timeline: 'rotate', keys });
+      }
+    }
+    writeAnimation(json, name, baked, out.events);
+  }
+  const keep = out.physics.filter((p) => !p.bake);
+  if (keep.length) upsertPhysics(json, keep);
+  return { name: name, duration: D, loop: out.loop, timelines: baked.length, keys: keyCount, events: out.events.map((e) => `${e.name}@${e.time}s`), physics: keep.length, bakedPhysics: toBake.length };
 }

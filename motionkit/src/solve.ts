@@ -45,12 +45,16 @@ function depth(bone: Bone): number {
   return d;
 }
 
-/** Periodic or clamped Catmull-Rom interpolation over evenly spaced samples. */
+/** Catmull-Rom interpolation over evenly spaced samples: periodic for a loop, ends extended linearly for a one-shot. */
 export function sampled(values: number[], duration: number, loop: boolean): Motion1D {
   const n = values.length - 1; // samples at i * duration / n, i = 0..n
   const at = (i: number) => {
     if (loop) return values[((i % n) + n) % n];
-    return values[Math.min(n, Math.max(0, i))];
+    // one-shot: extend the ends linearly, so the curve keeps the end samples' slope (repeating the end sample
+    // instead halves it, a speed step where a one-shot hands over to the next animation)
+    if (i < 0) return n ? values[0] + i * (values[1] - values[0]) : values[0];
+    if (i > n) return n ? values[n] + (i - n) * (values[n] - values[n - 1]) : values[n];
+    return values[i];
   };
   return {
     duration,

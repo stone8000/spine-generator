@@ -94,7 +94,7 @@ export const CATALOG: CatalogEntry[] = [
   },
   {
     id: 'jump', confidence: 1, category: 'character', name: 'jump',
-    basis: '擠壓伸展正確，但工具不彎腿：沒有腳 IK 時下蹲會像整個人下沉，需要骨架有腿部 IK 另外處理',
+    basis: '擠壓伸展正確；沒有腳 IK 時下蹲像整個人下沉。腳有 IK 釘在 root 下時，指定 crouch 角色（hip），下蹲與落地改由 hip 做、腿會彎，root 只負責騰空',
     params: { height: r(20, 300, 5), crouch: r(5, 60, 1) },
   },
   {

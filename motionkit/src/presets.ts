@@ -406,6 +406,7 @@ export const PRESETS: PresetDef[] = [
     roles: [
       { name: 'root', required: true, desc: '整體位移用的骨（通常是 root 或 hip）' },
       { name: 'body', required: false, desc: '做擠壓伸展的骨（通常是 hip 或 body）' },
+      { name: 'crouch', required: false, desc: '腳有 IK 釘在地上時，下蹲與落地緩衝用的骨（通常是 hip）；有指定時 root 只負責騰空' },
     ],
     params: [
       { name: 'height', default: 120, desc: '跳躍高度' },
@@ -418,16 +419,32 @@ export const PRESETS: PresetDef[] = [
       const tC = 0.18, tUp = 0.45, tLand = 0.8, D = 1.2;
       const out = empty(D, false);
       const land = overshoot(-0.35 * cr, 3, 0.45);
-      out.screen.push({
-        bone: c.role('root'),
-        channel: 'y',
-        motion: fn(D, (t) => {
-          if (t < tC) return -cr * EASES.sineInOut(t / tC);
-          if (t < tUp) return -cr + (h + cr) * EASES.cubicOut((t - tC) / (tUp - tC));
-          if (t < tLand) return h * (1 - EASES.quadIn((t - tUp) / (tLand - tUp)));
-          return land(t - tLand);
-        }, [tC, tUp, tLand]),
-      });
+      const root = c.role('root');
+      const crouch = c.roleOpt('crouch');
+      // the whole jump as one on-screen curve
+      const jumpY = fn(D, (t) => {
+        if (t < tC) return -cr * EASES.sineInOut(t / tC);
+        if (t < tUp) return -cr + (h + cr) * EASES.cubicOut((t - tC) / (tUp - tC));
+        if (t < tLand) return h * (1 - EASES.quadIn((t - tUp) / (tLand - tUp)));
+        return land(t - tLand);
+      }, [tC, tUp, tLand]);
+      if (crouch && crouch !== root) {
+        // feet planted by IK under the root: the root carries only the flight, the crouch bone follows the whole
+        // curve on screen (screen tracks are solved against the parent's motion), so the dip, the push-off and the
+        // landing bend the legs and the body moves exactly as without the split
+        out.screen.push({
+          bone: root,
+          channel: 'y',
+          motion: fn(D, (t) => {
+            if (t < tC) return 0;
+            if (t < tUp) return h * EASES.cubicOut((t - tC) / (tUp - tC));
+            if (t < tLand) return h * (1 - EASES.quadIn((t - tUp) / (tLand - tUp)));
+            return 0;
+          }, [tC, tUp, tLand]),
+        }, { bone: crouch, channel: 'y', motion: jumpY });
+      } else {
+        out.screen.push({ bone: root, channel: 'y', motion: jumpY });
+      }
       const body = c.roleOpt('body');
       if (body) {
         const vertical = pointsVertically(c, body);
