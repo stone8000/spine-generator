@@ -61,7 +61,7 @@ def arm_weights(m, helper, **kw):
     return weights.compute(m["verts"], m["tris"], mesh.outlines(m), arm_bones(helper), [elbow_joint(helper)], **kw)
 
 
-def check_rows(w, names, max_influences=3, prune=0.02):
+def check_rows(w, names, max_influences=3, prune=weights.PRUNE_BAND):
     for row in w:
         assert 1 <= len(row) <= max_influences
         assert abs(sum(v for _, v in row) - 1.0) < 1e-9
@@ -417,3 +417,68 @@ def test_row_composition_gives_the_lower_band_its_ramp_outright():
     assert np.allclose(W[idx, col["shin"]], kr[idx, 1] * (1 - t[idx]))
     assert np.allclose(U[idx, col["foot"]], kr[idx, 1] * t[idx])
     assert (W[idx, col["foot"]] > U[idx, col["foot"]] + 1e-6).any()
+
+
+def test_accessory_chain_fills_the_parent_first_and_stays_within_three_bones():
+    """P2 open issue 8: near a joint the parent holds little, so the
+    accessory's share is taken of the whole chain (parent, helper, the bone
+    across the joint), each with its own copy of the accessory, filled
+    greedily from the parent: only one bone is ever split, so a vertex of
+    two band bones ends with 3 bones at most (L8), the accessory's total is
+    share x chain weight, and merging every copy back into its bone gives
+    the original weights (exact at rest)."""
+    names = ["upper", "helper", "lower", "cuff", "cuff_h", "cuff_lo"]
+    chain = [("upper", "cuff"), ("helper", "cuff_h"), ("lower", "cuff_lo")]
+    M = np.array([[0.6, 0.4, 0.0, 0, 0, 0],    # share 0.5: 0.5 from the upper arm
+                  [0.3, 0.7, 0.0, 0, 0, 0],    # share 0.5: the upper arm's 0.3 whole, 0.2 of the helper
+                  [0.3, 0.7, 0.0, 0, 0, 0],    # share 1: both whole, 2 bones
+                  [0.0, 0.6, 0.4, 0, 0, 0],    # past the joint: helper first, then the lower bone
+                  [0.5, 0.3, 0.2, 0, 0, 0],    # three bones already: no room
+                  [1.0, 0.0, 0.0, 0, 0, 0]])   # outside the band: the parent alone
+    share = np.array([0.5, 0.5, 1.0, 0.8, 0.4, 0.3])  # row 4: 0.4 would split the upper arm (4 bones)
+    X, stuck = weights.accessory_chain_split(M, names, chain, share)
+    assert stuck.tolist() == [False, False, False, False, True, False]
+    W = M.copy()
+    got = weights.compose_accessory_chain(W, names, chain, share)
+    assert got == {"cuff": 4, "cuff_h": 3, "cuff_lo": 1}
+    acc = W[:, 3:].sum(1)
+    assert np.allclose(acc, [0.5, 0.5, 1.0, 0.8, 0.0, 0.3])
+    assert np.allclose(W[1], [0.0, 0.5, 0.0, 0.3, 0.2, 0.0])
+    assert np.allclose(W[3], [0.0, 0.0, 0.2, 0.0, 0.6, 0.2])
+    assert ((W >= 0.02).sum(1) <= 3).all()
+    merged = W[:, :3] + W[:, 3:]
+    assert np.allclose(merged, M[:, :3])
+    # the parent-only rule takes nothing where the parent holds nothing
+    W2 = M.copy()
+    weights.compose_accessory(W2, names, "cuff", "upper", share)
+    assert W2[3, 3] == 0.0 and acc[3] > 0.5
+
+
+def test_band_weights_prune_finer_than_heat_weights():
+    """P2 open issue (deep-crouch folds): inside a joint band the ramps
+    make the weights, and a weight cut at 0.02 there jumps to 0 between two
+    neighbours (on the monkey's flared calf, the knee helper's share fading
+    down to the ankle: those jumps flipped the hem's small triangles). Band
+    vertices keep weights down to PRUNE_BAND; outside the bands heat
+    weights are still cut at PRUNE (a percent of the other leg leaks round
+    a crotch: test_left_leg_never_gets_right_leg_weight...). A straight
+    strip shows it: a ramp passes through every small value near the
+    band's ends."""
+    n = 400
+    V = np.stack([np.linspace(0.0, 240.0, n), np.zeros(n)], 1)
+    V = np.concatenate([V, V + [0.0, 6.0]])
+    T = np.array([[i, i + 1, n + i] for i in range(n - 1)] + [[i + 1, n + i + 1, n + i] for i in range(n - 1)])
+    outline = np.array([[0, -1], [240, -1], [240, 7], [0, 7]], float)
+    bones = arm_bones(True)
+    j = dict(elbow_joint(True), center=(120.0, 3.0), reach=(2.0, 2.0), lateral=5.0)
+    bones = [dict(b, head=(b["head"][0], 3.0), tail=(b["tail"][0], 3.0)) for b in bones]
+    bones[0]["tail"] = bones[1]["head"] = bones[2]["head"] = bones[2]["tail"] = (120.0, 3.0)
+    bones[0]["head"], bones[1]["tail"] = (0.0, 3.0), (240.0, 3.0)
+    W = weights.compute(V, T, outline, bones, [j])
+    inband = weights.band_mask(V, j, bones)
+    small = [min(x for _, x in r) for r, b in zip(W, inband) if b and len(r) > 1]
+    assert min(small) >= weights.PRUNE_BAND - 1e-12
+    assert any(weights.PRUNE_BAND <= x < weights.PRUNE for x in small)      # kept: under the heat cut
+    check_rows([r for r, b in zip(W, inband) if not b], ["upper", "fore", "elbow_mid"], prune=weights.PRUNE)
+    W2 = weights.compute(V, T, outline, bones, [j], prune=weights.PRUNE)   # an explicit cut is used as given
+    assert all(min(x for _, x in r) >= weights.PRUNE - 1e-12 for r in W2 if len(r) > 1)

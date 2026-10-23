@@ -4,10 +4,13 @@
         [--joints joints.json] [--name monkey] [--no-source] [--mesh lean|refined]
         [--joint-modes modes.json | --joint-modes rigid_budget.json --need 90]
         [--bands bands.json] [--fit-reach 'elbow_l,elbow_r=2,2.25,2.5,3,3.5' [--fit-need 90]]
+        [--fit-crouch 'knee_{s}.lower=1.5,3;ankle_{s}.power=0.8,0.85,0.9,0.95,1,1.1,1.2']
+        [--no-accessory-copies] [--no-physics-match]
 
 writes rig.json + motion.json (IR), <name>.json (Spine 4.2, spinegen.emit.spine42),
 <name>.atlas + <name>.png (spinegen.atlas.pack), joints.json (the budget scanner's
-joints, world coordinates) and build_report.json (band_fit.json with --fit-reach);
+joints, world coordinates) and build_report.json (band_fit.json with --fit-reach /
+--fit-crouch); physics mixes matched to the source's swing (match_physics);
 then a crouch check in the official runtime (crouch(): knees by the template's
 rule, planted feet <= 1 px), after the accessory check (accessory_check).
 
@@ -94,7 +97,35 @@ WHAT IT BUILDS (template = templates/<name>.json, spinegen.template)
            (accessory_check). "rigid": every vertex 100% on the layer's
            bone, the cut-out for comparison.
   physics  the source's constraints, renamed, every field explicit (the IR
-           already is), ordered after the transforms.
+           already is), ordered after the transforms. The CLI then measures
+           each one's swing in the official runtime against the source's
+           and scales down the mix of one that swings harder here
+           (match_physics: the monkey's pant hems, whose thighs now turn
+           under the leg IK).
+
+ACCESSORY COPIES (P2 open issue 8)
+  An accessory sharing only its parent's weight barely moves near a joint,
+  where the band's helper and the bone across the joint hold most of the
+  row: the monkey's left sleeve swung 17 px of physics against the
+  source's 58 (its lower sleeve is 100% cuff there). So each accessory
+  gets a copy under each band bone next to its parent (the helper, the
+  bone across the joint: cuffL_elbow_mid_l, cuffL_forearm_l): the same
+  setup world transform as the accessory, the band bone as parent, and a
+  local relative rotate-only transform constraint from the accessory with
+  offset -its setup rotation, ordered after every physics constraint, so a
+  copy turns by exactly the accessory's own change (physics or keys) about
+  the same point. At rest a copy moves like the bone it hangs from, so
+  weight moved to it changes nothing without physics or keys (spine-core,
+  physics none: <= 6e-4 px in 8 of the monkey's 9 animations; flutter keys
+  the cuffs and differs by its own motion). The accessory then takes its
+  source share of the whole chain, filled from the parent outward
+  (weights.compose_accessory_chain), which never puts a 4th bone on a
+  vertex of two band bones (L8). Measured (spine-core, 60 fps, physics
+  update vs none, worst of throwit / cheer / chestbeat / flinch; source /
+  parent-only / copies): left sleeve 58.4 / 17.0 / 54.0 px, right 32.2 /
+  9.6 / 28.3; thighs 23.3 / 14.5 / 17.1 and 23.9 / 7.6 / 19.7 with
+  match_physics (without it the copies let the IK-driven pant swing fold
+  the thigh in cheer: G1 2, thigh 57.6 px).
   motion   the source's animations where bones map: rotate deltas as they
            are, translate deltas turned into the new parent's frame, scale
            axes swapped where a bone now points 90 deg away. Timelines that
@@ -157,6 +188,10 @@ KNEE_SYM_DEG = 10.0   # crouch(): two legs' end bends agree this closely (mirror
 SHIN_ROWS = 10.0      # px: crouch() reports the slide of the bottom this many px of the shin's art
 M1_PX = 1.0           # px: SOTA §5 M1, the most a planted foot vertex may move (the CLI's crouch check)
 ACC_TAPER = 1.0       # halfwidths over which an accessory's share tapers to 0 toward a vertex with no room for it
+FIT_DEPTHS = (0.05, 0.07, 0.08, 0.10, 0.12, 0.13)  # fit_crouch's crouch grid: hips down, fractions of H
+FIT_SHIFTS = (-40.0, -30.0, -20.0, -10.0, 0.0, 10.0, 20.0, 30.0, 40.0)  # ... and sideways, px
+PHYS_MATCH_FPS = 60   # match_physics measures the physics swing at this rate (the source's physics fps)
+PHYS_MATCH_TOL = 0.1  # match_physics leaves a constraint alone when it swings at most this much more than the source
 LATERAL_PAD = 0.25    # halfwidths added to the widest art a band must take in (rigbuild._lateral)
 
 
@@ -183,12 +218,12 @@ class Canvas:
 
 # ---------------------------------------------------------------- public
 
-BAND_KEYS = ("reach", "rows", "row_points", "overlap", "compose")  # what `bands` may set per joint
+BAND_KEYS = ("reach", "rows", "row_points", "overlap", "compose", "power")  # what `bands` may set per joint
 FIT_STEP = 2.0        # deg: fit_reach's budget scans (the budget's own default step)
 
 
 def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source="auto", name=None,
-          joint_modes=None, mesh_profile="lean", recenter=True, bands=None):
+          joint_modes=None, mesh_profile="lean", recenter=True, bands=None, accessory_copies=True):
     """Build the rig. Returns {"ir", "images", "joints" (budget form),
     "report"}.
 
@@ -205,6 +240,9 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     bands       {joint: {reach, rows, row_points, overlap, compose}} per-joint
                 band shape over the template's (one side of a pair:
                 "elbow_l"), e.g. fit_reach()'s choice for this character
+    accessory_copies  give each accessory a copy under the joint-band bones
+                next to its parent (default; ACCESSORY COPIES); False: the
+                accessory shares only its parent's weight (P2 R3)
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -234,6 +272,7 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
     b.mesh_kw = dict(MESH_PROFILES[mesh_profile])
     b.mesh_profile = mesh_profile
     b.recenter = recenter
+    b.accessory_copies = accessory_copies
     return b.run()
 
 
@@ -316,6 +355,98 @@ def fit_reach(layers_dir, joints=None, template="biped_mascot", candidates=None,
             {"need": need, "step": step, "table": table, "chosen": chosen})
 
 
+def fit_crouch(layers_dir, joints=None, template="biped_mascot", candidates=None, depths=FIT_DEPTHS,
+               shifts=FIT_SHIFTS, progress=None, bands=None, **build_kw):
+    """Per leg, the leg joints' band shape with the fewest folds over a
+    crouch grid. `candidates` {template joint ("knee_{s}"): {band key:
+    [values]}} (keys: "power", or "lower"/"upper" for the reach in
+    halfwidths), e.g. {"knee_{s}": {"lower": [1.5, 3]}, "ankle_{s}":
+    {"power": [0.9, 1, 1.1]}}: every combination is built once (both sides
+    alike) and each side keeps its own best. Returns ({joint: band spec}
+    for build's `bands`, {"table": {side: {combo: folds}}, "chosen": {side:
+    combo}, "depths", "shifts"}).
+
+    The grid: the hips (the leg IK thighs' parent) lowered by depth x H and
+    moved dx px sideways, legs on IK (the R2 crouch); folds are lbs's G1
+    (pinned to spine-core by C1) on the layers that carry the side's leg
+    bands. The two legs do not interact. Ties go to the combination closest
+    to the template (its own reach, power 1).
+
+    WHY (P2 open issue: deep-crouch folds): where a calf folds depends on
+    where its art sits off the ramps' axes, and two calves of one character
+    differ. The monkey's right hem flares 80-93 px off the ankle's axis just
+    above the ankle and wants the foot's ramp gentle there (power < 1) and
+    the knee's ramp run down the whole calf; its left calf reaches 70-77 px
+    off the knee's axis on the inner side and wants the opposite (in the
+    continuum, det J over the art's pixels at 0.13 H with the hips 40 px
+    over, power 0.9 lifts the right calf from -0.06 to +0.02 and takes the
+    left from +0.02 to -0.22). The synthetic flared calf of the tests folds
+    more with the knee run down the whole calf (139 against 84 over 0.10-
+    0.16 H). One template value cannot serve them all, so each leg is
+    fitted, as fit_reach fits each elbow."""
+    import itertools
+    t = tmpl.load(template) if isinstance(template, str) else template
+    raw = {k: v for k, v in (candidates or {}).items()}
+    axes = [(jn, key, [float(v) for v in vals]) for jn, spec in raw.items() for key, vals in spec.items()]
+    sides = sorted({j.rsplit("_", 1)[-1] for j in t["joints"] for jn in raw
+                    if "{s}" in jn and jn.replace("{s}", j.rsplit("_", 1)[-1]) == j})
+
+    def default(jn, key, side):
+        spec = t["joints"].get(jn.replace("{s}", side), {})
+        if key == "power":
+            return float(spec.get("power", 1.0))
+        return float((spec.get("reach") or {}).get(key, mesh.BAND_EXTENT))
+
+    table = {s: {} for s in sides}
+    for combo in itertools.product(*[vals for _, _, vals in axes]):
+        bb = json.loads(json.dumps(bands or {}))
+        for (jn, key, _), v in zip(axes, combo):
+            for side in sides:
+                j = jn.replace("{s}", side)
+                e = bb.setdefault(j, {})
+                if key == "power":
+                    e["power"] = v
+                else:
+                    e["reach"] = dict(e.get("reach") or {}, **{key: v})
+        res = build(layers_dir, joints, t, bands=bb, **build_kw)
+        ir = res["ir"]
+        ev = lbs.Evaluator(ir)
+        b = irmod.by_name(ir["bones"])
+        hips = b[ir["ik"][0]["bones"][0]]["parent"]
+        layers = {side: {L for jn, _, _ in axes for L in res["report"]["bands"].get(jn.replace("{s}", side),
+                                                                                   {}).get("layers", [])}
+                  for side in sides}
+        folds = {side: 0 for side in sides}
+        for d in depths:
+            for dx in shifts:
+                per = ev.folds(pose={hips: {"x": b[hips]["x"] + dx, "y": b[hips]["y"] - d * ir["H"]}})["slots"]
+                for side in sides:
+                    folds[side] += sum(per.get(L, 0) for L in layers[side])
+        key = ", ".join(f"{jn} {k} {v:g}" for (jn, k, _), v in zip(axes, combo))
+        for side in sides:
+            table[side][key] = {"folds": folds[side], "combo": list(combo)}
+        if progress:
+            progress(f"fit crouch {key}: folds " + ", ".join(f"{s} {folds[s]}" for s in sides))
+    chosen, out = {}, {}
+    for side in sides:
+        def cost(item, side=side):
+            _, r = item
+            dev = sum(abs(math.log(v / default(jn, k, side))) for (jn, k, _), v in zip(axes, r["combo"]))
+            return (r["folds"], dev)
+        key, r = min(table[side].items(), key=cost)
+        chosen[side] = key
+        for (jn, k, _), v in zip(axes, r["combo"]):
+            if abs(v - default(jn, k, side)) < 1e-12:
+                continue
+            j = jn.replace("{s}", side)
+            e = out.setdefault(j, {})
+            if k == "power":
+                e["power"] = v
+            else:
+                e["reach"] = dict(e.get("reach") or {}, **{k: v})
+    return out, {"table": table, "chosen": chosen, "depths": list(depths), "shifts": list(shifts)}
+
+
 def write(outdir, res):
     """Write a build() result; returns {kind: path}."""
     from .emit import spine42
@@ -355,6 +486,8 @@ class _Builder:
         self._art = {}
         self.straightened = {}  # knee joint -> px moved onto the hip-ankle line (_align_knees)
         self.acc_report = {}    # accessory -> what it carried from the source (_carry_accessories)
+        self.acc_copies = {}    # accessory copy bone -> {"of": accessory, "parent": band bone} (ACCESSORY COPIES)
+        self.accessory_copies = True  # False: accessories share their parent's weight only (P2 R3; build() sets it)
 
     # ---- orchestration
 
@@ -372,6 +505,8 @@ class _Builder:
         self.bands = self.joint_bands()
         self.ir_constraints()
         meshes, stats = self.meshes()
+        self.add_accessory_copies(1 + max([c["order"] for k in irmod.CONSTRAINT_KINDS for c in self.ir[k]],
+                                          default=-1))
         self.ir_slots(meshes)
         self.carry_motion()
         self.fit_skeleton_box()
@@ -699,7 +834,8 @@ class _Builder:
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
                             "kind": kind, "budget": spec.get("budget"),
                             "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0)),
-                            "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper")}
+                            "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper"),
+                            "power": float(spec.get("power", 1.0))}
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
@@ -993,14 +1129,21 @@ class _Builder:
             s, lat = weights.band_coords(m["verts"], _weight_joint(b), bones)
             up, lo = (r * b["halfwidth"] + weights.END_TOL for r in b["reach"])
             near = lat <= b["lateral"] * b["halfwidth"]
-            for side, keep, drop in ((s > lo, b["lower"], (b["upper"], b["helper"])),
+            # past the lower end the bones of the band above on the chain go
+            # too (an "overlap" band composes with them): below a planted
+            # ankle the knee's ramp, which runs down the whole calf along the
+            # knee's own axis, can reach a hem vertex the ankle's axis puts
+            # past the ankle (P2: a 0.023 knee-helper weight slid the
+            # monkey's left hem 1.4 px in a 0.05 H crouch)
+            above = tuple(n for o in bands if o["lower"] == b["upper"] for n in (o["upper"], o["helper"]) if n)
+            for side, keep, drop in ((s > lo, b["lower"], (b["upper"], b["helper"]) + above),
                                      (s < -up, b["upper"], (b["lower"], b["helper"]))):
                 rows = side & near
                 for n in drop:
                     if n:
                         M[rows, col[keep]] += M[rows, col[n]]
                         M[rows, col[n]] = 0.0
-        return weights.prune_weights(M, names)
+        return weights.prune_weights(M, names, prune=weights.KEEP)  # compute pruned them (PRUNING)
 
     def _carry_accessories(self, L, m, bands, w):
         """Source weights of accessory bones (a cuff on a sleeve hem),
@@ -1034,8 +1177,10 @@ class _Builder:
             lin = LinearNDInterpolator(sv, vals)(nv)
             return np.where(np.isnan(lin), NearestNDInterpolator(sv, vals)(nv), lin)
 
+        chains = {a: self._accessory_chain(a, bands) for a in accs}
         names = list(dict.fromkeys([n for row in w for n, _ in row] + accs
-                                   + [self.bones[a]["parent"] for a in accs]))
+                                   + [self.bones[a]["parent"] for a in accs]
+                                   + [n for c in chains.values() for pair in c for n in pair]))
         M = weights.as_matrix(w, names)
         for parent in dict.fromkeys(self.bones[a]["parent"] for a in accs):
             mine = [a for a in accs if self.bones[a]["parent"] == parent]
@@ -1056,17 +1201,73 @@ class _Builder:
                 # neighbours never differs by a whole share (on the monkey's
                 # thigh a 0.47 jump between two outline vertices 11 px apart
                 # flipped the sliver triangle across the thigh in cheer)
-                _, stuck = weights.accessory_split(M, names, a, parent, share)
+                chain = chains[a]
+                _, stuck = weights.accessory_chain_split(M, names, chain, share)
                 if stuck.any() and bands:
                     hw = float(np.mean([b["halfwidth"] for b in bands]))
                     d = np.linalg.norm(m["verts"][:, None, :] - m["verts"][stuck][None, :, :], axis=-1).min(1)
                     share = share * np.clip(d / (ACC_TAPER * hw), 0.0, 1.0)
-                n = weights.compose_accessory(M, names, a, parent, share)
+                n = weights.compose_accessory_chain(M, names, chain, share)
+                for bone, c in chain[1:]:
+                    if n.get(c):
+                        self.acc_copies.setdefault(c, {"of": a, "parent": bone})
                 rep = self.acc_report.setdefault(a, {"parent": parent, "layers": {}})
                 rep["layers"][L["name"]] = {
                     "source_vertices": int((src[a] > 0).sum()), "source_mass": round(float(src[a].sum()), 3),
-                    "vertices": n, "mass": round(float(M[:, names.index(a)].sum()), 3)}
-        return weights.prune_weights(M, names)
+                    "vertices": int(((M[:, [names.index(c) for _, c in chain]]) > 0).any(1).sum()),
+                    "mass": round(float(M[:, [names.index(c) for _, c in chain]].sum()), 3),
+                    "copies": {c: k for c, k in n.items() if c != a and k}}
+        return weights.prune_weights(M, names, prune=weights.KEEP)  # compute pruned them (PRUNING)
+
+    def _accessory_chain(self, acc, bands):
+        """[(bone, accessory bone)]: the accessory's parent and the accessory,
+        then for each of this layer's bands at the parent its helper and the
+        bone across the joint, each with a copy of the accessory hanging from
+        it (ACCESSORY COPIES); only the parent without copies."""
+        parent = self.bones[acc]["parent"]
+        chain = [(parent, acc)]
+        if not self.accessory_copies:
+            return chain
+        for b in bands:
+            if parent not in (b["upper"], b["lower"]):
+                continue
+            other = b["lower"] if parent == b["upper"] else b["upper"]
+            for bone in (b["helper"], other):
+                if bone and bone != parent and bone not in [x for x, _ in chain]:
+                    chain.append((bone, f"{acc}_{bone}"))
+        return chain
+
+    def add_accessory_copies(self, order):
+        """Put the accessory copies that got weight (self.acc_copies) in the
+        IR: a bone under its band bone with the accessory's setup world
+        transform, and a local relative rotate transform constraint from the
+        accessory, ordered after every physics constraint. Returns the next
+        free constraint order. ACCESSORY COPIES in the module doc."""
+        if not self.acc_copies:
+            return order
+        ir_b = irmod.by_name(self.ir["bones"])
+        for c, spec in sorted(self.acc_copies.items()):
+            a, p = spec["of"], spec["parent"]
+            ab = self.bones[a]
+            head = self.cv.to_world(ab["head"])
+            lx, ly = lbs.to_local(self.world[p], head[0], head[1])
+            rot = self.wrot[a] - self.wrot[p]
+            bone = irmod.new_bone(c, p, lx, ly, rot, ab["len"], role="accessory")
+            self.ir["bones"].append(bone)
+            self.world[c] = lbs.compose(self.world[p], bone["x"], bone["y"], bone["rotation"], 1, 1, 0, 0, "normal")
+            self.wrot[c] = self.wrot[a]
+            self.bones[c] = {"parent": p, "head": ab["head"], "tail": ab["tail"], "len": ab["len"], "dir": ab["dir"],
+                             "joint": None, "kind": "accessory_copy", "role": "accessory", "limb_parent": p,
+                             "of": a}
+            self.order.append(c)
+            zero = {"rotation": 0.0, "x": 0.0, "y": 0.0, "scale_x": 0.0, "scale_y": 0.0, "shear_y": 0.0}
+            self.ir["transform"].append({
+                "name": f"{c}_follow", "order": order, "runs": True, "skin_required": False, "kind": "transform",
+                "bones": [c], "target": a, "local": True, "relative": True,
+                "offset": dict(zero, rotation=-float(ir_b[a]["rotation"])),
+                "mix": dict(zero, rotate=1.0)})
+            order += 1
+        return order
 
     def accessory_check(self):
         """What each physics-driven accessory bone moves, source vs this rig:
@@ -1086,11 +1287,15 @@ class _Builder:
                 for atts in sk["attachments"].values():
                     for att in atts.values():
                         for row in att.get("weights") or []:
+                            seen = set()
                             for inf in row:
-                                if inf[1] > 0 and inf[0] in self.bones and self.bones[inf[0]]["kind"] == "accessory":
-                                    c = counts.setdefault(inf[0], {"source": [0, 0.0], "new": [0, 0.0]})[key]
-                                    c[0] += 1
+                                kind = self.bones.get(inf[0], {}).get("kind")
+                                if inf[1] > 0 and kind in ("accessory", "accessory_copy"):
+                                    acc = self.bones[inf[0]].get("of", inf[0])  # a copy counts for its accessory
+                                    c = counts.setdefault(acc, {"source": [0, 0.0], "new": [0, 0.0]})[key]
+                                    c[0] += acc not in seen
                                     c[1] += float(inf[1])
+                                    seen.add(acc)
         bones = {}
         for b, c in sorted(counts.items()):
             bones[b] = {"physics": b in phys, "source_vertices": c["source"][0],
@@ -1309,6 +1514,90 @@ class _Builder:
                 "note": "world coordinates (y up); '+' = counter-clockwise local rotation", "joints": out}
 
 
+# ---------------------------------------------------------------- physics drive (P2 open issue 8)
+
+def physics_tip_motion(skeleton, atlas, anims=None, fps=PHYS_MATCH_FPS):
+    """{physics constraint: {anim: px}}: in the official runtime, the
+    largest distance between the constrained bone's world tip with physics
+    "update" and "none", per animation (all of the skeleton's by default)."""
+    from . import oracle
+    with open(skeleton) as f:
+        doc = json.load(f)
+    length = {b["name"]: float(b.get("length", 0.0)) for b in doc.get("bones", [])}
+    cons = {c["name"]: c["bone"] for c in doc.get("physics", [])}
+    anims = list(doc.get("animations", {})) if anims is None else list(anims)
+    out = {n: {} for n in cons}
+    for anim in anims:
+        runs = [oracle.dump(skeleton, atlas, anim=anim, fps=fps, physics=ph)["frames"] for ph in ("update", "none")]
+        for n, b in cons.items():
+            def tip(fr):
+                m = fr["bones"][b]
+                return np.array([m["x"] + m["a"] * length[b], m["y"] + m["c"] * length[b]])
+            out[n][anim] = float(max(np.linalg.norm(tip(u) - tip(o)) for u, o in zip(*runs)))
+    return out
+
+
+def match_physics(ir, skeleton, atlas, src_skeleton, src_atlas, fps=PHYS_MATCH_FPS, tol=PHYS_MATCH_TOL):
+    """Scale down the mix of each physics constraint that swings its bone
+    harder here than in the source, in place on `ir`; returns {constraint:
+    {"source_px", "px", "mix", "mix_source", "anims"}} (px: the largest
+    physics_tip_motion over the animations both rigs have).
+
+    WHY (P2 open issue 8): once a pant hem's copies carry its weight across
+    the knee (ACCESSORY COPIES), its swing shows on the art, and the drive
+    is not the source's: the monkey's legs squash with scale keys and the
+    thighs never turn (pant tip 2 px of physics swing in cheer), while here
+    the leg IK turns the thigh at every bob of the hips (34 px in cheer, 24
+    in chestbeat), which folded the thigh in cheer (G1 2). A physics mix
+    scales the constraint's output linearly (spine-core: the offset times
+    mix x rotate), so mix x source/here brings the largest swing back to
+    the source's; the constraint's own spring is left as authored. Never
+    raised: a rig that swings less keeps its mix."""
+    with open(skeleton) as f:
+        here_anims = set(json.load(f).get("animations", {}))
+    with open(src_skeleton) as f:
+        anims = sorted(here_anims & set(json.load(f).get("animations", {})))
+    if not anims:
+        return {}
+    return scale_physics_mix(ir, physics_tip_motion(skeleton, atlas, anims, fps),
+                             physics_tip_motion(src_skeleton, src_atlas, anims, fps), tol)
+
+
+def write_matched(outdir, res, layers_dir, paths=None):
+    """(paths, physics_match report or None): match_physics against the
+    source Spine files layers.json names, then write the rig again (write()
+    first when `paths` is None). Nothing is matched without the source
+    files, physics constraints or the runtime oracle."""
+    from . import oracle
+    paths = paths or write(outdir, res)
+    with open(os.path.join(layers_dir, "layers.json")) as f:
+        src = json.load(f).get("source") or {}
+    if not (res["ir"].get("physics") and src.get("file") and src.get("atlas") and os.path.exists(src["file"])
+            and oracle.available()[0]):
+        return paths, None
+    pm = match_physics(res["ir"], paths["skeleton"], paths["atlas"], src["file"], src["atlas"])
+    res["report"]["physics_match"] = pm
+    return write(outdir, res), pm
+
+
+def scale_physics_mix(ir, here, src, tol=PHYS_MATCH_TOL):
+    """match_physics's rule on measured swings ({constraint: {anim: px}},
+    physics_tip_motion of this rig and of the source), in place on `ir`."""
+    out = {}
+    for c in ir.get("physics", []):
+        n = c["name"]
+        anims = sorted(set(here.get(n, {})) & set(src.get(n, {})))
+        if not anims:
+            continue
+        s_px, n_px = max(src[n][a] for a in anims), max(here[n][a] for a in anims)
+        mix0 = float(c["mix"])
+        if n_px > (1.0 + tol) * s_px and n_px > 1e-6:
+            c["mix"] = round(mix0 * s_px / n_px, 4)
+        out[n] = {"source_px": round(s_px, 3), "px": round(n_px, 3), "mix_source": mix0, "mix": c["mix"],
+                  "anims": {a: [round(src[n][a], 3), round(here[n][a], 3)] for a in anims}}
+    return out
+
+
 # ---------------------------------------------------------------- crouch (M1)
 
 def foot_contacts(ir, within=2.0):
@@ -1491,7 +1780,7 @@ def _weight_joint(b):
     return {"center": tuple(b["center"]), "upper": b["upper"], "helper": b["helper"], "lower": b["lower"],
             "halfwidth": b["halfwidth"], "axis": tuple(b["axis"]), "reach": tuple(b["reach"]),
             "lateral": b.get("lateral", weights.LATERAL), "exclusive": True, "overlap": bool(b.get("overlap")),
-            "compose": b.get("compose", "upper")}
+            "compose": b.get("compose", "upper"), "power": b.get("power", 1.0)}
 
 
 def _chained(a, b):
@@ -1515,7 +1804,8 @@ def _round_band(b):
             "reach": [round(float(v), 4) for v in b["reach"]],
             "window": [round(float(v), 4) for v in b.get("window", b["reach"])],
             "lateral": round(b.get("lateral", weights.LATERAL), 3), "upper": b["upper"],
-            "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"]}
+            "lower": b["lower"], "helper": b["helper"], "mode": b["mode"], "layers": b["layers"],
+            "power": float(b.get("power", 1.0))}
 
 
 def _totals(stats):
@@ -1670,6 +1960,15 @@ def main(argv=None):
                          "'elbow_l,elbow_r=2,2.25,2.5,3,3.5'; the chosen reaches go into the build and "
                          "<out>/band_fit.json")
     ap.add_argument("--fit-need", type=float, default=90.0, help="degrees --fit-reach tries to hold both ways")
+    ap.add_argument("--fit-crouch", default=None, metavar="SPEC",
+                    help="fit each leg's band shapes by the crouch grid's folds (fit_crouch), e.g. "
+                         "'knee_{s}.lower=1.5,3;ankle_{s}.power=0.8,0.9,1,1.1,1.2'; the choice goes into the "
+                         "build and <out>/band_fit.json")
+    ap.add_argument("--no-physics-match", action="store_true",
+                    help="keep every physics mix as the source has it (default: match_physics scales down "
+                         "a constraint that swings harder than in the source)")
+    ap.add_argument("--no-accessory-copies", action="store_true",
+                    help="accessories share their parent's weight only (P2 R3; default: ACCESSORY COPIES)")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args(argv)
     modes = None
@@ -1700,13 +1999,38 @@ def main(argv=None):
             bands[j] = dict(bands.get(j, {}), **spec)
         for j, v in fit["chosen"].items():
             print(f"  fit {j}: upper reach {v:g} halfwidths")
+    pfit = None
+    if a.fit_crouch:
+        cands = {}
+        for part in a.fit_crouch.split(";"):
+            name, vals = part.split("=", 1)
+            jn, key = name.strip().rsplit(".", 1)
+            cands.setdefault(jn, {})[key] = [float(v) for v in vals.split(",")]
+        fitted, pfit = fit_crouch(a.layers_dir, a.joints, a.template, cands, progress=lambda m: print("  " + m),
+                                  bands=bands, mode=a.mode, source=None if a.no_source else "auto", name=a.name,
+                                  joint_modes=modes, mesh_profile=a.mesh, recenter=not a.keep_joints)
+        bands = json.loads(json.dumps(bands or {}))
+        for j, spec in fitted.items():
+            e = bands.setdefault(j, {})
+            for k, v in spec.items():
+                e[k] = dict(e.get(k) or {}, **v) if k == "reach" else v
+        for side, key in pfit["chosen"].items():
+            print(f"  fit crouch, leg {side}: {key}")
     res = build(a.layers_dir, a.joints, a.template, a.mode, None if a.no_source else "auto", a.name, modes, a.mesh,
-                not a.keep_joints, bands)
+                not a.keep_joints, bands, accessory_copies=not a.no_accessory_copies)
+    if pfit is not None:
+        res["report"]["fit_crouch"] = pfit
     if fit is not None:
         res["report"]["fit_reach"] = fit
     paths = write(a.out, res)
-    if fit is not None:
-        _dump(os.path.join(a.out, "band_fit.json"), {"bands": bands, "fit": fit})
+    if not a.no_physics_match and not a.no_source:
+        paths, pm = write_matched(a.out, res, a.layers_dir, paths)
+        for n, r in (pm or {}).items():
+            if r["mix"] != r["mix_source"]:
+                print(f"  physics {n}: swings {r['px']:.1f} px here, {r['source_px']:.1f} px in the source: "
+                      f"mix {r['mix_source']:g} -> {r['mix']:g}")
+    if fit is not None or pfit is not None:
+        _dump(os.path.join(a.out, "band_fit.json"), {"bands": bands, "fit": fit, "fit_crouch": pfit})
     tot = res["report"]["totals"]
     ir = res["ir"]
     print(f"{paths['skeleton']}: {len(ir['bones'])} bones, {len(ir['slots'])} slots, {len(ir['ik'])} ik, "
