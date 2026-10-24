@@ -291,6 +291,7 @@ export const PRESETS: PresetDef[] = [
       { name: 'reach', default: 130, desc: '出拳距離（單位，會乘上 size）' },
       { name: 'windup', default: 35, desc: '蓄力往後拉的距離' },
       { name: 'lean', default: 6, desc: '身體前傾角度' },
+      { name: 'guard', default: 0, desc: '另一隻手（fistBack）跟著身體前移的比例（0 = 不動，1 = 跟身體一樣）：正面寬架式、手肘外張的角色設 1，不然身體前移時那隻手會被拉直甩出去' },
       HAIR_PARAM,
     ],
     build(c) {
@@ -350,6 +351,21 @@ export const PRESETS: PresetDef[] = [
             recover: { time: tRec },
           }),
         });
+        // the guard hand is an IK target on the root: without this it stays put while the body moves and its arm stretches
+        const guard = c.param('guard', 0);
+        const fb = c.roleOpt('fistBack');
+        if (guard && fb && fb !== fist) {
+          out.screen.push({
+            bone: fb,
+            channel: 'x',
+            motion: strike({
+              anticipation: { value: -0.08 * reach * F * guard, time: tA, ease: 'sineOut' },
+              action: { value: 0.16 * reach * F * guard, time: tS, ease: 'quartIn' },
+              hold,
+              recover: { time: tRec },
+            }),
+          });
+        }
       }
       const head = c.roleOpt('head');
       if (head) {
