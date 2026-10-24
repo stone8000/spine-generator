@@ -37,6 +37,8 @@ Go Banandit 的 MG 大盜猴改擺拳擊架式，照 [`需求單.md`](需求單.
 
 ## 重跑
 
+最簡單：`spine-motion character examples/characters/bandit-monkey/layers`（自動用 `layers.json`、上一層的 `joints_manual.json` 和 `celebrate.params.json`，輸出到 `bandit-monkey_spine/`，見 [`docs/一行做角色.md`](../../../docs/一行做角色.md)）。下面是分步驟的試驗腳本：
+
 在 repo 根目錄執行（需要 Python + Pillow）。產生的 `monkey.json` 除了圖片路徑（`./images/`）以外，和這裡收錄的逐字相同：
 
 ```bash

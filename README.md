@@ -16,6 +16,27 @@
 
 ---
 
+## 最快的用法：一行做角色
+
+拿到角色交件（部件 PNG，可附 `layers.json`），一行指令做完建骨架、套 6 個動作（待機兩種、出拳、受擊、跳躍、慶祝）、流暢度與接縫檢查：
+
+```bash
+spine-motion character 交件資料夾/
+```
+
+輸出在旁邊的 `<角色名>_spine/`：Spine 4.3 JSON + `images/`（Import Data 即可）、`報告.md`（開頭就是結論與修法）、`預覽.gif`、`預覽.html`。選項與怎麼看報告見 **[`docs/一行做角色.md`](docs/一行做角色.md)**。
+
+**裝到本機**（全域 `spine-motion` 指令，並把使用指引裝成 Claude Code 與 Codex 的技能）：
+
+```bash
+git clone https://github.com/stone8000/spine-generator ~/tools/spine-generator
+~/tools/spine-generator/scripts/install-local.sh
+```
+
+給 agent 的說明在 [`AGENTS.md`](AGENTS.md) 與 [`skills/spine-character/SKILL.md`](skills/spine-character/SKILL.md)。
+
+---
+
 ## 最簡單的用法：動作工作室（不用安裝）
 
 直接用瀏覽器打開 **[`studio/spine-motion-studio.html`](studio/spine-motion-studio.html)**。這是單一檔案，引擎和 Spine 4.3 runtime 都包在裡面，離線也能用，可以直接傳給美術。
@@ -126,11 +147,12 @@ npm run demo
 | [`docs/動作預設手冊.md`](docs/動作預設手冊.md) | 每個預設的角色、參數、時序 |
 | [`docs/配方格式.md`](docs/配方格式.md) | 配方 JSON 完整說明、自訂軌道 |
 | [`docs/流暢原則與Spine技巧.md`](docs/流暢原則與Spine技巧.md) | 為什麼這樣會順；Spine runtime 不寫在手冊裡的行為；給動畫師的建議 |
+| [`docs/一行做角色.md`](docs/一行做角色.md) | `spine-motion character`：交件資料夾一行做完、輸出、看報告修問題 |
 | [`docs/生圖交付規格.md`](docs/生圖交付規格.md) | 給 GPT / Gemini / MJ 的姿勢、圖層、提示詞與交件檢查；工作室訊息對照 |
 
 ## 驗證
 
-`npm test` 共 50 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
+`npm test` 共 55 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
 
 - 每個預設在測試骨架上編譯、播放、通過流暢度檢查（循環 0 錯誤 0 警告）
 - Iron Jaw 待機數值在 90° 旋轉骨架與鏡像骨架上都準確重現
@@ -147,6 +169,7 @@ npm run demo
 - 交件附 `layers.json` 疊圖順序時骨架照它疊（後手拳套可以在胸前），沒列到的圖層留在模板的相對位置
 - 關節合理性檢查：模板與自動猜的關節不報；脖子反折、頭軸歪掉、頭頂點太低、肩膀點太低都會列出來
 - 跳躍時雙腳在下蹲與落地期間踩住地面（誤差 < 0.5），膝蓋往前彎
+- 一行做角色：交件資料夾（含 `layers.json`、手調關節）直接產生 6 個動畫，疊圖順序照交件；缺必要圖層時指出檔名；PNG 讀取涵蓋各種色彩格式與濾波
 - 接縫檢查：好的圖在各動作每一幀都不報；故意做壞的圖（肩下沒畫、頭在下巴切平）準確抓到前肩與脖子，且不誤報其他關節
 
 ## 授權提醒
