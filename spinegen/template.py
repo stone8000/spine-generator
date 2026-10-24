@@ -68,6 +68,18 @@ def expand(raw):
                 out[key].append(dict(_sub(h, side), side=side))
     for name in raw.get("match_order", [b["name"] for b in raw["bones"]]):
         out["match_order"] += [_fill(name, s) for s in _sides_of(name, sides)]
+    side = (raw.get("leg_style") or {}).get("side")
+    if side:
+        # the side-view leg style's extra helpers and joint settings (spinegen.rigbuild
+        # LEG STYLES "side"), expanded per side like the template's own
+        sv = dict(side, helpers=[], joints={})
+        for h in side.get("helpers", []):
+            for s in _sides_of(h["name"], sides):
+                sv["helpers"].append(dict(_sub(h, s), side=s))
+        for name, j in side.get("joints", {}).items():
+            for s in _sides_of(name, sides):
+                sv["joints"][_fill(name, s)] = _sub(j, s)
+        out["leg_style"] = dict(out["leg_style"], side=sv)
     names = [b["name"] for b in out["bones"]]
     if len(set(names)) != len(names):
         raise ValueError(f"template {raw['name']}: duplicate bone names")

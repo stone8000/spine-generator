@@ -390,12 +390,19 @@ def _chains(ir, bones):
 
 
 def roles_from_template(ir, arm_report, facing=1):
-    """The kit's role map from the IR's template roles (module doc, step 3)."""
+    """The kit's role map from the IR's template roles (module doc, step 3).
+
+    A side view (IR "view", rigbuild LEG STYLES "side") squashes and
+    stretches the TORSO in the jump ("body"), not the hips: the legs hang
+    from the hips, so the hips' 1.08 stretch lengthened both legs by 8 %
+    and the softened IK ran the boxer's shins 54 px past their planted
+    feet at the push-off, folding the foot (G1 22)."""
     roles, notes = {}, []
     by = _by_role(ir)
     root = next(b["name"] for b in ir["bones"] if b["parent"] is None)
     roles["root"] = root
-    for kit, tmpl in (("hip", "hips"), ("body", "hips"), ("chest", "torso"), ("head", "head")):
+    body = "torso" if (ir.get("view") or {}).get("kind") == "side" else "hips"
+    for kit, tmpl in (("hip", "hips"), ("body", body), ("chest", "torso"), ("head", "head")):
         if by.get(tmpl):
             roles[kit] = by[tmpl]
         elif kit != "body":
@@ -742,6 +749,13 @@ def qa_ir(ir, motion_json):
     counts["animations"] = len(anims)
     counts["events"] = len(skel.get("events", {}))  # the kit's swing / impact / hit
     feet = sorted({fp["bone"] for fp in ir.get("foot_plant", [])})
+    if not feet:
+        # a rig with no source animations (spinegen.ingest_layers: the kit's
+        # own layer folders) has no foot_plant: its planted feet are the
+        # bones its leg IK targets carry (rigbuild's "planted" legs)
+        role = {b["name"]: b.get("role") or "" for b in ir["bones"]}
+        targets = {leg["target"] for leg in irmod.leg_chains(ir) if role[leg["thigh"]].startswith("leg_")}
+        feet = sorted(b["name"] for b in ir["bones"] if b["parent"] in targets)
     plants = []
     for a, body in anims.items():
         ev = {e["name"]: e.get("time", 0.0) for e in body.get("events", [])}
@@ -827,9 +841,11 @@ def qa_check(motion_json, atlas, ir_summary_path, out_path):
 
 # ---------------------------------------------------------------- the bridge
 
-def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, arm_softness=0.1, qa=True,
+def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=None, name=None, arm_softness=0.1, qa=True,
         leg_softness=LEG_SOFTNESS, ik_guard=True, kit_guard=False, budget="auto", joints=None, intro=True):
     ir = irmod.load(rig_path)
+    if facing is None:  # a side view's own (rigbuild "side": IR "view"), else right
+        facing = int((ir.get("view") or {}).get("facing") or 1)
     name = name or ir.get("name") or "rig"
     os.makedirs(out_dir, exist_ok=True)
     rep = {"input": {"rig": os.path.abspath(rig_path), "atlas": os.path.abspath(atlas)}, "name": name,
@@ -898,6 +914,8 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
 
     motion = os.path.join(out_dir, f"{name}.motion.json")
     rep["generate_stdout"] = kit("generate", rig43, recipe_path, "-o", motion, "--check")
+    if (bridged.get("view") or {}).get("kind") == "side" and oracle.available("4.3")[0]:
+        rep["draw_order"] = profile_draw_order(bridged, motion, atlas_out, facing)
     if intro and oracle.available("4.3")[0]:
         rep["intro"] = intro_probe(motion, atlas_out, recipe)
     checks = json.loads(kit("check", motion, "--loops", ",".join(loops), "--json"))
@@ -917,6 +935,89 @@ def run(rig_path, atlas, out_dir, presets=DEFAULT_PRESETS, facing=1, name=None, 
                     "check_md": motion[:-5] + ".check.md"}
     with open(os.path.join(out_dir, "bridge.json"), "w") as f:
         json.dump(rep, f, indent=1, ensure_ascii=False)
+    return rep
+
+
+# ---------------------------------------------------------------- profile draw order (SOTA §4.3 "draworder")
+
+CROSS_IN = 0.5      # the far hand this many arm lengths in front of the near shoulder: the far arm crosses the body
+CROSS_OUT = 0.4     # ... and back behind it under this (hysteresis, SOTA §4.3: return threshold below the way out)
+CROSS_FPS = 60
+
+
+def _order_offsets(names, order):
+    """A Spine drawOrder key's offsets taking setup slot list `names` to `order`
+    (the slots not on one longest increasing run move; spinegen.emit.spine42)."""
+    from .emit.spine42 import _longest_increasing
+    index = {n: i for i, n in enumerate(names)}
+    target = [index[n] for n in order]
+    keep = set(_longest_increasing(target))
+    moved = sorted((orig, pos) for pos, orig in enumerate(target) if orig not in keep)
+    return [{"slot": names[orig], "offset": pos - orig} for orig, pos in moved]
+
+
+def profile_draw_order(ir, motion_json, atlas, facing, cross_in=CROSS_IN, cross_out=CROSS_OUT, fps=CROSS_FPS):
+    """drawOrder keys for a side view's arms (SOTA §4.3 draworder), written
+    into the kit's 4.3 file in place; returns the report.
+
+    WHY: drawn in profile, the near arm is in front of the torso and the far
+    arm behind it (rigbuild's side draw order), and an arm swinging forward
+    and back in the picture plane keeps that depth. What changes it is the
+    shoulders turning toward the viewer as the far arm reaches across the
+    body (a cross, a two-handed reach): then the far arm passes IN FRONT of
+    the chest, and kept behind it the fist looks as if it came out of the
+    torso. Each animation is played in spine-core 4.3.13 at `fps`; while the
+    far hand (its arm IK target) is more than `cross_in` arm lengths in front
+    of the near shoulder along `facing`, the far arm's slots are drawn just
+    above the torso (below the neck, head and near arm); they go back under
+    `cross_out` (hysteresis). A key without offsets is the setup order."""
+    view = ir.get("view") or {}
+    near, far = view.get("near"), view.get("far")
+    rep = {"cross_in": cross_in, "cross_out": cross_out, "fps": fps, "animations": {}}
+    if view.get("kind") != "side" or not near or not far:
+        rep["skipped"] = "not a side view"
+        return rep
+    by = {b["name"]: b for b in ir["bones"]}
+    with open(motion_json) as f:
+        skel = json.load(f)
+    names = [sl["name"] for sl in skel["slots"]]
+    slot_bone = {sl["name"]: sl["bone"] for sl in skel["slots"]}
+    arm = [f"{p}_{far}" for p in ("clav", "upperarm", "forearm", "hand")]
+    far_slots = [n for n in names if slot_bone[n] in arm]
+    torso = [n for n in names if (by.get(slot_bone[n]) or {}).get("role") == "torso" or slot_bone[n] == "torso"]
+    sh, el, hand = f"upperarm_{near}", f"forearm_{far}", f"ik_hand_{far}"
+    if not far_slots or not torso or sh not in by or hand not in by:
+        rep["skipped"] = "no far arm / torso / near shoulder / far hand target"
+        return rep
+    bind = lbs.bind_pose(ir)
+    up, fo = f"upperarm_{far}", f"forearm_{far}"
+    length = math.dist(bind[up][4:6], bind[fo][4:6]) + float(by[fo].get("length") or 0.0)
+    rep.update(far_slots=far_slots, torso=torso[-1], arm_length=round(length, 2))
+    order_in = [n for n in names if n not in far_slots]
+    k = order_in.index(torso[-1]) + 1
+    order_in = order_in[:k] + far_slots + order_in[k:]
+    offsets = _order_offsets(names, order_in)
+    for an, body in skel["animations"].items():
+        dur = _anim_duration(body)
+        times = [i / fps for i in range(int(math.floor(dur * fps + 1e-9)) + 1)]
+        frames = oracle.dump(motion_json, atlas, anim=an, times=times, runtime="4.3")["frames"]
+        reach = [facing * (f["bones"][hand]["x"] - f["bones"][sh]["x"]) / length for f in frames]
+        keys, inside = [], reach[0] > cross_in
+        if inside:
+            keys.append({"time": 0, "offsets": offsets})
+        for t, r in zip(times[1:], reach[1:]):
+            if not inside and r > cross_in:
+                inside = True
+                keys.append({"time": round(t, 4), "offsets": offsets})
+            elif inside and r < cross_out:
+                inside = False
+                keys.append({"time": round(t, 4)})
+        rep["animations"][an] = {"max_reach": round(max(reach), 3), "keys": keys and [k["time"] for k in keys],
+                                 "in_front": [k["time"] for k in keys if k.get("offsets")]}
+        if keys:
+            body["drawOrder"] = keys
+    with open(motion_json, "w") as f:
+        json.dump(skel, f, indent=1)
     return rep
 
 
@@ -972,7 +1073,8 @@ def main(argv=None):
     ap.add_argument("atlas")
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--presets", default=",".join(DEFAULT_PRESETS))
-    ap.add_argument("--facing", type=int, default=1, choices=(1, -1))
+    ap.add_argument("--facing", type=int, default=None, choices=(1, -1),
+                    help="default: the rig's own (IR view.facing of a side view), else 1")
     ap.add_argument("--name", default=None)
     ap.add_argument("--arm-softness", type=float, default=0.1, help="arm IK softness, fraction of arm length")
     ap.add_argument("--leg-softness", type=float, default=LEG_SOFTNESS,
@@ -1009,6 +1111,9 @@ def main(argv=None):
                   + ("" if fr["after"]["ok"] else "  STILL OVER"))
         for it in rep["budget"]["artreq"]:
             print("art request:", it["what"])
+    for an, d in (rep.get("draw_order") or {}).get("animations", {}).items():
+        print(f"draw order {an}: far hand up to {d['max_reach']:+.2f} arm lengths past the near shoulder; "
+              + (f"far arm in front of the torso from {d['in_front']}, keys {d['keys']}" if d["keys"] else "no key"))
     for an, it in rep.get("intro", {}).items():
         print(f"intro {it['intro']} ({it['seconds']} s): frame 0 vs setup {it['frame0_vs_setup_px']:.3f} px; "
               f"end vs {an} frame 0 {it['end_vs_loop_frame0_px']:.3f} px")

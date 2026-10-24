@@ -203,7 +203,7 @@ AXIS_SNAP = 10.0      # deg: scale keys swap x/y when a bone now points 90 +- th
 FOLDED_MIN = 135.0    # deg: a "both" joint bent more than this at setup is kept rigid (joint_bands)
 AXIS_MEAN_MAX = 45.0  # deg: a "both" band runs along the mean of its bones only when they are this close
 KNEE_RULES = ("outward", "facing")  # template ik "knee" (see _knee_dir)
-LEG_STYLES = ("auto", "outward", "forward")  # template "leg_style" / --leg-style (LEG STYLES)
+LEG_STYLES = ("auto", "outward", "forward", "side")  # template "leg_style" / --leg-style (LEG STYLES)
 FORWARD_SIDE_MAX = 0.1  # crouch(): a forward knee moves sideways at most this fraction of the hips' drop ...
 FORWARD_SIDE_PX = 2.0   # ... or this many px
 FORWARD_BEND_MAX = 20.0  # deg: crouch(): a forward leg ends bent at most this much in the picture
@@ -299,6 +299,7 @@ def build(layers_dir, joints=None, template="biped_mascot", mode="joint", source
         source = _load_source(layers_dir, doc)
     b = _Builder(doc, imgs, joints, t, mode, source, name)
     b.joint_modes = dict(joint_modes or {})
+    b.band_override = dict(bands or {})
     b.mesh_kw = dict(MESH_PROFILES[mesh_profile])
     b.mesh_profile = mesh_profile
     b.recenter = recenter
@@ -524,11 +525,16 @@ class _Builder:
         self.leg_style_asked = None   # build()'s leg_style (None: the template's default)
         self.leg_style, self.leg_style_why = "outward", {}  # resolved in run() (_resolve_leg_style)
         self.knee_targets = {}        # forward legs: thigh IK name -> its knee target bone
+        self.band_override = {}       # build(bands=...): {joint: {key: value}} set over the template
+        self.facing, self.near = None, None  # side view: +1 / -1 and the side turned to the viewer
+        self.draw_order_moves = []    # side view: slots moved behind / in front of the trunk (_side_draw_order)
 
     # ---- orchestration
 
     def run(self):
         self.leg_style, self.leg_style_why = self._resolve_leg_style()
+        if self.leg_style == "side":
+            self._apply_side()
         self.skeleton()
         if self.recenter and self._recenter():
             self.bones, self.order = {}, []
@@ -555,6 +561,8 @@ class _Builder:
                   "mesh_profile": self.mesh_profile, "joint_modes": {j: b["kind"] for j, b in self.bands.items()},
                   "template": self.t["name"], "layers": stats, "ik": self.ik_report,
                   "leg_style": dict(self.leg_style_why, style=self.leg_style),
+                  **({"view": self.ir.get("view"), "draw_order_moves": self.draw_order_moves}
+                     if self.leg_style == "side" else {}),
                   "bands": {j: _round_band(b) for j, b in self.bands.items()},
                   "totals": _totals(stats), "accessories": self.accessory_check(), "notes": self.notes}
         return {"ir": self.ir, "images": images, "joints": self.budget_joints(), "report": report}
@@ -595,7 +603,10 @@ class _Builder:
             self._aim(name)
         self.helpers = []
         for h in t["helpers"]:
-            if h["of"] in self.bones and h["parent"] in self.bones:
+            parent = next((p for p in ([h["parent"]] if isinstance(h["parent"], str) else h["parent"])
+                           if p in self.bones), None)
+            if h["of"] in self.bones and parent is not None:
+                h = dict(h, parent=parent)
                 of = self.bones[h["of"]]
                 self.bones[h["name"]] = {"parent": h["parent"], "head": of["head"], "tail": of["tail"],
                                          "len": 0.0, "dir": of["dir"], "joint": h["joint"], "kind": "helper",
@@ -646,7 +657,7 @@ class _Builder:
         del self.notes[n0:]
         for jname, band in bands.items():
             spec = self.t["joints"].get(jname, {})
-            if spec.get("band") != "both" or not spec.get("helper") or not band["layers"]:
+            if spec.get("band") != "both" or not spec.get("helper") or not band["layers"] or band.get("bent"):
                 continue
             c, a, hw = band["center"], band["axis"], band["halfwidth"]
             n = np.array([-a[1], a[0]])
@@ -693,10 +704,22 @@ class _Builder:
         why = {"asked": asked}
         if asked not in LEG_STYLES:
             raise ValueError(f"leg_style must be one of {LEG_STYLES}, not {asked!r}")
+        if asked == "side" and not spec.get("side"):
+            raise ValueError(f"leg_style 'side': template {self.t['name']} has no leg_style.side")
         if asked != "auto":
+            if asked == "side":
+                side = self._side_view(force=True)
+                self.facing, self.near = side["facing"], side["near"]
+                why = dict(why, side_test=side)
             return asked, why
         if not spec:
             return "outward", dict(why, reason="the template has no leg_style")
+        if spec.get("side"):
+            side = self._side_view()
+            if side["side"]:
+                self.facing, self.near = side["facing"], side["near"]
+                return "side", dict(why, side_test=side, reason=side["reason"])
+            why = dict(why, side_test=side)
         lengths, slender = [], []
         for ik in self.t["ik"]:
             hj = self.spec.get(ik["bones"][0], {}).get("joint")
@@ -728,6 +751,95 @@ class _Builder:
                            reason=f"legs {leg_H:.3f} H ({'>=' if leg_H >= lim_h else '<'} {lim_h:g}), "
                                   f"length/width {sl:.2f} ({'>=' if sl >= lim_s else '<'} {lim_s:g})")
 
+    def _side_view(self, force=False):
+        """Is this a side (profile) view? {"side", "facing", "near", "why",
+        "reason", "toes"}. joints.json decides when it says ("view": "side"
+        / "front", or a "facing" without a view); otherwise the feet do:
+        in profile both feet point along the facing, so the art below each
+        ankle (the leg's shin and foot layers) lies to the same side of the
+        ankle, by at least the template's auto_side_min_toe x the leg's
+        width (thigh and shin layers' opaque area / hip-ankle length). A
+        front view's feet point outward (opposite signs: the Hard Time
+        warden) or at the camera (near 0: the monkey's left boot).
+        facing = that side (+1 right); near = the side whose limb layers
+        are drawn on top (joints.json "near" when given)."""
+        spec = self.t.get("leg_style") or {}
+        view, f = self.jdoc.get("view"), self.jdoc.get("facing")
+        out = {"side": False, "facing": None, "near": None, "toes": {}}
+        toes = {}
+        for ik in self.t["ik"]:
+            thigh, shin = ik["bones"]
+            hj = self.spec.get(thigh, {}).get("joint")
+            aj = self.spec.get(ik["target"], {}).get("joint")
+            if hj not in self.jxy or aj not in self.jxy:
+                continue
+            ax, ay = self.jxy[aj]
+            n = float(np.linalg.norm(self.jxy[hj] - self.jxy[aj]))
+            feet = {b["name"] for b in self.t["bones"] if ik["target"] in b["parents"]}
+            area, xs = 0, []
+            for L in self.layers:
+                if "hidden" in L["tags"]:
+                    continue
+                m = self._layer_mask(L)
+                if L.get("role") in (thigh, shin):
+                    area += int(m.sum())
+                if L.get("role") in {shin} | feet:
+                    ii, jj = np.nonzero(m)
+                    X, Y = L["x"] + jj + 0.5, L["y"] + ii + 0.5
+                    xs.append(X[Y > ay] - ax)
+            xs = np.concatenate(xs) if xs else np.zeros(0)
+            if xs.size and area and n:
+                toes[ik["side"]] = float(xs.mean()) / (area / n)
+        out["toes"] = {k: round(v, 4) for k, v in toes.items()}
+        lim = float(spec.get("auto_side_min_toe", 0.5))
+        if view in ("side", "front") or f in (1, -1):
+            out["why"] = "joints.json"
+            out["side"] = view == "side" or (view is None and f in (1, -1))
+            out["facing"] = f if f in (1, -1) else None
+        else:
+            out["why"] = "feet"
+            v = list(toes.values())
+            out["side"] = len(v) == 2 and min(abs(x) for x in v) >= lim and v[0] * v[1] > 0
+            out["facing"] = (1 if v[0] > 0 else -1) if out["side"] else None
+        out["side"] = out["side"] or force
+        if out["side"] and out["facing"] is None:
+            v = list(toes.values())
+            if not v or not any(v):
+                raise ValueError("side view: no facing in joints.json and no feet to read it from")
+            out["facing"] = 1 if sum(v) > 0 else -1
+        near = self.jdoc.get("near")
+        if out["side"] and near is None:
+            z = {}
+            for s in self.t["sides"]:
+                zs = [L["z"] for L in self.layers if (self.spec.get(L.get("role"), {}).get("side") == s)]
+                if zs:
+                    z[s] = float(np.mean(zs))
+            near = max(z, key=z.get) if z else None
+        out["near"] = near if out["side"] else None
+        out["min_toe"] = lim
+        tv = ", ".join(f"{k} {v:+.2f}" for k, v in out["toes"].items())
+        out["reason"] = (f"joints.json view {view!r} facing {f!r}" if out["why"] == "joints.json" else
+                         f"feet below the ankles {tv} leg widths (side view when both >= {lim:g} the same way)")
+        return out
+
+    def _apply_side(self):
+        """The side view's template changes (LEG STYLES "side"): every leg
+        IK's knee rule becomes the side spec's (default "facing"); the
+        side helpers (shoulder_mid_<s>, hip_mid_<s>) join the template's
+        helpers, and the joints they sit on get them."""
+        sv = self.t["leg_style"]["side"]
+        t = json.loads(json.dumps(self.t))
+        for ik in t["ik"]:
+            ik.pop("bend_positive", None)
+            ik["knee"] = sv.get("knee", "facing")
+        have = {h["name"] for h in t["helpers"]}
+        t["helpers"] += [h for h in sv.get("helpers", []) if h["name"] not in have]
+        for j, spec in sv.get("joints", {}).items():
+            if j in t["joints"]:
+                # build(bands=...) (a fit, the CLI's --bands) wins over the side defaults
+                t["joints"][j].update({k: v for k, v in spec.items() if k not in self.band_override.get(j, {})})
+        self.t = t
+
     def _knee_dir(self, ik):
         """World unit vector the template's "knee" rule says a crouch moves
         this leg's knee along, or None when the template fixes
@@ -755,7 +867,7 @@ class _Builder:
                 raise ValueError(f"ik {ik['name']}: knee 'outward' but the leg sits on the body's midline")
             return np.array([math.copysign(1.0, dx), 0.0])
         if rule == "facing":
-            f = self.jdoc.get("facing")
+            f = self.facing if self.facing is not None else self.jdoc.get("facing")
             if f not in (1, -1):
                 raise ValueError(f"ik {ik['name']}: knee 'facing' needs joints.json 'facing': 1 (right) or -1 (left)")
             return np.array([float(f), 0.0])
@@ -948,12 +1060,23 @@ class _Builder:
                 raise ValueError(f"joint {jname}: compose must be one of {weights.COMPOSE}, not {spec['compose']!r}")
             want = spec.get("reach") or {}
             reach = [float(want.get("upper", mesh.BAND_EXTENT)), float(want.get("lower", mesh.BAND_EXTENT))]
+            bent = None
+            if (kind == "helper" and spec["band"] == "both" and up["len"] > 0 and lo["len"] > 0
+                    and lo["dir"] @ up["dir"] < math.cos(math.radians(AXIS_MEAN_MAX))):
+                # bent at setup (the kit boxer's guard: elbows 100-110 deg):
+                # no one axis runs along both pieces (the mean one crosses the
+                # forearm lengthwise and its ramp smeared the whole forearm
+                # over the elbow); each layer bends along its OWN bone
+                # (_layer_band), a cut-out piece per bone as the art is drawn
+                bent = {upper: up["dir"], lower: lo["dir"]}
             bands[jname] = {"center": c, "axis": axis, "halfwidth": hw, "reach": reach,
                             "upper": upper, "lower": lower, "helper": helper, "mode": spec["band"],
                             "kind": kind, "budget": spec.get("budget"),
                             "rows": spec.get("rows", mesh.BAND_ROWS), "row_points": int(spec.get("row_points", 0)),
                             "overlap": bool(spec.get("overlap", False)), "compose": spec.get("compose", "upper"),
                             "power": float(spec.get("power", 1.0))}
+            if bent is not None:
+                bands[jname]["bent"] = bent
         targets = {n for n in self.order if self.bones[n]["kind"] == "ik_target"}
         for jname, band in bands.items():
             band["layers"] = [L["name"] for L in self.layers if self._carries(L, band)]
@@ -1283,7 +1406,8 @@ class _Builder:
         out, stats = {}, []
         for L in self.layers:
             alpha = self.imgs[L["name"]][..., 3]
-            bands = [b for b in self.bands.values() if L["name"] in b["layers"] and b["kind"] != "rigid"]
+            bands = [self._layer_band(b, L) for b in self.bands.values()
+                     if L["name"] in b["layers"] and b["kind"] != "rigid"]
             m = mesh.build(alpha, (L["x"], L["y"]), bands=[_mesh_band(b) for b in bands], **self.mesh_kw)
             if self.mode == "rigid" or not bands:
                 w = [[(L["role"], 1.0)] for _ in range(len(m["verts"]))]
@@ -1311,6 +1435,17 @@ class _Builder:
             stats.append(st)
         return out, stats
 
+    def _layer_band(self, band, L):
+        """The band as layer L bends at it: itself, or for a joint bent at
+        setup (band["bent"]) a copy running along L's own bone (the upper
+        piece along the upper bone, the lower along the lower), its lateral
+        reach measured on L alone."""
+        if not band.get("bent") or L["role"] not in band["bent"]:
+            return band
+        b = dict(band, axis=np.asarray(band["bent"][L["role"]], float), layers=[L["name"]])
+        b["lateral"] = self._lateral(b)
+        return b
+
     def _planted_sole(self, L, m, w):
         """A planted foot's own layer is 100% foot at and below its ankle
         (canvas y >= the ankle's), the line crouch() and planted_vertices()
@@ -1320,13 +1455,23 @@ class _Builder:
         0.05 H crouch (the Hard Time warden, P5). No-op when the layer is
         not a planted foot or no vertex qualifies (the monkey's boots)."""
         b = self.bones.get(L["role"])
+        foot = L["role"]
+        if b is not None and b.get("kind") == "bone" and self.bones.get(b["parent"], {}).get("kind") != "ik_target":
+            # a shin layer that carries the foot (the motion kit's "leg_*_lower
+            # (含腳)"): the foot bone has no layer of its own, so the part of
+            # the shin's art below the ankle is the foot and goes with it
+            foot = next((n for n, f in self.bones.items() if f.get("kind") == "bone" and f["limb_parent"] == L["role"]
+                         and self.bones.get(f["parent"], {}).get("kind") == "ik_target"), None)
+            if foot is None or any(o.get("role") == foot for o in self.layers):
+                return w
+            b = self.bones[foot]
         if b is None or b.get("kind") != "bone" or self.bones.get(b["parent"], {}).get("kind") != "ik_target":
             return w
         ay = float(b["head"][1])
         out = []
         for v, row in zip(m["verts"], w):
-            if v[1] >= ay - 1e-6 and any(n != L["role"] for n, _ in row):
-                row = [(L["role"], 1.0)]
+            if v[1] >= ay - 1e-6 and any(n != foot for n, _ in row):
+                row = [(foot, 1.0)]
             out.append(row)
         return out
 
@@ -1546,8 +1691,53 @@ class _Builder:
                 "hull": int(m["hull"]), "edges": None, "vertices": self.cv.to_world(m["verts"]).tolist(),
                 "weights": [[[n, float(x)] for n, x in row] for row in w], "sequence": None}
         self.ir["slots"] = list(slots.values())
+        if self.leg_style == "side":
+            self.ir["slots"] = self._side_draw_order(self.ir["slots"])
         self.ir["skins"] = [{"name": "default", "bones": [], "ik": [], "transform": [], "path": [], "physics": [],
                              "color": None, "attachments": atts}]
+
+    def _side_draw_order(self, slots):
+        """A side view's draw order (LEG STYLES "side"): the far side's arm
+        and leg behind the trunk (every slot on the hips and the torso), the
+        near arm in front of the torso, the near leg in front of the hips.
+        Art drawn in that order (the kit's PARTS) is left as it is; a slot
+        out of place moves just past the trunk slot it must clear, and
+        self.draw_order_moves says which."""
+        sides = {n: self.spec[n]["side"] for n in self.spec if self.spec[n].get("side")}
+        far = next((s for s in self.t["sides"] if s != self.near), None)
+        arm = ("clav_", "upperarm_", "forearm_", "hand_")
+        leg = ("thigh_", "shin_", "foot_")
+
+        def limb(bone, side, parts):
+            while bone is not None and bone not in sides:   # helpers, accessories: their limb bone
+                bone = self.bones.get(bone, {}).get("limb_parent") if bone in self.bones else None
+            return bone is not None and sides.get(bone) == side and bone.startswith(parts)
+        names = [s["name"] for s in slots]
+        bone = {s["name"]: s["bone"] for s in slots}
+        hips = self.spec.get("hips") and "hips"
+        trunk = {"hips", "torso"}
+        rules = [(lambda n: limb(bone[n], far, arm + leg), lambda: [n for n in names if bone[n] in trunk], "before",
+                  "far limb behind the trunk"),
+                 (lambda n: limb(bone[n], self.near, arm), lambda: [n for n in names if bone[n] == "torso"], "after",
+                  "near arm in front of the torso"),
+                 (lambda n: limb(bone[n], self.near, leg), lambda: [n for n in names if bone[n] == hips], "after",
+                  "near leg in front of the hips")]
+        for test, ref, where, why in rules:
+            for n in [n for n in names if test(n)]:
+                r = ref()
+                if not r:
+                    continue
+                i, k = names.index(n), (names.index(r[0]) if where == "before" else names.index(r[-1]))
+                if (where == "before" and i < k) or (where == "after" and i > k):
+                    continue
+                names.remove(n)
+                k = names.index(r[0]) if where == "before" else names.index(r[-1]) + 1
+                names.insert(k, n)
+                self.draw_order_moves.append({"slot": n, "from": i, "to": k, "why": why})
+                self.notes.append(f"slot {n}: drawn {'behind' if where == 'before' else 'in front of'} "
+                                  f"{r[0] if where == 'before' else r[-1]} ({why}, side view)")
+        by = {s["name"]: s for s in slots}
+        return [by[n] for n in names]
 
     # ---- motion carry-over
 
@@ -1703,6 +1893,11 @@ class _Builder:
                   fps=(self.src or {}).get("skeleton", {}).get("fps"))
         self.ir["template"] = self.t["name"]
         self.ir["H"] = self.jdoc.get("H") or float(hi[1] - lo[1])
+        if self.leg_style == "side":
+            # who reads it: budget.ik_scan (strides forward / back), the
+            # motion kit bridge (facing, the arms' draw order)
+            self.ir["view"] = {"kind": "side", "facing": self.facing, "near": self.near,
+                               "far": next((s for s in self.t["sides"] if s != self.near), None)}
         if self.src is not None:
             self.ir["source"] = {"format": "spinegen-layers/1", "spine": None,
                                  "warnings": [], "from": self.doc.get("source")}
@@ -1839,8 +2034,12 @@ def foot_contacts(ir, within=2.0):
     """{slot: [vertex index]}: the soles of the planted feet, i.e. the
     vertices of each slot that a leg IK target carries (its bone hangs
     from the target) lying within `within` px of that slot's lowest setup
-    vertex."""
-    targets = {leg["target"] for leg in irmod.leg_chains(ir)}
+    vertex. A shin slot that carries the foot (the motion kit's shin
+    layers draw it: no foot slot of its own) counts with its vertices that
+    are 100% foot (rigbuild._planted_sole), lowest of those."""
+    legs = irmod.leg_chains(ir)
+    targets = {leg["target"] for leg in legs}
+    shins = {leg["shin"] for leg in legs}
     feet = {b["name"] for b in ir["bones"] if b["parent"] in targets} | targets
     ev = lbs.Evaluator(ir)
     world = ev.world()
@@ -1852,6 +2051,14 @@ def foot_contacts(ir, within=2.0):
         on_foot = rows and all(any(n in feet for n, *_ in row) for row in rows)
         slot_bone = next(sl["bone"] for sl in ir["slots"] if sl["name"] == name)
         if not (on_foot or (not rows and slot_bone in feet)):
+            if not (rows and slot_bone in shins):
+                continue
+            only = np.array([all(n in feet for n, *_ in row) for row in rows])
+            if not only.any():
+                continue
+            v = ev.attachment_vertices(world, name, att)
+            low = v[only, 1].min()
+            out[name] = [int(i) for i in np.flatnonzero(only & (v[:, 1] <= low + within))]
             continue
         v = ev.attachment_vertices(world, name, att)
         out[name] = [int(i) for i in np.flatnonzero(v[:, 1] <= v[:, 1].min() + within)]
@@ -1881,7 +2088,10 @@ def planted_vertices(ir):
             {next(sl["bone"] for sl in ir["slots"] if sl["name"] == name)}
         y = max(ankle[b] for b in bones if b in ankle)
         v = ev.attachment_vertices(world, name, att)
-        out[name] = [int(i) for i in np.flatnonzero(v[:, 1] <= y + 1e-6)]
+        keep = v[:, 1] <= y + 1e-6
+        if rows and not all(any(n in ankle for n, *_ in row) for row in rows):
+            keep &= np.array([all(n in ankle for n, *_ in row) for row in rows])  # a shin carrying the foot
+        out[name] = [int(i) for i in np.flatnonzero(keep)]
     return out
 
 

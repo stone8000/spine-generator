@@ -764,11 +764,17 @@ def ik_scan(ir, images, joints, skin=None, canvas=None, shifts=IK_SHIFTS, depth_
     for dx in shifts:
         run(f"crouch dx{dx:+g}", lambda a, dx=dx: probe.pose_of("crouch", amount=a, dx=dx),
             steps(depth_step, depth_max), move="crouch", dx=dx)
+    view = ir.get("view") or {}
+    facing = view.get("facing") if view.get("kind") == "side" else None
     for leg in legs:
         for sign in (1, -1):
-            run(f"step {leg['side']}{'+' if sign > 0 else '-'}",
-                lambda a, leg=leg, sign=sign: probe.pose_of("step", leg, sign * a), steps(move_step, move_max),
-                move="step", leg=leg["name"], dir=sign)
+            # a side view (rigbuild LEG STYLES "side") strides forward and back
+            # along its facing: the same world-x move, named by the facing
+            key = (f"stride {leg['side']} {'fwd' if sign * facing > 0 else 'back'}" if facing else
+                   f"step {leg['side']}{'+' if sign > 0 else '-'}")
+            run(key, lambda a, leg=leg, sign=sign: probe.pose_of("step", leg, sign * a), steps(move_step, move_max),
+                move="step", leg=leg["name"], dir=sign,
+                **({"forward": sign * facing > 0} if facing else {}))
         run(f"lift {leg['side']}", lambda a, leg=leg: probe.pose_of("lift", leg, a), steps(move_step, move_max),
             move="lift", leg=leg["name"])
     out_j = {}
@@ -805,6 +811,7 @@ def ik_scan(ir, images, joints, skin=None, canvas=None, shifts=IK_SHIFTS, depth_
                 p.pop("values", None)
     return {"moves": moves, "joints": out_j,
             "meta": {"H": H, "legs": [l["name"] for l in legs], "slots": probe.slots,
+                     **({"view": view} if facing else {}),
                      "depth_step_H": depth_step, "move_step_H": move_step, "shifts_px": list(shifts),
                      "reach": IK_REACH, "dislocate_px": IK_DISLOCATE, "seconds": round(time.time() - t0, 2)}}
 
