@@ -15,7 +15,7 @@ description: 角色動作／Spine 動畫的預設工具。遇到角色圖層 PNG
 spine-motion character <交件資料夾>            # 加 --no-gif 只要 2 秒
 ```
 
-- 資料夾放部件 PNG（`head.png`、`torso.png`、`arm_front_upper.png`… 檔名見 `docs/生圖交付規格.md`），可附 `layers.json`（疊圖順序）、`joints.json`（手調關節）、`celebrate.params.json`（慶祝參數）；放在資料夾或上一層都會自動用。
+- 資料夾放部件 PNG（`head.png`、`torso.png`、`arm_front_upper.png`… 檔名見 `docs/生圖交付規格.md`），可附 `layers.json`（疊圖順序）、`joints.json`（手調關節）、`celebrate.params.json`（慶祝參數）、`motion.params.json`（各動作參數，例如出拳距離）、`budget.json`（每個關節撐得住的角度）；放在資料夾或上一層都會自動用。
 - 輸出在旁邊的 `<角色名>_spine/`：`<角色名>.json` + `images/`（Spine 4.3，Import Data）、`報告.md`、`預覽.gif`、`預覽.html`、`joints.json`。
 - 6 個動作：idle（彈跳待機）、idle_weave（閃身待機）、punch、hit、jump、celebrate。
 - **一定要讀 `報告.md`** 再回報：開頭有結論（可以用／需要看一下），⚠ 項目旁邊寫了怎麼修。把 `預覽.gif` 給使用者看。
@@ -24,7 +24,13 @@ spine-motion character <交件資料夾>            # 加 --no-gif 只要 2 秒
 - 關節檢查 ⚠（脖子反折、頭頂點太低、肩膀點太低）→ 改輸出的 `joints.json`（畫布像素，y 向下）後 `--joints joints.json` 重跑；或請使用者用 `studio/spine-motion-studio.html` 拖紅點。
 - 接縫 ⚠ → 是圖的問題：那個關節兩邊的圖層要補畫、要重疊，回給生圖端。
 - 慶祝手臂轉太多（偏正面、手臂下垂的角色）→ `celebrate.params.json` 寫 `{ "params": { "swing": 30 } }`。
+- 出拳太短、看不出在打拳 → `motion.params.json` 寫 `{ "punch": { "reach": 170, "lean": 9 } }`。前手畫成張開的手掌時，出拳和慶祝都不像打拳：前手改畫拳頭（可以先用後手拳頭圖放到前手腕）。
+- 出拳時後手被甩開（身體往前、後手留在原地）→ `{ "punch": { "guard": 1, "lean": 0 } }`，後手會跟著身體前移守在臉前。
+- 正面寬架式的角色，套用大盜猴那種壓低後手的 `celebrate.params.json` 會讓後手掉到肚子前 → 拿掉它，用預設的雙手高舉。
 - 流暢度 < 80 多半是腿畫太直造成 IK 頓挫；分數 ≥ 80 就算順。
+- 翻面 ⚠（手肘／膝蓋反折、部件鏡像）→ 這個動作對這張圖不適用，調參數或開補畫單；會讓結論變成「需要看一下」。
+- 超出角度預算 ⚠ → 只在有 `budget.json` 時出現；調小動作幅度或補畫。
+- 第一格離原圖 ⚠（只看待機）→ 只提醒、不影響結論，預設待機本來就從擺動途中開始。
 
 ## 2. 已經有 Spine 4.3 骨架 JSON → 配方產生動畫
 

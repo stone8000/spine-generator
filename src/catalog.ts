@@ -42,7 +42,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'punch', confidence: 3, category: 'character', name: 'punch',
     basis: '時序取自 Iron Jaw 出拳（蓄力 8 幀、出手 2 幀、停留 8 幀、收回 7 幀）；IK 防打直已驗證',
-    params: { reach: r(10, 300, 5), windup: r(0, 80, 1), lean: r(0, 15, 0.5, '°'), hair: HAIR },
+    params: { reach: r(10, 300, 5), windup: r(0, 80, 1), lean: r(0, 15, 0.5, '°'), guard: r(0, 1, 0.05), hair: HAIR },
   },
   {
     id: 'symbol-land', confidence: 3, category: 'symbol', name: 'land',
