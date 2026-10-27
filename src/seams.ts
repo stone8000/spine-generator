@@ -183,6 +183,11 @@ export const SEAM_JOINTS: { bone: string; label: string }[] = [
   { bone: 'thighB', label: '後腿根' },
   { bone: 'shinF', label: '前膝' },
   { bone: 'shinB', label: '後膝' },
+  // stand34 only (filtered out when the rig has no such bone)
+  { bone: 'footF', label: '前腳踝' },
+  { bone: 'footB', label: '後腳踝' },
+  { bone: 'tail2', label: '尾巴第二節' },
+  { bone: 'tail3', label: '尾巴第三節' },
 ];
 
 export interface SeamIssue {

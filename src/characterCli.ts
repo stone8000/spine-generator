@@ -12,6 +12,7 @@ import { parseBudget, POSE_JOINTS } from './poseChecks.ts';
 import { previewHtml } from './preview.ts';
 import type { AlphaMap } from './autorig.ts';
 import { PARTS, type Joints } from './rigTemplate.ts';
+import { STAND34_FILES, PARTS34, isStand34 } from './stand34.ts';
 
 export const CHARACTER_HELP = `  spine-motion character <圖層資料夾> [-o 輸出資料夾] [--name 名稱] [--joints 關節.json]
                          [--celebrate 參數.json] [--params 動作參數.json] [--budget 角度預算.json]
@@ -70,7 +71,7 @@ export function cmdCharacter(args: string[]): void {
 
   // ---- read the delivery
   const files = readdirSync(dir).filter((f) => /\.png$/i.test(f));
-  const known = new Set(PARTS.map((p) => p.name));
+  const known = new Set([...PARTS.map((p) => p.name), ...STAND34_FILES]);
   const alphas = new Map<string, AlphaMap>();
   const source = new Map<string, string>();
   const skipped: string[] = [];
@@ -124,8 +125,11 @@ export function cmdCharacter(args: string[]): void {
   if (skipped.length) console.log(`  略過非圖層檔：${skipped.join('、')}`);
 
   // ---- build, animate, check
-  console.log('建骨架、產生 6 個動作、檢查流暢度、接縫、翻面與關節角度…');
+  const stand34 = isStand34(alphas.keys());
+  console.log(`模板：${stand34 ? 'stand34（正面 3/4 站姿）' : '側面拳擊架式'}`);
+  console.log('建骨架、產生動作、檢查流暢度、接縫、翻面與關節角度…');
   const r = buildCharacter(alphas, { name, canvas, joints, order, params, budget });
+  const nAnims = r.summary.length;
   const rows = characterRows(r);
   mkdirSync(join(outDir, 'images'), { recursive: true });
   for (const [n, f] of source) copyFileSync(f, join(outDir, 'images', `${n}.png`));
@@ -146,7 +150,9 @@ export function cmdCharacter(args: string[]): void {
   }
 
   // ---- report
-  const missingOptional = PARTS.filter((p) => !p.required && !alphas.has(p.name)).map((p) => p.name);
+  const missingOptional = stand34
+    ? PARTS34.flatMap((p) => p.files).filter((f) => !alphas.has(f))
+    : PARTS.filter((p) => !p.required && !alphas.has(p.name)).map((p) => p.name);
   const seamFail = rows.filter((x) => x.seams.length);
   const low = rows.filter((x) => x.score < 80);
   const jointIssues = r.warnings; // checkJoints + rig warnings (layers.json names, IK fit)
@@ -155,7 +161,7 @@ export function cmdCharacter(args: string[]): void {
   const firstOff = rows.filter((x) => x.firstFrameOff);
   const ok = !seamFail.length && !low.length && !jointIssues.length && !flipFail.length && !overFail.length;
   const md: string[] = [`# ${name} · 角色動作報告`, ''];
-  md.push(ok ? `**結論：可以用。** 6 個動作流暢度都在 80 以上、沒有接縫露底、沒有手肘膝蓋反折${budget ? '、關節角度都在預算內' : ''}、關節檢查沒有問題。` : '**結論：需要看一下。** 下面標 ⚠ 的項目照建議處理後重跑同一行指令即可。', '');
+  md.push(ok ? `**結論：可以用。** ${nAnims} 個動作流暢度都在 80 以上、沒有接縫露底、沒有手肘膝蓋反折${budget ? '、關節角度都在預算內' : ''}、關節檢查沒有問題。` : '**結論：需要看一下。** 下面標 ⚠ 的項目照建議處理後重跑同一行指令即可。', '');
   md.push('## 動作', '', '| 動畫 | 長度 | 流暢度 | 接縫 | 翻面 | 第一格離原圖 | 說明 |', '|---|---|---|---|---|---|---|');
   for (const x of rows) {
     const first = x.firstFrame.degrees < 0.5 ? '✓' : `${x.firstFrameOff ? '⚠ ' : ''}${x.firstFrame.label} ${Math.round(x.firstFrame.degrees)}°`;
@@ -186,8 +192,8 @@ export function cmdCharacter(args: string[]): void {
   if (skipped.length) md.push(`- 略過的檔案：${skipped.join('、')}`);
   if (params) md.push(`- 動作參數：\`${JSON.stringify(params)}\``);
   md.push('', '## 檔案', '', '| 檔案 | 用途 |', '|---|---|');
-  md.push(`| \`${name}.json\` + \`images/\` | Spine 4.3 骨架＋6 個動畫。Spine 編輯器 Import Data 匯入，或直接給遊戲載入 |`);
-  md.push('| `預覽.gif` | 6 個動作連著播（真實圖層） |', '| `預覽.html` | 離線預覽頁（骨架線、洋蔥皮、軌跡、曲線） |', '| `joints.json` | 這次用的 19 個關節點，可以改了再用 `--joints` 重跑 |');
+  md.push(`| \`${name}.json\` + \`images/\` | Spine 4.3 骨架＋${nAnims} 個動畫。Spine 編輯器 Import Data 匯入，或直接給遊戲載入 |`);
+  md.push(`| \`預覽.gif\` | ${nAnims} 個動作照遊戲順序連著播（真實圖層） |`, '| `預覽.html` | 離線預覽頁（骨架線、洋蔥皮、軌跡、曲線） |', `| \`joints.json\` | 這次用的 ${Object.keys(r.joints).length} 個關節點，可以改了再用 \`--joints\` 重跑 |`);
   writeFileSync(join(outDir, '報告.md'), md.join('\n') + '\n', 'utf8');
 
   // ---- console summary

@@ -1,0 +1,58 @@
+{
+ "root": "root",
+ "hip": "hip",
+ "body": "hip",
+ "chest": "chest",
+ "neck": "neck",
+ "head": "head",
+ "hat": "hat",
+ "glasses": "glasses",
+ "fistFront": "ik-fist-front",
+ "fistBack": "ik-fist-back",
+ "fists": [
+  "ik-fist-front",
+  "ik-fist-back"
+ ],
+ "feet": [
+  "ik-foot-front",
+  "ik-foot-back"
+ ],
+ "shoulders": [
+  "upperArmF",
+  "upperArmB"
+ ],
+ "tail": [
+  "tail1",
+  "tail2",
+  "tail3"
+ ],
+ "coat": [
+  "coatL",
+  "coatR"
+ ],
+ "hair": [
+  "tail1",
+  "tail2",
+  "tail3",
+  "coatL",
+  "coatR"
+ ],
+ "swap:hand_l": [
+  "hand_l_hip",
+  "hand_l_point",
+  "hand_l_open"
+ ],
+ "swap:head": [
+  "head_idle",
+  "head_blink",
+  "head_spiral",
+  "head_grin",
+  "head_annoyed"
+ ],
+ "swap:hand_r": [
+  "hand_r_pinch",
+  "hand_r_open",
+  "hand_r_grip",
+  "hand_r_hatheld"
+ ]
+}
