@@ -27,6 +27,18 @@ spine-motion character 交件資料夾/
 
 輸出在旁邊的 `<角色名>_spine/`：Spine 4.3 JSON + `images/`（Import Data 即可）、`報告.md`（開頭就是結論與修法）、`預覽.gif`、`預覽.html`。選項與怎麼看報告見 **[`docs/一行做角色.md`](docs/一行做角色.md)**。
 
+**還沒生圖？** 先看 [`docs/生圖交付規格.md`](docs/生圖交付規格.md) 的「第 0 步」：先列要做的動作，再定生圖姿勢，寫進需求單。
+
+**整批或監看交件資料夾**（例如排程自動驗收美術交件、交件是 zip 或超過 2048 px）：
+
+```bash
+python -I scripts/intake_images.py prepare <交件資料夾> <工作資料夾>
+npm run intake -- <工作資料夾> [--joints joints.json] [--truth 真實關節.json]
+python -I scripts/intake_images.py render <工作資料夾>
+```
+
+結果在 `<工作資料夾>/output/`：`report.md`、`result.json`、`rig.json` + `images/`、`preview.gif`、`joints_overlay.png`。`scan` / `lock` / `mark` 子指令給排程用（記錄哪些交件處理過）。一般單次交件用上面的 `spine-motion character` 就好。
+
 **裝到本機**（全域 `spine-motion` 指令，並把使用指引裝成 Claude Code 與 Codex 的技能）：
 
 ```bash
@@ -68,7 +80,7 @@ git clone https://github.com/stone8000/spine-generator ~/tools/spine-generator
 
 先按「範例：圖層角色」看正確的結果，「範例：有問題的圖層」看接縫檢查怎麼抓出肩膀沒畫、頭在下巴切平的圖。
 
-完整的角色範例（圖層、關節、動作結果與驗證報告）在 [`examples/characters/`](examples/characters/)：[大盜猴](examples/characters/bandit-monkey/)是 AI 生圖的真實交件（含自訂疊圖順序 `layers.json`），[拳擊手](examples/characters/boxer/)是照規格畫的測試角色。
+完整的角色範例（圖層、關節、動作結果與驗證報告）在 [`examples/characters/`](examples/characters/)：[大盜猴](examples/characters/bandit-monkey/)是 AI 生圖的真實交件（含自訂疊圖順序 `layers.json`），[拳擊手](examples/characters/boxer/)是照規格畫的測試角色，[AI 拳擊手](examples/characters/ai-boxer/)是交件 → 驗收回饋 → 重出合格的完整範例。
 
 ---
 
@@ -153,7 +165,7 @@ npm run demo
 
 ## 驗證
 
-`npm test` 共 55 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
+`npm test` 共 61 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
 
 - 每個預設在測試骨架上編譯、播放、通過流暢度檢查（循環 0 錯誤 0 警告）
 - Iron Jaw 待機數值在 90° 旋轉骨架與鏡像骨架上都準確重現
@@ -169,6 +181,7 @@ npm run demo
 - 慶祝的上臂不會離開畫的姿勢太多（`swing`，預設 30°）：手臂畫成往外下垂的角色，肩膀端不會轉出軀幹
 - 交件附 `layers.json` 疊圖順序時骨架照它疊（後手拳套可以在胸前），沒列到的圖層留在模板的相對位置
 - 關節合理性檢查：模板與自動猜的關節不報；脖子反折、頭軸歪掉、頭頂點太低、肩膀點太低都會列出來
+- 受擊時雙拳、出拳時後手跟著上半身的位移和前傾走（`guard`，預設 1），手臂長度維持在 ±10 %（不會被打退時手往前伸、出拳時後手被甩開）
 - 跳躍時雙腳在下蹲與落地期間踩住地面（誤差 < 0.5），膝蓋往前彎
 - 一行做角色：交件資料夾（含 `layers.json`、手調關節）直接產生 6 個動畫，疊圖順序照交件；缺必要圖層時指出檔名；PNG 讀取涵蓋各種色彩格式與濾波
 - 接縫檢查：好的圖在各動作每一幀都不報；故意做壞的圖（肩下沒畫、頭在下巴切平）準確抓到前肩與脖子，且不誤報其他關節

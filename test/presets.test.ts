@@ -103,6 +103,26 @@ test('celebrate raises the fists along the arms: above the shoulders, elbows ben
   }
 });
 
+/** Shoulder → fist distance over the animation, relative to the first sample (1 = the arm keeps its guard). */
+function armSpan(s: ReturnType<typeof build>['s'], side: 'F' | 'B') {
+  const sh = s.bones.get(`upperArm${side}`)!, fist = s.bones.get(side === 'F' ? 'ik-fist-front' : 'ik-fist-back')!;
+  const d = sh.x.map((x, i) => Math.hypot(fist.x[i] - x, fist.y[i] - sh.y[i]));
+  return d.map((v) => v / d[0]);
+}
+
+test('hit-react: the guard is knocked back with the body, both arms keep their length within 10 %', () => {
+  const { s } = build('hit-react');
+  for (const side of ['F', 'B'] as const) {
+    const span = armSpan(s, side);
+    assert.ok(Math.max(...span) < 1.1 && Math.min(...span) > 0.9, `${side}: arm length ${(Math.min(...span) * 100).toFixed(0)}–${(Math.max(...span) * 100).toFixed(0)} %`);
+  }
+});
+
+test('punch: the rear hand rides with the lunge, the back arm keeps its length within 10 %', () => {
+  const span = armSpan(build('punch').s, 'B');
+  assert.ok(Math.max(...span) < 1.1 && Math.min(...span) > 0.9, `back arm length ${(Math.min(...span) * 100).toFixed(0)}–${(Math.max(...span) * 100).toFixed(0)} %`);
+});
+
 test('jump: crouches, peaks at the height on frame 13–14, lands at 0.8 s, settles', () => {
   const { s, summary } = build('jump', { height: 120, crouch: 25 });
   assert.deepEqual(summary.events, ['takeoff@0.18s', 'land@0.8s']);

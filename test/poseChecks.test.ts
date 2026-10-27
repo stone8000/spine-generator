@@ -48,9 +48,9 @@ test('pose checks: an elbow bent the other way and a mirrored layer are flips', 
 });
 
 test('pose checks: budget.json by bone or label, hard limit of the research form, overruns listed', () => {
-  const b = parseBudget({ joints: { foreArmF: { '+': 40, '-': { soft: 20, hard: 30 } }, 後肩: { '+': 10 } } });
+  const b = parseBudget({ joints: { foreArmF: { '+': 40, '-': { soft: 20, hard: 30 } }, 後肩: { '+': 5 } } });
   assert.deepEqual(b.foreArmF, { plus: 40, minus: 30 });
-  assert.deepEqual(b.upperArmB, { plus: 10, minus: null });
+  assert.deepEqual(b.upperArmB, { plus: 5, minus: null });
   assert.throws(() => parseBudget({ elbow: { '+': 1 } }), /不認得/);
   const r = monkeyRig();
   const punch = poseUsage(r.json, b).find((p) => p.animation === 'punch')!;
