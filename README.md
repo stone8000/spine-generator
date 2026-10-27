@@ -46,6 +46,22 @@
 
 先按「範例：圖層角色」看正確的結果，「範例：有問題的圖層」看接縫檢查怎麼抓出肩膀沒畫、頭在下巴切平的圖。
 
+不開瀏覽器、整批處理交件時，用命令列跑同一套流程（需要 Python 與 Pillow）：
+
+```bash
+python -I scripts/intake_images.py prepare <交件資料夾> <工作資料夾>
+```
+
+```bash
+node scripts/intake.ts <工作資料夾>
+```
+
+```bash
+python -I scripts/intake_images.py render <工作資料夾>
+```
+
+結果在 `<工作資料夾>/output/`：`report.md`、`result.json`、`preview.gif`、`joints_overlay.png`、可匯入 Spine 4.3 的 `rig.json` 與 `images/`。關節要手動修正時，把 `output/joints.json` 複製一份改座標，用 `--joints <檔案>` 重跑第二步。
+
 ---
 
 ## 安裝（命令列工具）
@@ -128,7 +144,7 @@ npm run demo
 
 ## 驗證
 
-`npm test` 共 45 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
+`npm test` 共 47 個測試，全部用真正的 Spine 4.3.13 runtime 播放後量測：
 
 - 每個預設在測試骨架上編譯、播放、通過流暢度檢查（循環 0 錯誤 0 警告）
 - Iron Jaw 待機數值在 90° 旋轉骨架與鏡像骨架上都準確重現
@@ -141,6 +157,7 @@ npm run demo
 - 腿畫得幾乎打直時，所有角色動作都不會讓膝蓋打直頓挫（腿部 IK 柔化並補償目標位置）
 - 出拳時身體往前衝，手臂仍伸到 90–96 %（IK 目標在身體之後求解，防打直量的是移動後的肩膀）
 - 慶祝的雙拳沿手臂方向舉到肩膀上方，手肘保持彎曲
+- 受擊時雙拳、出拳時後手跟著上半身走，手臂長度維持在 ±10 %（不會被打退時手往前伸）
 - 接縫檢查：好的圖在各動作每一幀都不報；故意做壞的圖（肩下沒畫、頭在下巴切平）準確抓到前肩與脖子，且不誤報其他關節
 
 ## 授權提醒

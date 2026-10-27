@@ -1,0 +1,31 @@
+{
+ "canvas": {
+  "width": 1024,
+  "height": 1536
+ },
+ "layers": [
+  "arm_back_lower",
+  "arm_back_upper",
+  "arm_front_lower",
+  "arm_front_upper",
+  "fist_back",
+  "fist_front",
+  "hair_back",
+  "hair_front",
+  "head",
+  "leg_back_lower",
+  "leg_back_upper",
+  "leg_front_lower",
+  "leg_front_upper",
+  "neck",
+  "pelvis",
+  "torso"
+ ],
+ "rejected": [],
+ "source": "D:\\golang\\AI 運用\\IronJaw動態拆解\\美術交件\\AI生圖交付_v1",
+ "deliveredCanvas": {
+  "width": 1024,
+  "height": 1536
+ },
+ "scale": 1.0
+}

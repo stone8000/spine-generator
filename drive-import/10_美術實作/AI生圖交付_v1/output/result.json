@@ -1,0 +1,50 @@
+{
+ "ok": true,
+ "canvas": {
+  "width": 1024,
+  "height": 1536
+ },
+ "missingRequired": [],
+ "unknown": [],
+ "rejected": [],
+ "warnings": [],
+ "size": 2.3,
+ "animations": [
+  {
+   "name": "idle",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  },
+  {
+   "name": "idle_weave",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  },
+  {
+   "name": "punch",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  },
+  {
+   "name": "hit",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  },
+  {
+   "name": "jump",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  },
+  {
+   "name": "celebrate",
+   "score": 100,
+   "problems": [],
+   "seams": []
+  }
+ ]
+}

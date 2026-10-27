@@ -16,7 +16,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "demo": "node bin/spine-motion.js generate examples/rigs/fighter.json examples/recipes/fighter.recipe.json -o examples/out/fighter.motion.json --check --preview && node bin/spine-motion.js generate examples/rigs/symbol.json examples/recipes/symbol.recipe.json -o examples/out/symbol.motion.json --check --preview",
     "docs": "node scripts/gen-preset-docs.ts",
-    "studio": "node scripts/build-studio.ts"
+    "studio": "node scripts/build-studio.ts",
+    "intake": "node scripts/intake.ts"
   },
   "dependencies": {
     "@esotericsoftware/spine-core": "4.3.13"

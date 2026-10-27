@@ -22,6 +22,8 @@ export interface PresetContext {
   roleList(name: string): string[];
   /** Setup-pose world rotation of a bone, degrees. */
   worldRotation(bone: string): number;
+  /** Setup-pose world position of a bone. */
+  worldPosition(bone: string): { x: number; y: number };
   /** When `target` drives a 2-bone IK chain: the chain's root and the target in the setup pose (world), and its reach. */
   ikChain(target: string): { root: { x: number; y: number }; target: { x: number; y: number }; reach: number } | undefined;
 }
@@ -83,6 +85,31 @@ function hairFollow(c: PresetContext, out: PresetOutput) {
     out.physics.push(...chainPhysics(hair, 'hair', { inertia: 0.6, strength: 140, damping: 0.85 }).map((p) => ({ ...p, bake: mode === 'keys' })));
   }
 }
+/**
+ * Screen tracks that carry an IK fist with the upper body: the shoulder's displacement while the hip moves by x / y and
+ * turns by rot (screen degrees) about its setup position, `lag` seconds late. A fist target hanging off the root
+ * otherwise stays put while the body is knocked back or lunges, and the arm reaches for where it was.
+ */
+function carry(c: PresetContext, fist: string, hip: string, m: { x?: Motion1D; y?: Motion1D; rot?: Motion1D }, lag: number): ScreenTrack[] {
+  const H = c.worldPosition(hip);
+  const S = c.ikChain(fist)?.root ?? H; // no chain: just move with the hip
+  const any = (m.x ?? m.y ?? m.rot)!;
+  const at = (t: number) => {
+    const u = Math.max(0, t - lag);
+    const th = m.rot ? (m.rot.value(u) * Math.PI) / 180 : 0;
+    const rx = S.x - H.x, ry = S.y - H.y;
+    return {
+      x: (m.x?.value(u) ?? 0) + (Math.cos(th) - 1) * rx - Math.sin(th) * ry,
+      y: (m.y?.value(u) ?? 0) + Math.sin(th) * rx + (Math.cos(th) - 1) * ry,
+    };
+  };
+  const breaks = [lag, ...[m.x, m.y, m.rot].flatMap((v) => v?.breaks ?? []).map((b) => b + lag)].filter((b) => b > 0 && b < any.duration);
+  return [
+    { bone: fist, channel: 'x', motion: fn(any.duration, (t) => at(t).x, breaks) },
+    { bone: fist, channel: 'y', motion: fn(any.duration, (t) => at(t).y, breaks) },
+  ];
+}
+
 const HAIR_ROLE = { name: 'hair', required: false, list: true, desc: '頭髮／飄帶骨骼鏈，由根到尾（會跟著身體甩動）' };
 
 /** Overshoot that starts at 0 with velocity in `dir`, first peak = amount (used for hits and landings). */
@@ -283,6 +310,7 @@ export const PRESETS: PresetDef[] = [
     summary: '時序取自 Iron Jaw 右角色出拳：蓄力 0.27 s、出手 0.07 s、停留 0.27 s、收回 0.25 s；身體與頭依序跟隨。蓄力轉出手時發出 swing 事件（揮拳音效），出拳最遠點發出 impact 事件（打擊音效、震屏）。',
     roles: [
       { name: 'fist', required: true, desc: '出拳的手（建議 IK 目標骨）' },
+      { name: 'fistBack', required: false, desc: '後手拳（IK 目標骨）：護在下巴，跟著身體前衝' },
       { name: 'hip', required: false, desc: '上身根骨' },
       { name: 'head', required: false, desc: '頭' },
       HAIR_ROLE,
@@ -329,27 +357,22 @@ export const PRESETS: PresetDef[] = [
       });
       const hip = c.roleOpt('hip');
       if (hip) {
-        out.screen.push({
-          bone: hip,
-          channel: 'rotate',
-          motion: strike({
-            anticipation: { value: 0.5 * leanDeg * F, time: tA, ease: 'sineOut' },
-            action: { value: -leanDeg * F, time: tS, ease: 'quartIn' },
-            overshoot: { amount: 0.25 * leanDeg, frequency: 5, damping: 0.5 },
-            hold,
-            recover: { time: tRec },
-          }),
+        const hr = strike({
+          anticipation: { value: 0.5 * leanDeg * F, time: tA, ease: 'sineOut' },
+          action: { value: -leanDeg * F, time: tS, ease: 'quartIn' },
+          overshoot: { amount: 0.25 * leanDeg, frequency: 5, damping: 0.5 },
+          hold,
+          recover: { time: tRec },
         });
-        out.screen.push({
-          bone: hip,
-          channel: 'x',
-          motion: strike({
-            anticipation: { value: -0.08 * reach * F, time: tA, ease: 'sineOut' },
-            action: { value: 0.16 * reach * F, time: tS, ease: 'quartIn' },
-            hold,
-            recover: { time: tRec },
-          }),
+        const hx = strike({
+          anticipation: { value: -0.08 * reach * F, time: tA, ease: 'sineOut' },
+          action: { value: 0.16 * reach * F, time: tS, ease: 'quartIn' },
+          hold,
+          recover: { time: tRec },
         });
+        out.screen.push({ bone: hip, channel: 'rotate', motion: hr }, { bone: hip, channel: 'x', motion: hx });
+        const back = c.roleOpt('fistBack');
+        if (back && back !== fist) out.screen.push(...carry(c, back, hip, { x: hx, rot: hr }, 0)); // the 2-frame strike leaves no room for lag
       }
       const head = c.roleOpt('head');
       if (head) {
@@ -378,6 +401,7 @@ export const PRESETS: PresetDef[] = [
     roles: [
       { name: 'hip', required: true, desc: '上身根骨' },
       { name: 'head', required: false, desc: '頭' },
+      { name: 'fists', required: false, list: true, desc: '雙手 IK 目標骨：跟著身體一起被打退（不指定的話手會留在原地、像往前伸）' },
       HAIR_ROLE,
     ],
     params: [
@@ -394,9 +418,12 @@ export const PRESETS: PresetDef[] = [
       const out = empty(D, false);
       const hip = c.role('hip');
       const knock = (t: number, rise: number, f: number, z: number) => (t < rise ? EASES.expoOut(t / rise) : springDecay(t - rise, f, z));
-      out.screen.push({ bone: hip, channel: 'x', motion: fn(D, (t) => -F * force * knock(t, 0.08, 2.5, 0.45), [0.08]) });
-      out.screen.push({ bone: hip, channel: 'rotate', motion: fn(D, (t) => F * 0.3 * tilt * knock(t, 0.08, 2.5, 0.45), [0.08]) });
-      out.screen.push({ bone: hip, channel: 'y', motion: padTo(shake({ amplitude: 0.12 * force, frequency: 16, duration: 0.4, envelope: 'decay', seed: 3 }), D) });
+      const hx = fn(D, (t) => -F * force * knock(t, 0.08, 2.5, 0.45), [0.08]);
+      const hr = fn(D, (t) => F * 0.3 * tilt * knock(t, 0.08, 2.5, 0.45), [0.08]);
+      const hy = padTo(shake({ amplitude: 0.12 * force, frequency: 16, duration: 0.4, envelope: 'decay', seed: 3 }), D);
+      out.screen.push({ bone: hip, channel: 'x', motion: hx }, { bone: hip, channel: 'rotate', motion: hr }, { bone: hip, channel: 'y', motion: hy });
+      // the guard goes back with the body (locked to it: the knock-back is 0.08 s, a one-frame lag would fling the arms)
+      for (const f of c.roleList('fists')) out.screen.push(...carry(c, f, hip, { x: hx, y: hy, rot: hr }, 0));
       const head = c.roleOpt('head');
       if (head) {
         const lag = 2 / 30;
