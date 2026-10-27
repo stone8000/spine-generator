@@ -116,3 +116,25 @@ test('character: a delivery missing a required layer is refused with the file na
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('bandit monkey is the reference character: the delivery folder rebuilds monkey.json exactly (Stone, 2026-10-27)', () => {
+  // 「說到大盜猴就是要達到這一模一樣的效果」: layers + layers.json + joints_manual.json + celebrate.params.json +
+  // motion.params.json must give back the approved skeleton and all six animations to the last digit. If a kit change
+  // breaks this, the change moved the monkey: ask Stone before touching monkey.json or these params.
+  const dir = mkdtempSync(join(tmpdir(), 'smk-golden-'));
+  try {
+    const src = join(root, 'examples', 'characters', 'bandit-monkey');
+    const monkey = join(dir, 'monkey');
+    cpSync(join(src, 'layers'), join(monkey, 'layers'), { recursive: true });
+    for (const f of ['joints_manual.json', 'celebrate.params.json', 'motion.params.json']) cpSync(join(src, f), join(monkey, f));
+    const r = run('character', join(monkey, 'layers'), '--no-gif');
+    assert.equal(r.status, 0, r.stderr);
+    const got = JSON.parse(readFileSync(join(monkey, 'monkey_spine', 'monkey.json'), 'utf8'));
+    const want = JSON.parse(readFileSync(join(src, 'monkey.json'), 'utf8'));
+    for (const k of ['bones', 'slots', 'constraints', 'skins']) assert.deepEqual(got[k], want[k], k);
+    assert.deepEqual(Object.keys(got.animations), Object.keys(want.animations));
+    for (const a of Object.keys(want.animations)) assert.deepEqual(got.animations[a], want.animations[a], `animation ${a} moved`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

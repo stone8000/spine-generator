@@ -16,6 +16,10 @@ description: 角色動作／Spine 動畫的預設製程。開新角色（先定�
 - 已整合遊戲須在桌機與直式手機實際試玩，包含 MG／FG、角色反應、轉場與 feature cut-in，檢查破口、殘影、裁切與接縫；保留實際截圖、動作預覽及新舊對照。
 - 交件前核對來源層、實際合成 full、Spine images、runtime 裁圖與座標、烘焙動作、預覽及 upload 包皆為同一最終版本。母圖若與合成有差異須如實留對照，不得冒稱零差異；不得拿舊預覽證明新版正常。
 
+## 大盜猴是樣板角色（Stone，2026-10-27）
+
+說到「大盜猴」，就是要做到 `examples/characters/bandit-monkey/` 一模一樣的效果：標準成品是那裡的 `monkey.json`。要大盜猴的動作時直接用它，或用 `spine-motion character examples/characters/bandit-monkey/layers` 重跑（會自動帶上 `layers.json`、`joints_manual.json`、`celebrate.params.json`、`motion.params.json`），結果必須和 `monkey.json` 逐字相同。不要為了配合工具改動去改這些檔案；`npm test` 的大盜猴樣板測試失敗時，先問 Stone。新角色要「像大盜猴那樣」時，以它的需求單、交件和參數當起點。
+
 角色動作、Spine 動畫的需求，**預設用這套工具做**，不要從零手寫 Spine JSON 或自己算骨架。工具在 GitHub `stone8000/spine-generator`（本機通常在 `~/tools/spine-generator`，裝好後有全域指令 `spine-motion`）。Node 22.18 以上；GIF 需要 Python 3 + Pillow。
 
 找不到 `spine-motion` 指令時：到 repo 根目錄用 `node bin/spine-motion.js …`；本機沒有 repo 就 `git clone https://github.com/stone8000/spine-generator && cd spine-generator && npm ci`。
