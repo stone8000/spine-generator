@@ -1,6 +1,6 @@
 ---
 name: spine-character
-description: 角色動作／Spine 動畫的預設工具。遇到角色圖層 PNG 要套動作、做 Spine 4.3 骨架或動畫、檢查動畫流暢度或破圖、寫生圖拆層需求時，優先用 spine-motion-kit（spine-motion 指令）。
+description: 角色動作／Spine 動畫的預設製程。開新角色（先定動作再定生圖姿勢）、寫生圖拆層需求、角色圖層 PNG 套動作、做 Spine 4.3 骨架或動畫、驗收交件、檢查流暢度或破圖時，優先用 spine-motion-kit（spine-motion 指令）。
 ---
 
 # 角色動作：先用 spine-motion-kit
