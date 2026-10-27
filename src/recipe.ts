@@ -176,6 +176,10 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
       roleOpt: (n) => roleList(n)[0],
       roleList,
       worldRotation: (b) => frames.get(boneExists(b))!.worldRotation,
+      worldPosition: (b) => {
+        const f = frames.get(boneExists(b))!;
+        return { x: f.worldX, y: f.worldY };
+      },
       ikChain: (t) => {
         const k = (json.constraints ?? []).find((c: SpineJson) => c.type === 'ik' && c.target === t && c.bones?.length === 2);
         if (!k) return undefined;

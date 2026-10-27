@@ -70,7 +70,7 @@ export const CATALOG: CatalogEntry[] = [
   {
     id: 'hit-react', confidence: 2, category: 'character', name: 'hit',
     basis: '動畫常規：瞬間後退、彈簧回位，頭晚 2 幀甩得更大',
-    params: { force: r(5, 120, 1), tilt: r(0, 30, 0.5, '°'), duration: r(0.5, 1.5, 0.05, 's'), hair: HAIR },
+    params: { force: r(5, 120, 1), tilt: r(0, 30, 0.5, '°'), duration: r(0.5, 1.5, 0.05, 's'), guard: r(0, 1, 0.05), hair: HAIR },
   },
   {
     id: 'symbol-win', confidence: 2, category: 'symbol', name: 'win',

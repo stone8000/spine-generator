@@ -22,6 +22,8 @@ export interface PresetContext {
   roleList(name: string): string[];
   /** Setup-pose world rotation of a bone, degrees. */
   worldRotation(bone: string): number;
+  /** Setup-pose world position of a bone. */
+  worldPosition(bone: string): { x: number; y: number };
   /** When `target` drives a 2-bone IK chain: the chain's root and the target in the setup pose (world), and its reach. */
   ikChain(target: string): { root: { x: number; y: number }; mid: { x: number; y: number }; target: { x: number; y: number }; lengths: [number, number]; reach: number } | undefined;
 }
@@ -83,6 +85,32 @@ function hairFollow(c: PresetContext, out: PresetOutput) {
     out.physics.push(...chainPhysics(hair, 'hair', { inertia: 0.6, strength: 140, damping: 0.85 }).map((p) => ({ ...p, bake: mode === 'keys' })));
   }
 }
+/**
+ * Screen tracks that carry an IK fist with the upper body: the shoulder's displacement while the hip moves by x / y and
+ * turns by rot (screen degrees) about its setup position, `lag` seconds late, times k (1 = rides with the body, 0 = stays
+ * put). A fist target hanging off the root otherwise stays put while the body is knocked back or lunges, and the arm
+ * reaches for where it was.
+ */
+function carry(c: PresetContext, fist: string, hip: string, m: { x?: Motion1D; y?: Motion1D; rot?: Motion1D }, lag: number, k = 1): ScreenTrack[] {
+  const H = c.worldPosition(hip);
+  const S = c.ikChain(fist)?.root ?? H; // no chain: just move with the hip
+  const any = (m.x ?? m.y ?? m.rot)!;
+  const at = (t: number) => {
+    const u = Math.max(0, t - lag);
+    const th = m.rot ? (m.rot.value(u) * Math.PI) / 180 : 0;
+    const rx = S.x - H.x, ry = S.y - H.y;
+    return {
+      x: k * ((m.x?.value(u) ?? 0) + (Math.cos(th) - 1) * rx - Math.sin(th) * ry),
+      y: k * ((m.y?.value(u) ?? 0) + Math.sin(th) * rx + (Math.cos(th) - 1) * ry),
+    };
+  };
+  const breaks = [lag, ...[m.x, m.y, m.rot].flatMap((v) => v?.breaks ?? []).map((b) => b + lag)].filter((b) => b > 0 && b < any.duration);
+  return [
+    { bone: fist, channel: 'x', motion: fn(any.duration, (t) => at(t).x, breaks) },
+    { bone: fist, channel: 'y', motion: fn(any.duration, (t) => at(t).y, breaks) },
+  ];
+}
+
 const HAIR_ROLE = { name: 'hair', required: false, list: true, desc: '頭髮／飄帶骨骼鏈，由根到尾（會跟著身體甩動）' };
 
 /** Overshoot that starts at 0 with velocity in `dir`, first peak = amount (used for hits and landings). */
@@ -283,6 +311,7 @@ export const PRESETS: PresetDef[] = [
     summary: '時序取自 Iron Jaw 右角色出拳：蓄力 0.27 s、出手 0.07 s、停留 0.27 s、收回 0.25 s；身體與頭依序跟隨。蓄力轉出手時發出 swing 事件（揮拳音效），出拳最遠點發出 impact 事件（打擊音效、震屏）。',
     roles: [
       { name: 'fist', required: true, desc: '出拳的手（建議 IK 目標骨）' },
+      { name: 'fistBack', required: false, desc: '後手拳（IK 目標骨）：護在下巴，跟著身體前衝' },
       { name: 'hip', required: false, desc: '上身根骨' },
       { name: 'head', required: false, desc: '頭' },
       HAIR_ROLE,
@@ -291,7 +320,7 @@ export const PRESETS: PresetDef[] = [
       { name: 'reach', default: 130, desc: '出拳距離（單位，會乘上 size）' },
       { name: 'windup', default: 35, desc: '蓄力往後拉的距離' },
       { name: 'lean', default: 6, desc: '身體前傾角度' },
-      { name: 'guard', default: 0, desc: '另一隻手（fistBack）跟著身體前移的比例（0 = 不動，1 = 跟身體一樣）：正面寬架式、手肘外張的角色設 1，不然身體前移時那隻手會被拉直甩出去' },
+      { name: 'guard', default: 1, desc: '後手（fistBack）跟著身體前衝、前傾的比例（1 = 守在臉前跟身體一起走，0 = 留在原地）：設 0 時身體前移會把後手拉直甩出去' },
       HAIR_PARAM,
     ],
     build(c) {
@@ -330,42 +359,24 @@ export const PRESETS: PresetDef[] = [
       });
       const hip = c.roleOpt('hip');
       if (hip) {
-        out.screen.push({
-          bone: hip,
-          channel: 'rotate',
-          motion: strike({
-            anticipation: { value: 0.5 * leanDeg * F, time: tA, ease: 'sineOut' },
-            action: { value: -leanDeg * F, time: tS, ease: 'quartIn' },
-            overshoot: { amount: 0.25 * leanDeg, frequency: 5, damping: 0.5 },
-            hold,
-            recover: { time: tRec },
-          }),
+        const hr = strike({
+          anticipation: { value: 0.5 * leanDeg * F, time: tA, ease: 'sineOut' },
+          action: { value: -leanDeg * F, time: tS, ease: 'quartIn' },
+          overshoot: { amount: 0.25 * leanDeg, frequency: 5, damping: 0.5 },
+          hold,
+          recover: { time: tRec },
         });
-        out.screen.push({
-          bone: hip,
-          channel: 'x',
-          motion: strike({
-            anticipation: { value: -0.08 * reach * F, time: tA, ease: 'sineOut' },
-            action: { value: 0.16 * reach * F, time: tS, ease: 'quartIn' },
-            hold,
-            recover: { time: tRec },
-          }),
+        const hx = strike({
+          anticipation: { value: -0.08 * reach * F, time: tA, ease: 'sineOut' },
+          action: { value: 0.16 * reach * F, time: tS, ease: 'quartIn' },
+          hold,
+          recover: { time: tRec },
         });
-        // the guard hand is an IK target on the root: without this it stays put while the body moves and its arm stretches
-        const guard = c.param('guard', 0);
+        out.screen.push({ bone: hip, channel: 'rotate', motion: hr }, { bone: hip, channel: 'x', motion: hx });
+        // the guard hand is an IK target on the root: without this it stays put while the body lunges and its arm stretches
+        const guard = c.param('guard', 1);
         const fb = c.roleOpt('fistBack');
-        if (guard && fb && fb !== fist) {
-          out.screen.push({
-            bone: fb,
-            channel: 'x',
-            motion: strike({
-              anticipation: { value: -0.08 * reach * F * guard, time: tA, ease: 'sineOut' },
-              action: { value: 0.16 * reach * F * guard, time: tS, ease: 'quartIn' },
-              hold,
-              recover: { time: tRec },
-            }),
-          });
-        }
+        if (guard && fb && fb !== fist) out.screen.push(...carry(c, fb, hip, { x: hx, rot: hr }, 0, guard)); // the 2-frame strike leaves no room for lag
       }
       const head = c.roleOpt('head');
       if (head) {
@@ -394,12 +405,14 @@ export const PRESETS: PresetDef[] = [
     roles: [
       { name: 'hip', required: true, desc: '上身根骨' },
       { name: 'head', required: false, desc: '頭' },
+      { name: 'fists', required: false, list: true, desc: '雙手 IK 目標骨：跟著身體一起被打退（不指定的話手會留在原地、像往前伸）' },
       HAIR_ROLE,
     ],
     params: [
       { name: 'force', default: 40, desc: '後退距離' },
       { name: 'tilt', default: 14, desc: '頭後仰角度' },
       { name: 'duration', default: 0.9, desc: '總長（秒）' },
+      { name: 'guard', default: 1, desc: '雙手（fists）跟著身體被打退的比例（1 = 一起退，0 = 留在原地，看起來像往前伸）' },
       HAIR_PARAM,
     ],
     build(c) {
@@ -410,9 +423,13 @@ export const PRESETS: PresetDef[] = [
       const out = empty(D, false);
       const hip = c.role('hip');
       const knock = (t: number, rise: number, f: number, z: number) => (t < rise ? EASES.expoOut(t / rise) : springDecay(t - rise, f, z));
-      out.screen.push({ bone: hip, channel: 'x', motion: fn(D, (t) => -F * force * knock(t, 0.08, 2.5, 0.45), [0.08]) });
-      out.screen.push({ bone: hip, channel: 'rotate', motion: fn(D, (t) => F * 0.3 * tilt * knock(t, 0.08, 2.5, 0.45), [0.08]) });
-      out.screen.push({ bone: hip, channel: 'y', motion: padTo(shake({ amplitude: 0.12 * force, frequency: 16, duration: 0.4, envelope: 'decay', seed: 3 }), D) });
+      const hx = fn(D, (t) => -F * force * knock(t, 0.08, 2.5, 0.45), [0.08]);
+      const hr = fn(D, (t) => F * 0.3 * tilt * knock(t, 0.08, 2.5, 0.45), [0.08]);
+      const hy = padTo(shake({ amplitude: 0.12 * force, frequency: 16, duration: 0.4, envelope: 'decay', seed: 3 }), D);
+      out.screen.push({ bone: hip, channel: 'x', motion: hx }, { bone: hip, channel: 'rotate', motion: hr }, { bone: hip, channel: 'y', motion: hy });
+      // the guard goes back with the body (locked to it: the knock-back is 0.08 s, a one-frame lag would fling the arms)
+      const guard = c.param('guard', 1);
+      if (guard) for (const f of c.roleList('fists')) out.screen.push(...carry(c, f, hip, { x: hx, y: hy, rot: hr }, 0, guard));
       const head = c.roleOpt('head');
       if (head) {
         const lag = 2 / 30;
