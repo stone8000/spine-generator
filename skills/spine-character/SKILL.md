@@ -86,7 +86,7 @@ spine-motion preview 動畫.json                 # 離線預覽頁
 
 ## 4. 還沒有圖 → 先寫生圖需求
 
-先做第 0 步（定動作 → 定姿勢）。然後照 `docs/生圖交付規格.md`：面向右的拳擊架式、1024×1536 透明 PNG、拆成固定檔名的圖層、被遮住的地方要補畫、關節兩邊要重疊。參考圖 `docs/pose-reference.png`。範例需求單：`examples/characters/bandit-monkey/需求單.md`。
+先做第 0 步（定動作 → 定姿勢）。然後照 `docs/生圖交付規格.md`：面向右的拳擊架式、1024×1536 透明 PNG、拆成固定檔名的圖層、被遮住的地方要補畫、關節兩邊要重疊。參考圖 `docs/pose-reference.png`。需求單從 `docs/需求單範本.md` 開始填（已含拳套在頭前面、大圖騰有框兩條固定規則）；完整例子：`examples/characters/bandit-monkey/需求單.md`。
 
 ## 5. 遊戲整合與重拆的版本一致性
 
