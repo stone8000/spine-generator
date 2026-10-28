@@ -328,7 +328,7 @@ function buildFromRig() {
   rig.jointIssues = undefined;
   const names = [...rig.layers.keys()];
   const result = buildRig(rig.joints, names, rig.base, rig.canvas, { order: rig.order, alphas });
-  const notes = [...result.warnings];
+  const notes = [...result.warnings, ...result.orderIssues];
   if (result.missing.length) notes.unshift(`缺少 ${result.missing.join('、')}`);
   loadSkeleton(result.json, `${rig.base}.json`, { roles: result.roles, size: estimateSize(result.json), art: rig.layers, notes });
   if (notes.length) toast(notes[0]);
