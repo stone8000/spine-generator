@@ -273,6 +273,8 @@ export interface RigResult {
   layers: string[];
   missing: string[];
   warnings: string[];
+  /** Draw-order rule breaks (checkDrawOrder), e.g. a glove behind the head. */
+  orderIssues: string[];
 }
 
 /**
@@ -312,6 +314,22 @@ export function checkJoints(j: Joints, alphas?: Map<string, AlphaMap>): string[]
     if (j[id].y - j.neckBase.y > 0.35 * torso) out.push(`${label}點比脖子底低了 ${Math.round(j[id].y - j.neckBase.y)} px，手臂會從胸口長出來：把它拖到肩膀頂端`);
   }
   return out;
+}
+
+/** Layers held in the hands: gloves, fists and props (weapon_*, prop_*). */
+export const isHandLayer = (n: string) => /^(fist|glove|prop|weapon)_/.test(n);
+
+/**
+ * Draw-order rule (Stone, 2026-10-28, every character and game): gloves and other hand props are never drawn behind
+ * the head. The celebrate pump and the guard pass the fists past the face, and a glove behind the head disappears.
+ * `names` is the final slot order, back → front.
+ */
+export function checkDrawOrder(names: string[]): string[] {
+  const head = names.indexOf('head');
+  if (head < 0) return [];
+  return names
+    .filter((n, i) => i < head && isHandLayer(n))
+    .map((n) => `${n} 疊在頭後面：拳套和手上的道具一律要疊在頭前面，不然手舉過臉時會被頭蓋住。在 layers.json 把 ${n}.png 移到 head.png 後面`);
 }
 
 export function buildRig(joints: Joints, layerNames: string[], name = 'character', canvas: CanvasSize = CANVAS, opts: RigOptions = {}): RigResult {
@@ -431,7 +449,8 @@ export function buildRig(joints: Joints, layerNames: string[], name = 'character
     roles.hair = ['hairF'];
     roles.chain = ['hairF'];
   }
-  return { json, roles, layers: used.map((u) => u.name), missing, warnings };
+  const layers = used.map((u) => u.name);
+  return { json, roles, layers, missing, warnings, orderIssues: checkDrawOrder(layers) };
 }
 
 /** Target distance at which a 2-bone IK with this softness reaches `d` (inverts spine-core's softness curve). */

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
-import { buildRig, checkJoints, guessJoints } from '../src/autorig.ts';
+import { buildRig, checkDrawOrder, checkJoints, guessJoints } from '../src/autorig.ts';
 import { defaultJoints, JOINTS, toSpine } from '../src/rigTemplate.ts';
 import { compileRecipe } from '../src/recipe.ts';
 import { checkSeams } from '../src/seams.ts';
@@ -137,7 +137,7 @@ test('a delivery draw order (layers.json) reorders the slots; unlisted layers ke
   const layers = synthLayers('good');
   const names = [...layers.keys()];
   const plain = buildRig(defaultJoints(), names).json.slots.map((x: { name: string }) => x.name);
-  assert.ok(plain.indexOf('torso') > plain.indexOf('fist_back'), 'template: the chest covers the rear glove');
+  assert.ok(plain.indexOf('fist_back') > plain.indexOf('head'), 'template: the rear glove is drawn in front of the head');
   // the bandit monkey's order: rear forearm and glove in front of the chest, pelvis in front of the legs
   const order = ['arm_back_upper', 'leg_back_upper', 'leg_back_lower', 'leg_front_upper', 'leg_front_lower', 'pelvis', 'neck', 'torso', 'arm_back_lower', 'fist_back', 'head', 'arm_front_upper', 'arm_front_lower', 'fist_front'];
   const { json, warnings } = buildRig(defaultJoints(), names, 'c', undefined, { order });
@@ -148,6 +148,22 @@ test('a delivery draw order (layers.json) reorders the slots; unlisted layers ke
   if (names.includes('hair_front')) assert.equal(got[got.indexOf('head') + 1], 'hair_front', 'unlisted hair_front stays right after the head');
   assert.deepEqual(warnings, []);
   assert.equal(got.length, plain.length);
+});
+
+test('draw-order rule: gloves and hand props in front of the head (Stone, 2026-10-28)', () => {
+  const names = [...synthLayers('good').keys()];
+  const plain = buildRig(defaultJoints(), names);
+  assert.deepEqual(plain.orderIssues, [], 'the template order follows the rule');
+  // the bandit monkey's order tucks the rear glove behind the head
+  const order = ['arm_back_upper', 'leg_back_upper', 'leg_back_lower', 'leg_front_upper', 'leg_front_lower', 'pelvis', 'neck', 'torso', 'arm_back_lower', 'fist_back', 'head', 'arm_front_upper', 'arm_front_lower', 'fist_front'];
+  const behind = buildRig(defaultJoints(), names, 'c', undefined, { order });
+  assert.equal(behind.orderIssues.length, 1);
+  assert.match(behind.orderIssues[0], /fist_back 疊在頭後面/);
+  assert.deepEqual(behind.warnings, [], 'kept apart from the joint warnings');
+  const prop = checkDrawOrder(['weapon_sword', 'torso', 'head', 'fist_back']);
+  assert.equal(prop.length, 1, 'only the prop behind the head');
+  assert.match(prop[0], /^weapon_sword /);
+  assert.deepEqual(checkDrawOrder(['torso', 'fist_back']), [], 'no head layer, nothing to compare');
 });
 
 test('joint sanity check: the template passes; a folded neck, a sideways head and a dropped shoulder are reported', () => {

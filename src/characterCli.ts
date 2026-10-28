@@ -153,9 +153,10 @@ export function cmdCharacter(args: string[]): void {
   const flipFail = rows.filter((x) => x.flips.length);
   const overFail = rows.filter((x) => x.over.length);
   const firstOff = rows.filter((x) => x.firstFrameOff);
-  const ok = !seamFail.length && !low.length && !jointIssues.length && !flipFail.length && !overFail.length;
+  const orderIssues = r.orderIssues; // gloves / hand props behind the head (Stone, 2026-10-28)
+  const ok = !seamFail.length && !low.length && !jointIssues.length && !flipFail.length && !overFail.length && !orderIssues.length;
   const md: string[] = [`# ${name} · 角色動作報告`, ''];
-  md.push(ok ? `**結論：可以用。** 6 個動作流暢度都在 80 以上、沒有接縫露底、沒有手肘膝蓋反折${budget ? '、關節角度都在預算內' : ''}、關節檢查沒有問題。` : '**結論：需要看一下。** 下面標 ⚠ 的項目照建議處理後重跑同一行指令即可。', '');
+  md.push(ok ? `**結論：可以用。** 6 個動作流暢度都在 80 以上、沒有接縫露底、沒有手肘膝蓋反折${budget ? '、關節角度都在預算內' : ''}、關節檢查沒有問題、拳套疊在頭前面。` : '**結論：需要看一下。** 下面標 ⚠ 的項目照建議處理後重跑同一行指令即可。', '');
   md.push('## 動作', '', '| 動畫 | 長度 | 流暢度 | 接縫 | 翻面 | 第一格離原圖 | 說明 |', '|---|---|---|---|---|---|---|');
   for (const x of rows) {
     const first = x.firstFrame.degrees < 0.5 ? '✓' : `${x.firstFrameOff ? '⚠ ' : ''}${x.firstFrame.label} ${Math.round(x.firstFrame.degrees)}°`;
@@ -182,6 +183,7 @@ export function cmdCharacter(args: string[]): void {
   if (jointIssues.length) md.push(...jointIssues.map((s) => `- ⚠ ${s}`), '', '修法：用瀏覽器開 `studio/spine-motion-studio.html` →「從圖層建立角色」選這些 PNG，把紅點拖到對的位置；或直接改 `joints.json` 的座標（圖片像素，y 向下），再用 `--joints joints.json` 重跑。', '');
   else md.push('- ✓ 關節與骨架檢查沒有問題', '');
   md.push('## 圖層', '', `- ${alphas.size} 層，畫布 ${canvas.width}×${canvas.height}`, `- 疊圖順序：${orderFile ? '照 `layers.json`' : '模板預設（交件附 `layers.json` 就會照它疊）'}`);
+  md.push(...(orderIssues.length ? orderIssues.map((s) => `- ⚠ ${s}`) : ['- ✓ 拳套和手上的道具都疊在頭前面']));
   if (missingOptional.length) md.push(`- 沒有的選用圖層：${missingOptional.join('、')}`);
   if (skipped.length) md.push(`- 略過的檔案：${skipped.join('、')}`);
   if (params) md.push(`- 動作參數：\`${JSON.stringify(params)}\``);
@@ -196,7 +198,7 @@ export function cmdCharacter(args: string[]): void {
     const extra = [...x.flips.map((f) => `翻面 ⚠ ${f}`), ...x.over.map((o) => `超預算 ⚠ ${o}`), ...(x.firstFrameOff ? [`第一格離原圖 ${x.firstFrame.label} ${Math.round(x.firstFrame.degrees)}°`] : [])];
     console.log(`  ${x.name.padEnd(11)} 流暢度 ${String(x.score).padStart(3)}${x.score < 80 ? ' ⚠' : '  '}  接縫 ${x.seams.length ? '⚠ ' + x.seams.join('、') : '✓'}  翻面 ${x.flips.length ? '⚠' : '✓'}${extra.length ? '  ' + extra.join('；') : ''}`);
   }
-  for (const s of jointIssues) console.log(`  ⚠ ${s}`);
+  for (const s of [...jointIssues, ...orderIssues]) console.log(`  ⚠ ${s}`);
   console.log('');
   console.log(ok ? '結論：可以用。' : '結論：需要看一下，詳見報告。');
   console.log(`輸出：${show(outDir)}/`);

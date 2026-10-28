@@ -66,7 +66,6 @@ export const PARTS: PartDef[] = [
   { name: 'hair_back', label: '後髮', bone: 'head', required: false, hidden: '被頭擋住的部分整片畫完' },
   { name: 'arm_back_upper', label: '後手上臂', bone: 'upperArmB', required: true, hidden: '肩膀端多畫進軀幹裡、手肘端畫成圓頭' },
   { name: 'arm_back_lower', label: '後手前臂', bone: 'foreArmB', required: true, hidden: '手肘端畫成圓頭，與上臂重疊' },
-  { name: 'fist_back', label: '後手拳頭', bone: 'handB', required: true, hidden: '手腕端多畫一段，與前臂重疊' },
   { name: 'leg_back_upper', label: '後腿大腿', bone: 'thighB', required: true, hidden: '腿根多畫進骨盆裡、膝蓋畫成圓頭' },
   { name: 'leg_back_lower', label: '後腿小腿（含腳）', bone: 'shinB', required: true, hidden: '膝蓋端畫成圓頭，與大腿重疊' },
   { name: 'pelvis', label: '骨盆／褲頭', bone: 'hip', required: true, hidden: '上緣多畫進軀幹裡，兩側腿根處畫滿' },
@@ -77,6 +76,8 @@ export const PARTS: PartDef[] = [
   { name: 'torso', label: '軀幹（胸、腹）', bone: 'chest', required: true, hidden: '兩肩下方、被手臂擋住的胸口與腋下都要畫完' },
   { name: 'head', label: '頭（臉）', bone: 'head', required: true, hidden: '有脖子圖層：下巴下方多畫一點；沒有脖子圖層：多畫一段脖子伸進軀幹' },
   { name: 'hair_front', label: '前髮（一撮）', bone: 'hairF', required: false, hidden: '髮根多畫進頭裡' },
+  // gloves and other hand props stay in front of the head, so a fist raised past the face never vanishes behind it (Stone, 2026-10-28)
+  { name: 'fist_back', label: '後手拳頭', bone: 'handB', required: true, hidden: '手腕端多畫一段，與前臂重疊' },
   { name: 'arm_front_upper', label: '前手上臂', bone: 'upperArmF', required: true, hidden: '肩膀端多畫進軀幹裡、手肘端畫成圓頭' },
   { name: 'arm_front_lower', label: '前手前臂', bone: 'foreArmF', required: true, hidden: '手肘端畫成圓頭，與上臂重疊' },
   { name: 'fist_front', label: '前手拳頭', bone: 'handF', required: true, hidden: '手腕端多畫一段，與前臂重疊' },

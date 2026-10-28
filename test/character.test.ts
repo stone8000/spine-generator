@@ -98,6 +98,7 @@ test('character: one command from a layers folder to a Spine json, report and pr
     assert.ok(slots.indexOf('fist_back') > slots.indexOf('torso'));
     const report = readFileSync(join(out, '報告.md'), 'utf8');
     assert.match(report, /\| punch \| [\d.]+ s \| 100 \| ✓ \|/);
+    assert.match(report, /⚠ fist_back 疊在頭後面/, 'the glove-behind-head rule is reported'); // this order predates the rule
     assert.ok(!existsSync(join(out, 'frames.json')));
   } finally {
     rmSync(dir, { recursive: true, force: true });

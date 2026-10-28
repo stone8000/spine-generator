@@ -4,7 +4,7 @@
  * transforms for a preview GIF. Pure computation: the `character` command and scripts/trial/render_frames.ts share it.
  */
 import { Skeleton, AnimationState, AnimationStateData, Physics } from '@esotericsoftware/spine-core';
-import { guessJoints, buildRig, type AlphaMap } from './autorig.ts';
+import { guessJoints, buildRig, checkDrawOrder, type AlphaMap } from './autorig.ts';
 import { compileRecipe, type CompileResult, type RecipeAnimation } from './recipe.ts';
 import { checkSkeleton, type AnimationReport } from './check.ts';
 import { checkSeams, type SeamReport } from './seams.ts';
@@ -56,6 +56,8 @@ export interface CharacterResult {
   guessed: boolean;
   missing: string[];
   warnings: string[];
+  /** Draw-order rule breaks: gloves / hand props behind the head. */
+  orderIssues: string[];
   size: number;
   summary: CompileResult['summary'];
   checks: AnimationReport[];
@@ -78,6 +80,7 @@ export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOpt
     const rank = (n: string) => (order.indexOf(n) < 0 ? 1e9 : order.indexOf(n));
     rig.json.slots.sort((a: { name: string }, b: { name: string }) => rank(a.name) - rank(b.name));
   }
+  const orderIssues = checkDrawOrder(rig.json.slots.map((x: { name: string }) => x.name));
   const size = estimateSize(rig.json);
   const animations = CHARACTER_ANIMS.map((a) => (opts.params?.[a.name] ? { ...a, params: opts.params[a.name] } : a));
   const { json, summary } = compileRecipe(rig.json, { fps: 30, facing: 1, size, roles: rig.roles, animations });
@@ -85,7 +88,7 @@ export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOpt
   const checks = checkSkeleton(json, { loops });
   const seams = checkSeams(json, alphas);
   const pose = poseUsage(json, opts.budget);
-  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, size, summary, checks, seams, pose };
+  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, orderIssues, size, summary, checks, seams, pose };
 }
 
 /** An idle whose frame 0 is further than this from the drawn pose visibly jumps when the game swaps the still art for it. */
