@@ -46,6 +46,8 @@ git clone https://github.com/stone8000/spine-generator ~/tools/spine-generator
 ~/tools/spine-generator/scripts/install-local.sh
 ```
 
+Mac 上還會裝一個自動同步排程：登入時與每小時 `git pull` main，並把 [`agents/global-rules.md`](agents/global-rules.md) 寫進 `~/.claude/CLAUDE.md` 與 `~/.codex/AGENTS.md`，任何資料夾開的 Claude Code／Codex 都讀得到。紀錄在 `~/Library/Logs/spine-motion-sync.log`；不在 main 或有未提交的改動時不會 pull。
+
 給 agent 的說明在 [`AGENTS.md`](AGENTS.md) 與 [`skills/spine-character/SKILL.md`](skills/spine-character/SKILL.md)。
 
 ---

@@ -30,4 +30,6 @@ node bin/spine-motion.js character <交件資料夾>          # 裝成全域後�
 scripts/install-local.sh
 ```
 
-`npm ci`、`npm link`（全域 `spine-motion` 指令）、把 `skills/spine-character` 裝到 `~/.claude/skills/` 與 `~/.codex/skills/`，並在 `~/.claude/CLAUDE.md` 與 `~/.codex/AGENTS.md`（全域說明，任何資料夾開的 session 都會讀）寫入同一段規則：用這個工具、大盜猴樣板、先定動作再生圖等。只會換掉 `spine-motion-kit:begin/end` 標記之間那段，其他內容保留。
+`npm ci`、`npm link`（全域 `spine-motion` 指令）、把 `skills/spine-character` 裝到 `~/.claude/skills/` 與 `~/.codex/skills/`，並把 [`agents/global-rules.md`](agents/global-rules.md) 寫進 `~/.claude/CLAUDE.md` 與 `~/.codex/AGENTS.md`（全域說明，任何資料夾開的 session 都會讀；只換 `spine-motion-kit:begin/end` 之間那段）。Mac 上另外裝 launchd 排程，登入時與每小時跑 `scripts/auto-sync.sh`：`git pull` main、必要時 `npm ci`、再更新全域說明。
+
+**要讓 Stone 電腦上所有 session 都知道的規則，寫進 `agents/global-rules.md`（或 AGENTS.md／SKILL.md）並合併到 main**；只存在專案記憶裡的規則，本機 session 看不到。

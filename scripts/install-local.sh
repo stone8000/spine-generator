@@ -3,7 +3,8 @@
 #   - npm ci + npm link → a global `spine-motion` command
 #   - skills/spine-character → ~/.claude/skills (Claude Code) and ~/.codex/skills (Codex), as links to this repo,
 #     so `git pull` updates them
-#   - a rule block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md (global instructions for every session)
+#   - the rule block agents/global-rules.md in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md (scripts/sync-rules.sh)
+#   - macOS: a launchd job that pulls main and refreshes those rules at login and every hour (scripts/auto-sync.sh)
 # Safe to run again.
 set -euo pipefail
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,38 +28,31 @@ for dir in "$HOME/.claude/skills" "$HOME/.codex/skills"; do
   echo "✓ 技能：$dir/spine-character"
 done
 
-# The same rule block goes into the global instructions of Claude Code (~/.claude/CLAUDE.md) and Codex
-# (~/.codex/AGENTS.md), so every session on this computer sees it, whatever folder it starts in.
-# Only the block between the markers is replaced; the rest of each file is kept.
-BEGIN="<!-- spine-motion-kit:begin -->"
-END="<!-- spine-motion-kit:end -->"
-write_block() {
-  local file="$1" tmp
-  mkdir -p "$(dirname "$file")"
-  touch "$file"
-  tmp="$(mktemp)"
-  # also drops an older hand-written block that used :start instead of :begin
-  awk -v b="$BEGIN" -v e="$END" '$0==b||$0=="<!-- spine-motion-kit:start -->"{skip=1} !skip{print} $0==e{skip=0}' "$file" > "$tmp"
-  cat >> "$tmp" <<MD
-$BEGIN
-## 角色動作／Spine 動畫：用 spine-motion-kit
+"$KIT/scripts/sync-rules.sh"
 
-角色動作、Spine 4.3 動畫、角色圖層套動作的需求，預設用 \`spine-motion\` 指令（repo：$KIT），不要從零手寫 Spine JSON。
-最常用：\`spine-motion character <交件資料夾>\` → 輸出 Spine 4.3 JSON、報告.md、預覽.gif。
-完整指引：$KIT/AGENTS.md、$KIT/skills/spine-character/SKILL.md
-
-- **大盜猴是樣板角色**：說到大盜猴就要和 $KIT/examples/characters/bandit-monkey/monkey.json 一模一樣（\`npm test\` 會檢查），不要改它來配合工具。
-- 開新角色製程：先列要做的動作，再定方便拆圖做動作的生圖姿勢（docs/生圖交付規格.md 第 0 步），寫進需求單後才生圖。
-- 拆圖：部件重疊處不要描邊；拳套等手部道具疊在頭前面。
-- 回覆 Stone 一律用繁體中文。
-$END
-MD
-  mv "$tmp" "$file"
-}
-write_block "$HOME/.claude/CLAUDE.md"
-echo "✓ Claude Code 全域說明：$HOME/.claude/CLAUDE.md"
-write_block "$HOME/.codex/AGENTS.md"
-echo "✓ Codex 全域說明：$HOME/.codex/AGENTS.md"
+# macOS: keep this computer in sync with main automatically (at login and every hour), see scripts/auto-sync.sh
+if [ "$(uname)" = "Darwin" ]; then
+  LABEL="spine-motion-kit.auto-sync"
+  PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$KIT/scripts/auto-sync.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/spine-motion-sync.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/spine-motion-sync.log</string>
+</dict>
+</plist>
+PL
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo "✓ 自動同步：開機登入時與每小時 git pull main 並更新全域說明（紀錄：~/Library/Logs/spine-motion-sync.log）"
+fi
 
 if python3 -c 'import PIL' 2>/dev/null; then
   echo "✓ Python + Pillow：可以產生預覽 GIF"
