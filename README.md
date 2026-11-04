@@ -82,7 +82,7 @@ Mac 上還會裝一個自動同步排程：登入時與每小時 `git pull` main
 
 先按「範例：圖層角色」看正確的結果，「範例：有問題的圖層」看接縫檢查怎麼抓出肩膀沒畫、頭在下巴切平的圖。
 
-完整的角色範例（圖層、關節、動作結果與驗證報告）在 [`examples/characters/`](examples/characters/)：[大盜猴](examples/characters/bandit-monkey/)是 AI 生圖的真實交件（含自訂疊圖順序 `layers.json`），[拳擊手](examples/characters/boxer/)是照規格畫的測試角色，[AI 拳擊手](examples/characters/ai-boxer/)是交件 → 驗收回饋 → 重出合格的完整範例。
+完整的角色範例（圖層、關節、動作結果與驗證報告）在 [`examples/characters/`](examples/characters/)：[大盜猴](examples/characters/bandit-monkey/)是 AI 生圖的真實交件（含自訂疊圖順序 `layers.json`），[拳擊手](examples/characters/boxer/)是照規格畫的測試角色，[AI 拳擊手](examples/characters/ai-boxer/)是交件 → 驗收回饋 → 重出合格的完整範例，[stand34 測試角色](examples/characters/stand34-test/)是正面 3/4 站姿模板的幾何測試角色。
 
 ---
 
@@ -163,6 +163,7 @@ npm run demo
 | [`docs/配方格式.md`](docs/配方格式.md) | 配方 JSON 完整說明、自訂軌道 |
 | [`docs/流暢原則與Spine技巧.md`](docs/流暢原則與Spine技巧.md) | 為什麼這樣會順；Spine runtime 不寫在手冊裡的行為；給動畫師的建議 |
 | [`docs/一行做角色.md`](docs/一行做角色.md) | `spine-motion character`：交件資料夾一行做完、輸出、看報告修問題 |
+| [`docs/站姿模板.md`](docs/站姿模板.md) | stand34 正面 3/4 站姿模板：圖層、換圖、8 個表演動作、參數 |
 | [`docs/生圖交付規格.md`](docs/生圖交付規格.md) | 給 GPT / Gemini / MJ 的姿勢、圖層、提示詞與交件檢查；工作室訊息對照 |
 
 ## 驗證
@@ -198,4 +199,4 @@ npm run demo
 - 只支援 **Spine 4.3** 匯出的 JSON（4.3 runtime 只讀新的 `constraints` 格式，舊檔的 IK／物理會被忽略，所以工具會直接拒絕並說明）。
 - 動作只作用在骨骼上，不產生網格變形（deform）、顏色、附件切換。逐幀序列（例如 Iron Jaw 的出拳影片）不在本工具範圍。
 - 預設的「好看」數值來自 Iron Jaw 實測與動畫常規，套到不同畫風時請用 `intensity`、`size` 等參數調整，再用預覽確認。
-- 從圖層建立角色目前只有一套模板：面向右的側面拳擊架式。正面角色、四足、長裙披風要另做模板。
+- 從圖層建立角色有兩套模板：面向右的側面拳擊架式，以及正面 3/4 站姿（stand34，見 `docs/站姿模板.md`）。四足、長裙披風要另做模板。

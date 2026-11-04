@@ -15,6 +15,8 @@ export interface CatalogEntry {
   category: 'character' | 'symbol';
   /** Suggested animation name in the exported file. */
   name: string;
+  /** Character template the preset is written for; absent = the boxing guard template (and generic rigs). */
+  template?: 'stand34';
   params: Record<string, ParamUi>;
 }
 
@@ -101,6 +103,47 @@ export const CATALOG: CatalogEntry[] = [
     id: 'celebrate', confidence: 1, category: 'character', name: 'celebrate',
     basis: '雙手要是 IK 目標骨才好看：拳套舉到頭頂、上下揮動；側面角色的前手舉起時會經過臉前',
     params: { angle: r(20, 90, 1, '°'), elbow: r(-80, 90, 1, '°'), angleBack: r(20, 120, 1, '°'), elbowBack: r(-80, 100, 1, '°'), swing: r(10, 180, 5, '°'), lift: r(20, 250, 5), bounce: r(0, 40, 1), hair: HAIR },
+  },
+  // stand34 template (front three-quarter standing performer)
+  {
+    id: 'stand-idle', confidence: 2, category: 'character', template: 'stand34', name: 'idle',
+    basis: 'stand34：呼吸、重心移動、肩髖反向、頭帽延遲、尾巴 S 形波、眨眼換圖；測試角色流暢度 100、循環無接縫',
+    params: { duration: r(2, 8, 0.5, 's'), blinkAt: r(0.2, 3.8, 0.1, 's') },
+  },
+  {
+    id: 'stand-fidget', confidence: 2, category: 'character', template: 'stand34', name: 'idle_fidget',
+    basis: 'stand34：近手到眼鏡捏住轉兩下；捏點相對手腕要依畫稿調 pinchX/pinchY',
+    params: { pinchX: r(-0.08, 0.08, 0.002), pinchY: r(-0.08, 0.08, 0.002) },
+  },
+  {
+    id: 'hypno-gaze', confidence: 2, category: 'character', template: 'stand34', name: 'gaze',
+    basis: 'stand34：預備下沉 → 拉眼鏡換螺旋眼 → 衝向盤面遠手指出（throw 事件 0.62 s）→ 停住微顫 → 收回',
+    params: { reach: r(0.7, 0.99, 0.01), pointUp: r(-20, 40, 1, '°'), lunge: r(0, 0.08, 0.002), pull: r(0, 0.08, 0.002), pinchX: r(-0.08, 0.08, 0.002), pinchY: r(-0.08, 0.08, 0.002) },
+  },
+  {
+    id: 'hat-tip', confidence: 2, category: 'character', template: 'stand34', name: 'react_small',
+    basis: 'stand34：抓帽緣換手、帽子抬起歪向盤面、點頭笑',
+    params: { gripX: r(-0.15, 0.15, 0.005), gripY: r(-0.1, 0.1, 0.005) },
+  },
+  {
+    id: 'shrug', confidence: 2, category: 'character', template: 'stand34', name: 'gaze_dud',
+    basis: 'stand34：雙手攤開換張開手、聳肩歪頭皺眉',
+    params: {},
+  },
+  {
+    id: 'hat-raise', confidence: 2, category: 'character', template: 'stand34', name: 'win_big',
+    basis: 'stand34：下蹲蓄力、抓帽、彈起摘帽高舉（帽子保持正立）；結尾接 stand-cheer 第 0 格；彈起高度不超過腿的伸直餘裕',
+    params: { gripX: r(-0.15, 0.15, 0.005), gripY: r(-0.1, 0.1, 0.005) },
+  },
+  {
+    id: 'stand-cheer', confidence: 2, category: 'character', template: 'stand34', name: 'win_big_loop',
+    basis: 'stand34：帽子在頭上畫圈、遠手打拍、身體往下彈（不超過腿的伸直餘裕）',
+    params: {},
+  },
+  {
+    id: 'hat-on', confidence: 2, category: 'character', template: 'stand34', name: 'win_big_end',
+    basis: 'stand34：從大獎循環把帽子戴回、雙手回待機位；換圖全部回到待機的那張',
+    params: { gripX: r(-0.15, 0.15, 0.005), gripY: r(-0.1, 0.1, 0.005) },
   },
 ];
 

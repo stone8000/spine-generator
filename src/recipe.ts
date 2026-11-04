@@ -135,6 +135,7 @@ function retimeAndScale(out: PresetOutput, timeScale: number, amplitude: number)
     screen: out.screen.map((s) => ({ ...s, motion: amp(retime(s.motion, timeScale), s.channel) })),
     local: out.local.map((l) => ({ ...l, motion: amp(retime(l.motion, timeScale), l.channel) })),
     events: out.events.map((e) => ({ ...e, time: Math.round((e.time / timeScale) * 1000) / 1000 })),
+    swaps: out.swaps?.map((w) => ({ ...w, keys: w.keys.map((k) => ({ ...k, time: Math.round((k.time / timeScale) * 1000) / 1000 })) })),
   };
 }
 
@@ -187,6 +188,7 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
         const tf = frames.get(t)!;
         return { root: { x: a.worldX, y: a.worldY }, mid: { x: b.worldX, y: b.worldY }, target: { x: tf.worldX, y: tf.worldY }, lengths: [a.length, b.length], reach: a.length + b.length };
       },
+      hasAttachment: (slot, name) => !!json.skins?.find((k: SpineJson) => k.name === 'default')?.attachments?.[slot]?.[name],
     };
 
     let out: PresetOutput = { duration: anim.duration ?? 0, loop: anim.loop ?? false, screen: [], local: [], events: [], physics: [] };
@@ -265,7 +267,21 @@ export function compileRecipe(skeleton: SpineJson, recipe: Recipe): CompileResul
     }
     const keep = out.physics.filter((p) => !p.bake);
     if (keep.length) upsertPhysics(json, keep);
+    writeSwaps(json, anim.name, out.swaps ?? []);
     summary.push({ name: anim.name, duration: D, loop: out.loop, timelines: baked.length, keys: keyCount, events: out.events.map((e) => `${e.name}@${e.time}s`), physics: keep.length, bakedPhysics: toBake.length });
   }
   return { json, summary };
+}
+
+/** Attachment timelines for the swaps a preset keyed; swaps naming a drawing the delivery doesn't have are dropped. */
+function writeSwaps(json: SpineJson, name: string, swaps: NonNullable<PresetOutput['swaps']>): void {
+  const skin = json.skins?.find((k: SpineJson) => k.name === 'default')?.attachments ?? {};
+  const slots: SpineJson = {};
+  for (const w of swaps) {
+    if (!skin[w.slot]) continue;
+    const keys = w.keys.filter((k) => k.name === null || skin[w.slot][k.name]).sort((a, b) => a.time - b.time);
+    if (!keys.length) continue;
+    slots[w.slot] = { attachment: keys.map((k) => (k.time ? { time: k.time, name: k.name } : { name: k.name })) };
+  }
+  if (Object.keys(slots).length) json.animations[name].slots = slots;
 }

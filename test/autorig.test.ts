@@ -87,7 +87,7 @@ test('legs drawn almost straight: no character preset snaps the knees (softened 
   assert.ok(rig.json.constraints.filter((c: { name: string; softness?: number }) => c.name.startsWith('leg') && c.softness! > 0).length === 2);
   const size = estimateSize(rig.json);
   assert.ok(Math.abs(size - 2.27) < 0.02, `size ${size}`);
-  for (const c of CATALOG.filter((x) => x.category === 'character')) {
+  for (const c of CATALOG.filter((x) => x.category === 'character' && !x.template)) {
     const { json, summary } = compileRecipe(rig.json, { roles: rig.roles, size, animations: [{ name: c.name, preset: c.id }] });
     const [r] = checkSkeleton(json, { only: [c.name], loops: summary[0].loop ? [c.name] : [] });
     const legs = r.issues.filter((i) => i.severity !== 'info' && /shin|thigh/.test(i.message));

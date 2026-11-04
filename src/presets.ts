@@ -26,6 +26,8 @@ export interface PresetContext {
   worldPosition(bone: string): { x: number; y: number };
   /** When `target` drives a 2-bone IK chain: the chain's root and the target in the setup pose (world), and its reach. */
   ikChain(target: string): { root: { x: number; y: number }; mid: { x: number; y: number }; target: { x: number; y: number }; lengths: [number, number]; reach: number } | undefined;
+  /** Whether the skeleton's slot has this attachment (for swap presets that work with or without a drawing). */
+  hasAttachment?(slot: string, name: string): boolean;
 }
 
 export interface PresetOutput {
@@ -35,6 +37,8 @@ export interface PresetOutput {
   local: LocalTrack[];
   events: EventKey[];
   physics: PhysicsSpec[];
+  /** Attachment swaps: which drawing a slot shows from each time on (null hides the slot). */
+  swaps?: { slot: string; keys: { time: number; name: string | null }[] }[];
 }
 
 export interface PresetDef {
@@ -47,7 +51,7 @@ export interface PresetDef {
   build(c: PresetContext): PresetOutput;
 }
 
-const empty = (duration: number, loop: boolean): PresetOutput => ({ duration, loop, screen: [], local: [], events: [], physics: [] });
+export const empty = (duration: number, loop: boolean): PresetOutput => ({ duration, loop, screen: [], local: [], events: [], physics: [] });
 
 /** Helpers for loop presets authored on a 60-step cycle (the Iron Jaw measurement grid). */
 function cycle(c: PresetContext, T: number, k: number) {
@@ -78,7 +82,7 @@ function chainPhysics(chain: string[], prefix: string, o: { inertia: number; str
  * Hair / ribbon chains follow the body through Spine physics. 'keys' simulates it and bakes the follow-through into
  * editable rotate keys; 'physics' keeps the physics constraints for the runtime.
  */
-function hairFollow(c: PresetContext, out: PresetOutput) {
+export function hairFollow(c: PresetContext, out: PresetOutput) {
   const hair = c.roleList('hair');
   const mode = c.param<string>('hair', 'keys');
   if (hair.length && mode !== 'none') {
@@ -123,7 +127,7 @@ function overshoot(amount: number, frequency: number, damping: number): (s: numb
   return (s) => k * Math.exp(-z * w * s) * Math.sin(wd * s);
 }
 
-function fn(duration: number, value: (t: number) => number, breaks: number[] = [], loop = false): Motion1D {
+export function fn(duration: number, value: (t: number) => number, breaks: number[] = [], loop = false): Motion1D {
   return { duration, loop, value, breaks };
 }
 
@@ -737,3 +741,7 @@ export function findPreset(id: string): PresetDef {
   if (!p) throw new Error(`沒有預設 "${id}"。可用：${PRESETS.map((x) => x.id).join(', ')}`);
   return p;
 }
+
+// stand34 template motions (front three-quarter standing performer)
+import { STAND34_PRESETS } from './presets34.ts';
+PRESETS.push(...STAND34_PRESETS);

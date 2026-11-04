@@ -67,6 +67,10 @@ spine-motion character <交件資料夾>            # 加 --no-gif 只要 2 秒
 
 交件是 zip、圖超過 2048 px、或要排程監看交件資料夾時，用 intake 流程（跟工作室同一套檢查）：`python -I scripts/intake_images.py prepare <交件> <工作資料夾>` → `npm run intake -- <工作資料夾>` → `python -I scripts/intake_images.py render <工作資料夾>`，看 `output/report.md`。
 
+### 正面 3/4 站姿角色（stand34）
+
+表演型角色（催眠師、魔術師、主持人）用 stand34 模板：同一個 `character` 指令，工具從檔名（`head_idle`、`hand_r_pinch`…）自動認出。有換圖（表情、手勢、帽子拿在手上）、帽子與眼鏡獨立、尾巴與燕尾物理跟隨、鞋子貼地。8 個動作：idle、idle_fidget、gaze（throw 事件）、react_small、gaze_dud、win_big、win_big_loop、win_big_end。圖層表、姿勢、參數見 `docs/站姿模板.md`；測試角色在 `examples/characters/stand34-test/`。
+
 ## 2. 已經有 Spine 4.3 骨架 JSON → 配方產生動畫
 
 ```bash
@@ -99,4 +103,4 @@ spine-motion preview 動畫.json                 # 離線預覽頁
 
 ## 限制
 
-只支援 Spine 4.3 JSON；從圖層建角色只有「面向右側面拳擊架式」一套模板（正面、四足、長裙披風要另做）；只動骨骼，不做網格變形。
+只支援 Spine 4.3 JSON；從圖層建角色有兩套模板：「面向右側面拳擊架式」與「正面 3/4 站姿（stand34）」（四足、長裙披風要另做）；只動骨骼，不做網格變形。

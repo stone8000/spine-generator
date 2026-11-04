@@ -10,6 +10,8 @@
 node bin/spine-motion.js character <交件資料夾>          # 裝成全域後：spine-motion character <交件資料夾>
 ```
 
+正面 3/4 站姿的表演型角色用 stand34 模板（同一個指令，從檔名自動認出），見 [`docs/站姿模板.md`](docs/站姿模板.md)。
+
 輸出 `<角色名>_spine/`：Spine 4.3 JSON + `images/`、`報告.md`（先讀它的結論）、`預覽.gif`、`預覽.html`、`joints.json`。說明見 [`docs/一行做角色.md`](docs/一行做角色.md)。
 
 **大盜猴是樣板角色**：說到大盜猴就要和 `examples/characters/bandit-monkey/monkey.json` 一模一樣（`npm test` 會檢查），不要改它來配合工具。
@@ -19,7 +21,7 @@ node bin/spine-motion.js character <交件資料夾>          # 裝成全域後�
 ## 開發
 
 - Node 22.18 以上，直接執行 TypeScript（不需要 build）。`npm ci` 安裝。
-- `npm test`（62 個測試，用真正的 Spine 4.3.13 runtime 量測）、`npm run typecheck`。改了 `src/studio/` 要 `npm run studio` 重新打包 `studio/spine-motion-studio.html`。
+- `npm test`（75 個測試，用真正的 Spine 4.3.13 runtime 量測）、`npm run typecheck`。改了 `src/studio/` 要 `npm run studio` 重新打包 `studio/spine-motion-studio.html`。
 - 預覽 GIF 用 `scripts/trial/render_gif.py`（Python 3 + Pillow）。
 - `src/recipe.ts`、`src/roles.ts`、`src/solve.ts`、`src/cli.ts`、`package.json` 是 CRLF，其他是 LF：編輯時保留原本的換行。
 - 回覆使用者一律用繁體中文。
