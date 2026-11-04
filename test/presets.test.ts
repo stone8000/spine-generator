@@ -12,6 +12,9 @@ import { parseSkeleton, sampleAnimation } from '../src/spineJson.ts';
 
 const fighter = JSON.parse(readFileSync(new URL('../examples/rigs/fighter.json', import.meta.url), 'utf8'));
 const symbol = JSON.parse(readFileSync(new URL('../examples/rigs/symbol.json', import.meta.url), 'utf8'));
+const stand34 = JSON.parse(readFileSync(new URL('../examples/rigs/stand34.json', import.meta.url), 'utf8'));
+const stand34Roles = JSON.parse(readFileSync(new URL('../examples/rigs/stand34.roles.json', import.meta.url), 'utf8'));
+const STAND34_IDS = new Set(['stand-idle', 'stand-fidget', 'hypno-gaze', 'hat-tip', 'shrug', 'hat-raise', 'stand-cheer', 'hat-on']);
 
 const fighterRoles = {
   hip: 'hip', chest: 'chest', head: 'head', root: 'root', body: 'hip',
@@ -25,8 +28,9 @@ const SYMBOL_PRESETS = new Set(['symbol-land', 'symbol-win', 'symbol-win-loop', 
 function build(id: string, params: Record<string, unknown> = {}) {
   const isSymbol = SYMBOL_PRESETS.has(id);
   const anim: RecipeAnimation = { name: id.replace(/-/g, '_'), preset: id, params };
-  const recipe: Recipe = { roles: isSymbol ? symbolRoles : fighterRoles, animations: [anim] };
-  const { json, summary } = compileRecipe(isSymbol ? symbol : fighter, recipe);
+  const is34 = STAND34_IDS.has(id);
+  const recipe: Recipe = { roles: isSymbol ? symbolRoles : is34 ? stand34Roles : fighterRoles, animations: [anim], ...(is34 && { maxSegment: 0.1 }) };
+  const { json, summary } = compileRecipe(isSymbol ? symbol : is34 ? stand34 : fighter, recipe);
   const data = parseSkeleton(json);
   const s = sampleAnimation(data, anim.name, { rate: 240, seconds: summary[0].duration, loop: summary[0].loop });
   return { json, summary: summary[0], s, name: anim.name };

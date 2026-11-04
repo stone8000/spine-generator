@@ -12,6 +12,7 @@ import { poseUsage, type AngleBudget, type PoseUsage } from './poseChecks.ts';
 import { parseSkeleton, type SpineJson } from './spineJson.ts';
 import { estimateSize } from './roles.ts';
 import { JOINTS, CANVAS, type Joints, type CanvasSize } from './rigTemplate.ts';
+import { isStand34, guessJoints34, buildRig34, STAND34_ANIMS, STAND34_LABELS, STAND34_SEQUENCE, type Joints34 } from './stand34.ts';
 
 /** The six character motions every delivery is tried with. */
 export const CHARACTER_ANIMS: RecipeAnimation[] = [
@@ -48,6 +49,8 @@ export interface CharacterOptions {
   sortSlots?: boolean;
   /** Angle each joint's art holds (budget.json); joints turned past it are listed per animation. */
   budget?: AngleBudget;
+  /** Which template the layers are drawn to; detected from the layer names when absent. */
+  template?: 'boxer' | 'stand34';
 }
 
 export interface CharacterResult {
@@ -64,11 +67,14 @@ export interface CharacterResult {
   seams: SeamReport[];
   /** Joint turns, flips and frame 0 per animation. */
   pose: PoseUsage[];
+  template: 'boxer' | 'stand34';
 }
 
 export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOptions = {}): CharacterResult {
   const name = opts.name ?? 'character';
   const canvas = opts.canvas ?? CANVAS;
+  const template = opts.template ?? (isStand34(alphas.keys()) ? 'stand34' : 'boxer');
+  if (template === 'stand34') return buildStand34(alphas, opts, name, canvas);
   const joints = opts.joints ?? guessJoints(alphas);
   const rig = buildRig(joints, [...alphas.keys()], name, canvas, {
     order: opts.sortSlots ? undefined : opts.order,
@@ -88,7 +94,22 @@ export function buildCharacter(alphas: Map<string, AlphaMap>, opts: CharacterOpt
   const checks = checkSkeleton(json, { loops });
   const seams = checkSeams(json, alphas);
   const pose = poseUsage(json, opts.budget);
-  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, orderIssues, size, summary, checks, seams, pose };
+  return { json, joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, orderIssues, size, summary, checks, seams, pose, template: 'boxer' };
+}
+
+function buildStand34(alphas: Map<string, AlphaMap>, opts: CharacterOptions, name: string, canvas: CanvasSize): CharacterResult {
+  const joints = (opts.joints as unknown as Joints34 | undefined) ?? guessJoints34(alphas);
+  const rig = buildRig34(joints, [...alphas.keys()], name, canvas, opts.order);
+  if (rig.missing.length) throw new Error(`缺少必要圖層：${rig.missing.map((m) => m + '.png').join('、')}`);
+  const orderIssues = checkDrawOrder(rig.json.slots.map((x: { name: string }) => x.name));
+  const size = estimateSize(rig.json);
+  const animations = STAND34_ANIMS.map((a) => (opts.params?.[a.name] ? { ...a, params: opts.params[a.name] } : a));
+  const { json, summary } = compileRecipe(rig.json, { fps: 30, facing: 1, size, roles: rig.roles, animations, maxSegment: 0.1 });
+  const loops = summary.filter((s) => s.loop).map((s) => s.name);
+  const checks = checkSkeleton(json, { loops });
+  const seams = checkSeams(json, alphas);
+  const pose = poseUsage(json, opts.budget);
+  return { json, joints: joints as unknown as Joints, guessed: !opts.joints, missing: rig.missing, warnings: rig.warnings, orderIssues, size, summary, checks, seams, pose, template: 'stand34' };
 }
 
 /** An idle whose frame 0 is further than this from the drawn pose visibly jumps when the game swaps the still art for it. */
@@ -138,7 +159,7 @@ export function previewFrames(r: CharacterResult, alphas: Map<string, AlphaMap>)
   const { json, summary } = r;
   const FPS = 25;
   const dur = (n: string) => summary.find((s) => s.name === n)!.duration;
-  const SEQ: { anim: string; loop: boolean; seconds: number }[] = [
+  const BOXER_SEQ = (): { anim: string; loop: boolean; seconds: number }[] => [
     { anim: 'idle', loop: true, seconds: dur('idle') },
     { anim: 'punch', loop: false, seconds: dur('punch') },
     { anim: 'idle', loop: true, seconds: 0.8 },
@@ -148,6 +169,13 @@ export function previewFrames(r: CharacterResult, alphas: Map<string, AlphaMap>)
     { anim: 'celebrate', loop: false, seconds: dur('celebrate') },
     { anim: 'idle', loop: true, seconds: 0.6 },
   ];
+  const SEQ = r.template === 'stand34'
+    ? STAND34_SEQUENCE.map((anim, k) => {
+        const loop = !!summary.find((x) => x.name === anim)?.loop;
+        return { anim, loop, seconds: anim === 'idle' ? (k === 0 ? dur('idle') : 0.8) : loop ? 2 * dur(anim) : dur(anim) };
+      })
+    : BOXER_SEQ();
+  const labels = r.template === 'stand34' ? STAND34_LABELS : LABELS;
   const data = parseSkeleton(json);
   const sk = new Skeleton(data);
   const stateData = new AnimationStateData(data);
@@ -178,8 +206,16 @@ export function previewFrames(r: CharacterResult, alphas: Map<string, AlphaMap>)
       state.apply(sk);
       sk.updateWorldTransform(Physics.update);
       const slots: [string, number[]][] = [];
+      // the offline runtime has no textures, so read the drawing each slot shows from the animation's swap keys
+      const cur = state.tracks[0];
+      const curName = cur?.animation?.name;
+      const curTime = cur ? (cur.loop && cur.animation!.duration > 0 ? cur.trackTime % cur.animation!.duration : Math.min(cur.trackTime, cur.animation!.duration)) : 0;
+      const swapKeys = (curName && json.animations?.[curName]?.slots) || {};
       for (const slot of json.slots) {
-        const att = skin[slot.name]?.[slot.attachment];
+        let live: string | null = slot.attachment;
+        for (const k of swapKeys[slot.name]?.attachment ?? []) if ((k.time ?? 0) <= curTime + 1e-6) live = k.name ?? null;
+        if (!live) continue; // hidden this frame
+        const att = skin[slot.name]?.[live];
         if (!att) continue;
         const p = sk.findBone(slot.bone)!.getAppliedPose();
         const rr = ((att.rotation ?? 0) * Math.PI) / 180, cr = Math.cos(rr), sr = Math.sin(rr);
@@ -191,8 +227,8 @@ export function previewFrames(r: CharacterResult, alphas: Map<string, AlphaMap>)
         // image px (y down) → world: E + M·(ix, −iy)
         const ex = qx - m00 * (att.width / 2) + m01 * (att.height / 2);
         const ey = qy - m10 * (att.width / 2) + m11 * (att.height / 2);
-        slots.push([slot.attachment, [m00, m01, m10, m11, ex, ey]]);
-        const [bx0, by0, bx1, by1] = box.get(slot.attachment)!;
+        slots.push([live, [m00, m01, m10, m11, ex, ey]]);
+        const [bx0, by0, bx1, by1] = box.get(live)!;
         for (const [ix, iy] of [[bx0, by0], [bx1, by0], [bx0, by1], [bx1, by1]]) {
           const wx = ex + m00 * ix - m01 * iy, wy = ey + m10 * ix - m11 * iy;
           X0 = Math.min(X0, wx); X1 = Math.max(X1, wx); Y0 = Math.min(Y0, wy); Y1 = Math.max(Y1, wy);
@@ -203,7 +239,7 @@ export function previewFrames(r: CharacterResult, alphas: Map<string, AlphaMap>)
         const q = b.getAppliedPose();
         return [q.worldX, q.worldY, q.worldX + q.a * b.data.length, q.worldY + q.c * b.data.length];
       });
-      raw.push({ label: LABELS[seg.anim] ?? seg.anim, slots, root: [root.worldX, root.worldY], bones });
+      raw.push({ label: labels[seg.anim] ?? seg.anim, slots, root: [root.worldX, root.worldY], bones });
     }
   }
 
